@@ -24,6 +24,7 @@ permanent (gen4), other weather lasts 5 turns from when we first saw it.
 
     python -m porygon.search runs/<run>/best_model.zip --opponent heuristic --n-battles 100
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
+    python -m porygon.search runs/new.zip --opponent search --opp-model runs/old.zip   # same search, other prior
 
 Defaults (1000 ms, 4 samples, prior_weight 0.25, no top-k) come from head-to-head tuning: prior 0.25 beat 0.5
 (which beat 1.0 and top-k 3), 0.1 and 8 samples were no better, 1000 ms beat 300 ms.
@@ -625,14 +626,17 @@ async def run(args: argparse.Namespace) -> None:
     player = SearchPlayer(policy, **cfg, workers=args.workers,
                           account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     opp_conf = AccountConfiguration(f"opp{args.opponent[:8]}{tag}", None)
+    opp_policy = load_policy(args.opp_model) if args.opp_model else policy
     if args.opponent == "search":
         opp_cfg = config(args, "opp_")
-        opponent = SearchPlayer(policy, **opp_cfg, workers=args.workers, account_configuration=opp_conf, **common)
+        opponent = SearchPlayer(opp_policy, **opp_cfg, workers=args.workers, account_configuration=opp_conf, **common)
         desc = f"SearchPlayer({', '.join(f'{k}={v}' for k, v in opp_cfg.items())})"
     else:
-        opponent = (PolicyPlayer(policy, account_configuration=opp_conf, **common) if args.opponent == "policy"
+        opponent = (PolicyPlayer(opp_policy, account_configuration=opp_conf, **common) if args.opponent == "policy"
                     else BASELINES[args.opponent](account_configuration=opp_conf, **common))
         desc = args.opponent
+    if args.opp_model:
+        desc += f" [{args.opp_model}]"
     start = time.time()
     half = args.n_battles // 2  # alternate who challenges (p1 / p2)
     await player.battle_against(opponent, n_battles=args.n_battles - half)
@@ -650,6 +654,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("model")
     p.add_argument("--opponent", default="policy", choices=["policy", "search", *BASELINES])
+    p.add_argument("--opp-model", help="network for the policy/search opponent (default: MODEL)")
     p.add_argument("--n-battles", type=int, default=50)
     p.add_argument("--ms", type=int, default=1000, help="MCTS time per determinization per decision")
     p.add_argument("--samples", type=int, default=4, help="determinizations per decision")
