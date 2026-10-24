@@ -62,10 +62,13 @@ ANCHOR=${ANCHOR:-${RESUME:-}}
 # toward --mem) and are mirrored to $RUN / $POOL_NFS every 10 min and at the end; resuming reads
 # the mirror. Locally only the two newest checkpoints are kept once mirrored.
 LOCAL=${TMPDIR:-/tmp}/porygon-$SLURM_JOB_ID; mkdir -p "$LOCAL/run" "$LOCAL/pool"
-cp -p "$POOL_NFS"/*.pt "$LOCAL/pool/" 2>/dev/null || true
+# Copy the pool in the background, newest first (cp -p keeps mtimes, which PoolOpponent's "recent"
+# picks use): copying ~1.3 GB took over an hour on a slow day. Until snapshots arrive, pool
+# battles fall back to the baseline bots; PoolOpponent re-lists the directory every battle.
+( ls -t "$POOL_NFS"/*.pt 2>/dev/null | while read -r f; do cp -p "$f" "$LOCAL/pool/.tmp" && mv "$LOCAL/pool/.tmp" "$LOCAL/pool/${f##*/}"; done ) &
 export POOL_DIR=$LOCAL/pool
 mirror() {  # status = the rsyncs'; pruning (no checkpoints yet is fine) must not fail it
-  rsync -a "$LOCAL/run/" "$RUN/" && rsync -a "$LOCAL/pool/" "$POOL_NFS/" || return 1
+  rsync -a "$LOCAL/run/" "$RUN/" && rsync -a --exclude .tmp "$LOCAL/pool/" "$POOL_NFS/" || return 1
   { ls -t "$LOCAL"/run/checkpoints/*.zip 2>/dev/null || true; } | tail -n +3 | xargs -r rm -f
 }
 ( while sleep 600; do mirror || echo "$(date -u +%T) mirror FAILED" >&2; done ) &
