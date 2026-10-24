@@ -176,6 +176,7 @@ def main():
     if args.resume:
         model = algo.load(args.resume, env=env, device=args.device)
         model.learning_rate, model.lr_schedule = thesis_lr, thesis_lr  # schedules aren't pickled reliably
+        model.tensorboard_log = str(args.run_dir / "tb")  # not the folder of the run the checkpoint came from
         n_steps = max(1, args.rollout // env.num_envs)  # keep ~args.rollout transitions per update
         if n_steps != model.n_steps:
             model.n_steps = n_steps
