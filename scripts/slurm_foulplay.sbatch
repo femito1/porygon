@@ -46,19 +46,24 @@ OUT=runs/foulplay-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
 LOGS=${TMPDIR:-/tmp}/porygon-fp-$SLURM_JOB_ID; mkdir -p "$LOGS"  # Foul Play logs are chatty: keep them off the shared disk
 PORT=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 + 15 ))
 scripts/start_servers.sh 1 "$PORT"
-trap 'pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $PORT\$" || true
+LOOPS=()
+trap 'kill "${LOOPS[@]}" 2>/dev/null || true
+      pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $PORT\$" || true
       pkill -u "$USER" -f "run.py --websocket-uri ws://localhost:$PORT/" || true
       cp "$LOGS"/fp0.log "$OUT"/ 2>/dev/null || true; rm -rf "$LOGS"' EXIT
 
 NAMES=()
 for ((i = 0; i < K; i++)); do
   NAMES+=("fp${SLURM_JOB_ID}x$i")
-  (cd "$FP" && setsid nohup .venv/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
+  # restarted if it exits (e.g. "timed out during handshake" while the server is still slow to start)
+  (cd "$FP" && while true; do .venv/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
      --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format gen4randombattle \
-     --search-time-ms 1000 --run-count 1000000 --log-level INFO < /dev/null > "$LOGS/fp$i.log" 2>&1 &)
+     --search-time-ms 1000 --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) \
+     < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
+  LOOPS+=($!)
 done
 for ((i = 0; i < K; i++)); do  # importing on a slow shared disk can take minutes
-  for ((t = 0; t < 1200; t++)); do grep -q "Waiting for a" "$LOGS/fp$i.log" && continue 2; sleep 1; done
+  for ((t = 0; t < 1800; t++)); do grep -qs "Waiting for a" "$LOGS/fp$i.log" && continue 2; sleep 1; done
   echo "Foul Play instance $i did not start:" >&2; tail -20 "$LOGS/fp$i.log" >&2; exit 1
 done
 echo "$K Foul Play instances up on port $PORT"
