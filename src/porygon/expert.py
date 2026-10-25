@@ -33,12 +33,10 @@ from stable_baselines3 import PPO
 from torch.nn import functional as F
 
 from porygon.encoder import embed_battle
-from porygon.env import local_server
+from porygon.env import SHAPING, local_server
 from porygon.model import load_policy
 from porygon.search import SearchPlayer
 from porygon.train import parse_ports
-
-SHAPING = (0.05, 0.05, 0.0)  # porygon.train --shaping defaults (fainted, hp, status)
 
 
 def state_value(battle: AbstractBattle, shaping: tuple[float, float, float] = SHAPING) -> float:

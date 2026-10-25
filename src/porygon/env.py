@@ -23,6 +23,9 @@ def local_server(port: int) -> ServerConfiguration:
     )
 
 
+SHAPING = (0.05, 0.05, 0.0)  # porygon.train --shaping defaults (fainted, hp, status)
+
+
 class SelfPlayEnv(SinglesEnv):
     """Both sides are driven by the learner; every decision of both players is a sample.
 

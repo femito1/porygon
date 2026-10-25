@@ -45,12 +45,14 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `src/porygon/train.py` | PPO training with eval-vs-baselines, checkpoints, pool snapshots |
 | `src/porygon/search.py` | `SearchPlayer`: network-guided poke-engine MCTS over sampled opponent sets |
 | `src/porygon/engine_worker.py` | poke-engine search subprocesses used by `search.py` |
+| `src/porygon/lookahead.py` | one-turn lookahead scored by the network's value (`--value-weight`), leaf encoder |
 | `src/porygon/expert.py` | expert iteration: search-vs-search training data, distillation into a checkpoint |
 | `src/porygon/evaluate.py`, `tournament.py` | win rates vs baseline bots; round-robin Elo |
 | `src/porygon/play.py` | play on the official server (ladder / challenges) |
 | `src/gloria/` | alias of `porygon` (the old name) so checkpoints saved before the rename load |
 | `scripts/slurm_train.sbatch` | PPO training job for the Imperial DoC Slurm cluster |
 | `scripts/slurm_foulplay.sbatch` | Foul Play benchmark job (local Showdown server on the node) |
+| `scripts/slurm_search.sbatch` | `porygon.search` head-to-heads on a node (fits next to a training job) |
 | `scripts/slurm_expert.sbatch`, `slurm_distill.sbatch` | expert-iteration jobs: generate + distil, or re-distil existing data |
 | `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
 | `scripts/pod_*.sh`, `pod_retry_deploy.py`, `vm_setup.sh` | fallbacks: RunPod pods, a plain GPU VM |
@@ -125,6 +127,7 @@ it needs the network's value inside the search first.
 python -m porygon.evaluate MODEL --port 8000 --n-battles 500 [--anchor OLD_MODEL]
 python -m porygon.tournament MODEL_A MODEL_B ... --n-battles 100   # .zip checkpoints or pool .pt
 python -m porygon.search MODEL --opponent {policy,heuristic,max_power,search} --n-battles 100
+python -m porygon.search MODEL --opponent search --value-weight 0.5 --device cuda   # mix in the value lookahead
 python -m porygon.play MODEL --username USER --accept 5 --search                # search player; --ladder N for the ladder
 python scripts/vs_foulplay.py MODEL --player search --opponents fpa0 fpa1 ...   # setup in its docstring
 sbatch scripts/slurm_foulplay.sbatch MODEL 100 4   # the same on a cluster node: 4 Foul Play instances x 100 games

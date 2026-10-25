@@ -36,7 +36,7 @@ from poke_env.concurrency import handle_threaded_coroutines
 
 from porygon.env import PolicyPlayer, local_server
 from porygon.model import load_policy
-from porygon.search import SearchPlayer
+from porygon.search import CONFIG, SearchPlayer, add_value_args
 
 log = logging.getLogger("vs_foulplay")
 
@@ -120,6 +120,7 @@ async def main():
     p.add_argument("--samples", type=int, default=4, help="SearchPlayer: determinizations per decision")
     p.add_argument("--prior-weight", type=float, default=0.25)
     p.add_argument("--top-k", type=int, default=None)
+    add_value_args(p)
     p.add_argument("--workers", type=int, default=None, help="SearchPlayer engine processes (default cores-1)")
     p.add_argument("--search-timeout", type=float, default=30, help="seconds beyond --ms before a search is killed")
     p.add_argument("--accept-timeout", type=float, default=45)
@@ -130,20 +131,20 @@ async def main():
     a = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
 
-    policy = load_policy(a.model)
+    policy = load_policy(a.model, a.device)
     tag = random.randint(0, 10**5)
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)
+    cfg = {k: getattr(a, k) for k in CONFIG}
     players = []
     for i, _ in enumerate(a.opponents):
         acc = AccountConfiguration(f"{a.player[:3]}{tag}x{i}", None)
-        players.append(SearchPlayer(policy, ms=a.ms, samples=a.samples, prior_weight=a.prior_weight,
-                                    top_k=a.top_k, workers=a.workers, account_configuration=acc, **common)
+        players.append(SearchPlayer(policy, **cfg, workers=a.workers, account_configuration=acc, **common)
                        if a.player == "search" else PolicyPlayer(policy, account_configuration=acc, **common))
     for pl in players:
         if a.player == "search":
             guard_pool(pl.pool, a.search_timeout)
-    desc = (f"SearchPlayer(ms={a.ms}, samples={a.samples}, prior_weight={a.prior_weight}, top_k={a.top_k})"
+    desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())})"
             if a.player == "search" else "PolicyPlayer")
     start = time.time()
     with open(a.results, "a") as out:

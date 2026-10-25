@@ -9,6 +9,9 @@ Each decision we
      worker processes, `porygon.engine_worker`);
   3. score each legal action as  mean visit share over samples + prior_weight * network prob,
      optionally only among the network's top-k actions, and play the argmax.
+With value_weight > 0 the visit shares are mixed with a one-turn lookahead scored by the network's value
+(`porygon.lookahead`), run on the same determinizations while the engine searches:
+  share = (1 - value_weight) * visit share + value_weight * lookahead equilibrium probability.
 Any failure (conversion, engine panic, unmappable choice) falls back to the network's argmax.
 
 Tracked beyond what poke-env exposes (`History`, read from the battle log): Wish and Future Sight / Doom
@@ -72,6 +75,8 @@ SCREEN_TURNS = {SideCondition.REFLECT: ("reflect", 5), SideCondition.LIGHT_SCREE
                 SideCondition.SAFEGUARD: ("safeguard", 5), SideCondition.MIST: ("mist", 5),
                 SideCondition.LUCKY_CHANT: ("lucky_chant", 5), SideCondition.TAILWIND: ("tailwind", 3)}
 SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effects poke-env may still hold
+# two-turn moves; the engine marks the charging turn with a volatile of the same name
+CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
 EV, IV = 85, 31
 
 
@@ -398,8 +403,14 @@ def make_side(mons: list[pe.Pokemon], active: Pokemon | None, active_idx: int, c
     volatiles = {e.name.replace("_", "") for e in effects}
     if last_move is None:
         volatiles.discard("ENCORE")  # the engine panics on encore without a last-used move
-    if active is not None and active.must_recharge:
+    recharge = active is not None and active.must_recharge
+    if role == (battle.player_role or "p1"):  # poke-env's flag can be stale; our request is not
+        recharge = recharge and all(m.id == "recharge" for m in battle.available_moves)
+    if recharge:
         volatiles.add("MUSTRECHARGE")
+    preparing = active.preparing_move if active is not None else None
+    if preparing is not None and preparing.id in CHARGE_MOVES:
+        volatiles.add(preparing.id.upper())
     sub = mons[active_idx].maxhp // 4 if Effect.SUBSTITUTE in effects else 0
     # Wish heals at the end of the turn after it was used, Future Sight hits at the end of the 2nd turn after
     wish = 2 - (battle.turn - hist.wish[role]) if role in hist.wish else 0
@@ -507,18 +518,26 @@ def engine_pool(workers: int | None = None) -> EnginePool:
 
 
 class SearchPlayer(Player):
-    """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search."""
+    """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; value_weight=1
+    replaces the engine search by the value lookahead (value_top_k: only the network's top-k actions,
+    value_min_prob: chance outcomes below it are dropped)."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
-                 prior_weight: float = 0.25, top_k: int | None = None, workers: int | None = None,
+                 prior_weight: float = 0.25, top_k: int | None = None, value_weight: float = 0.0,
+                 value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
                  seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
-        self.prior_weight, self.top_k = prior_weight, top_k
+        self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.pool = engine_pool(workers)
+        self.lookahead = None
+        if value_weight > 0:
+            from porygon.lookahead import Lookahead  # it imports this module
+            self.lookahead = Lookahead(policy, value_top_k, value_min_prob)
         self.rng = random.Random(seed)
         self.weather_seen: dict[str, tuple[Weather, int]] = {}
-        self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0}
+        self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0,
+                      "value_failed": 0}
 
     def network_probs(self, battle: Battle) -> tuple[np.ndarray, np.ndarray]:
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.float32)
@@ -540,11 +559,34 @@ class SearchPlayer(Player):
             seen = self.weather_seen[battle.battle_tag] = (current, max(battle.turn - 1, 0))
         return seen[1]
 
-    async def visit_shares(self, battle: Battle) -> np.ndarray:
-        """Mean (over determinizations) MCTS visit share of every poke-env action index."""
+    async def visit_shares(self, battle: Battle, probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Mean (over determinizations) MCTS visit share of every poke-env action index, mixed with the value
+        lookahead's (value_weight). If one of the two fails, the other is used alone."""
         first_seen = self._weather_first_seen(battle)
         hist = History(battle)
         convs = [convert(battle, self.rng, first_seen, hist) for _ in range(self.samples)]
+        w = self.value_weight
+        value = (asyncio.create_task(asyncio.to_thread(self.lookahead.shares, battle, convs, probs, mask))
+                 if self.lookahead else None)
+        try:
+            mcts = await self.mcts_shares(convs) if w < 1 else None
+        except Exception:
+            if value is None:
+                raise
+            mcts = None
+        if value is not None:
+            try:
+                v = await value
+            except Exception as e:
+                if mcts is None:
+                    raise
+                self.stats["value_failed"] += 1
+                log.warning("value lookahead failed in %s turn %d: %s", battle.battle_tag, battle.turn, e)
+            else:
+                return v if mcts is None else (1 - w) * mcts + w * v
+        return mcts
+
+    async def mcts_shares(self, convs: list[Converted]) -> np.ndarray:
         results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms) for c in convs),
                                        return_exceptions=True)
         shares, ok, errors = np.zeros(10), 0, []
@@ -590,7 +632,7 @@ class SearchPlayer(Player):
         self.stats["decisions"] += 1
         if mask.sum() > 1:
             try:
-                shares = await self.visit_shares(battle)
+                shares = await self.visit_shares(battle, probs, mask)
                 if not shares.any():
                     return SinglesEnv.action_to_order(np.int64(action), battle, strict=False)
                 if shares[mask > 0].sum() < 0.5:  # the engine searched mostly illegal options -> desync
@@ -613,12 +655,15 @@ class SearchPlayer(Player):
 
 # ---------------------------------------------------------------- CLI
 
+CONFIG = ("ms", "samples", "prior_weight", "top_k", "value_weight", "value_top_k", "value_min_prob")
+
+
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
-    return {k: getattr(args, prefix + k) for k in ("ms", "samples", "prior_weight", "top_k")}
+    return {k: getattr(args, prefix + k) for k in CONFIG}
 
 
 async def run(args: argparse.Namespace) -> None:
-    policy = load_policy(args.model)
+    policy = load_policy(args.model, args.device)
     tag = random.randint(0, 10**6)
     common = dict(battle_format=args.format, server_configuration=local_server(args.port),
                   max_concurrent_battles=args.concurrency, log_level=40)
@@ -626,7 +671,7 @@ async def run(args: argparse.Namespace) -> None:
     player = SearchPlayer(policy, **cfg, workers=args.workers,
                           account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     opp_conf = AccountConfiguration(f"opp{args.opponent[:8]}{tag}", None)
-    opp_policy = load_policy(args.opp_model) if args.opp_model else policy
+    opp_policy = load_policy(args.opp_model, args.device) if args.opp_model else policy
     if args.opponent == "search":
         opp_cfg = config(args, "opp_")
         opponent = SearchPlayer(opp_policy, **opp_cfg, workers=args.workers, account_configuration=opp_conf, **common)
@@ -646,8 +691,19 @@ async def run(args: argparse.Namespace) -> None:
     print(f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())}) vs {desc}: won {won}/{n} = "
           f"{won / max(n, 1):.1%}  (±{1.96 * np.sqrt(max(won, 1) * max(n - won, 1) / max(n, 1) ** 3):.1%})")
     print(f"decisions {s['decisions']}, searched {s['searched']}, fallbacks {s['fallbacks']}, "
-          f"failed samples {s['failed_samples']}, "
+          f"failed samples {s['failed_samples']}, value lookahead failed {s['value_failed']}, "
           f"same as network argmax {s['agree'] / max(s['searched'], 1):.1%}, {time.time() - start:.0f}s")
+
+
+FLOAT_CONFIG = ("prior_weight", "value_weight", "value_min_prob")
+
+
+def add_value_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--value-weight", type=float, default=0.0,
+                   help="weight of the network-valued one-turn lookahead (1 = no engine search)")
+    p.add_argument("--value-top-k", type=int, default=None, help="lookahead: only the network's top-k actions")
+    p.add_argument("--value-min-prob", type=float, default=0.0, help="lookahead: drop rarer chance outcomes")
+    p.add_argument("--device", default="cpu", help="for the network (cuda: the lookahead's leaf values)")
 
 
 def main():
@@ -660,9 +716,9 @@ def main():
     p.add_argument("--samples", type=int, default=4, help="determinizations per decision")
     p.add_argument("--prior-weight", type=float, default=0.25, help="0 = pure engine search")
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
-    for k in ("ms", "samples", "prior-weight", "top-k"):  # the --opponent search configuration
-        p.add_argument(f"--opp-{k}", type=float if k == "prior-weight" else int,
-                       default=p.get_default(k.replace("-", "_")))
+    add_value_args(p)
+    for k in CONFIG:  # the --opponent search configuration
+        p.add_argument(f"--opp-{k.replace('_', '-')}", type=float if k in FLOAT_CONFIG else int, default=p.get_default(k))
     p.add_argument("--concurrency", type=int, default=3, help="simultaneous battles")
     p.add_argument("--workers", type=int, default=None, help="engine processes (default: cores - 1)")
     p.add_argument("--format", default="gen4randombattle")

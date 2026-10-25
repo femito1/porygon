@@ -16,7 +16,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 from stable_baselines3.common.vec_env import VecMonitor
 
 from porygon.async_env import AsyncBattles, AsyncPPO, pool_battle, selfplay_battle
-from porygon.env import ConcatVecEnv, make_selfplay_vec_env
+from porygon.env import SHAPING, ConcatVecEnv, make_selfplay_vec_env
 from porygon.evaluate import Evaluator
 from porygon.model import MaskedPolicy, load_policy
 from porygon.pool import make_pool_vec_env, save_snapshot
@@ -139,7 +139,7 @@ def main():
     # potential-based shaping, so with gamma ~ 1 it speeds up credit assignment without changing
     # the optimal policy. Thesis: none (pass 0 0 0).
     p.add_argument("--shaping", type=float, nargs=3, metavar=("FAINTED", "HP", "STATUS"),
-                   default=(0.05, 0.05, 0.0))
+                   default=SHAPING)
     p.add_argument("--eval-every", type=int, default=2_500_000)
     p.add_argument("--eval-battles", type=int, default=200)
     # The baseline bots saturate around 85%; a fixed earlier checkpoint keeps showing progress.
