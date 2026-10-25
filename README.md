@@ -30,8 +30,9 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 - **vs Foul Play** (pmariglia's search bot, 1000 ms/move, `scripts/slurm_foulplay.sbatch`): the search
   player with the 400M network wins **55.0% ± 4.9%** (219-179, 400 battles; 49% with the 91M
   network); the raw network alone 16.5% (91M, 200).
-- **Ladder**: 13-7 with the raw 60M network. Showdown locks datacenter IPs, so ladder games
-  must run from a home connection.
+- **Ladder**: 13-7 with the raw 60M network. Both accounts used (femito, porygon-agent) are now
+  flagged as bots by Showdown, which matches bots only with players who opted in to bot games;
+  datacenter IPs are locked too, so ladder games could only run from a home connection anyway.
 
 ## Layout
 | | |
@@ -39,6 +40,7 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `src/porygon/encoder.py` | battle → flat observation (field token + 12 mon tokens) |
 | `src/porygon/model.py` | `BattleTransformer` features extractor, `MaskedPolicy` (per-action pointer head) |
 | `src/porygon/env.py` | `SelfPlayEnv` (poke-env PettingZoo env), vectorised self-play, `PolicyPlayer` |
+| `src/porygon/async_env.py` | asynchronous rollouts (`--async-envs`, `--overlap-update`) |
 | `src/porygon/pool.py` | opponent pool: past policy snapshots + baseline bots |
 | `src/porygon/train.py` | PPO training with eval-vs-baselines, checkpoints, pool snapshots |
 | `src/porygon/search.py` | `SearchPlayer`: network-guided poke-engine MCTS over sampled opponent sets |
@@ -47,10 +49,12 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `src/porygon/evaluate.py`, `tournament.py` | win rates vs baseline bots; round-robin Elo |
 | `src/porygon/play.py` | play on the official server (ladder / challenges) |
 | `src/gloria/` | alias of `porygon` (the old name) so checkpoints saved before the rename load |
-| `scripts/slurm_train.sbatch`, `slurm_expert.sbatch` | training / expert-iteration jobs for the Imperial DoC Slurm cluster |
+| `scripts/slurm_train.sbatch` | PPO training job for the Imperial DoC Slurm cluster |
+| `scripts/slurm_foulplay.sbatch` | Foul Play benchmark job (local Showdown server on the node) |
+| `scripts/slurm_expert.sbatch`, `slurm_distill.sbatch` | expert-iteration jobs: generate + distil, or re-distil existing data |
 | `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
-| `scripts/pod_*.sh`, `pod_retry_deploy.py` | the same on RunPod |
-| `scripts/vs_foulplay.py`, `slurm_foulplay.sbatch` | benchmark vs Foul Play, locally or as a cluster job |
+| `scripts/pod_*.sh`, `pod_retry_deploy.py`, `vm_setup.sh` | fallbacks: RunPod pods, a plain GPU VM |
+| `scripts/vs_foulplay.py` | benchmark vs Foul Play (setup in its docstring) |
 | `scripts/ladder_watchdog.sh` | long ladder sessions |
 
 ## Setup
@@ -67,14 +71,17 @@ node scripts/build_data.js             # only if the Showdown checkout changes
 Locally (throughput is bound by battle latency, ~3 cores per Showdown server):
 ```bash
 scripts/start_servers.sh 10 8100        # stop: scripts/stop_servers.sh
-python -m porygon.train --n-battles 60 --pool-battles 30 --ports 8100-8109 \
-  --resume runs/<run>/final_model.zip --total-steps 400_000_000
+python -m porygon.train --async-envs --overlap-update --n-battles 60 --pool-battles 30 \
+  --ports 8100-8109 --resume runs/<run>/final_model.zip --total-steps 500_000_000
 ```
-`--async-envs` steps every battle independently (`porygon.async_env`) instead of in lockstep, where
-each step waits for the slowest of ~150 battles; on a cluster node 48 battles went from 1,776 to
-2,940 steps/s. `--overlap-update` (with `--async-envs`) also keeps battles running during the PPO
-update, which otherwise takes ~10 of every ~21 s; the training data is then at most one update
-old. `--pool-battles` adds battles against frozen snapshots (one added every `--snapshot-every` steps)
+Use `--async-envs --overlap-update`. In the default lockstep mode every step waits for the slowest of
+~150 battles, and throughput decays within a job (1.4k → ~800 steps/s over 20 h). `--async-envs`
+steps every battle independently and `--overlap-update` keeps battles running during the PPO
+update (training data at most one update old); together they held 1.5–2.0k steps/s for 17 h on a
+30-core node. The PPO update (~17 s per 40k steps) is now the bottleneck, and evals stall
+collection for ~200 s every 2.5M steps.
+
+`--pool-battles` adds battles against frozen snapshots (one added every `--snapshot-every` steps)
 and baseline bots; seed a pool with `python -m porygon.pool CKPTS... --out DIR`. `--anchor CKPT`
 also evaluates against a fixed earlier checkpoint and picks `best_model` by that score: the
 baseline bots saturate around 85%, while head-to-head win rates keep showing progress.
@@ -84,8 +91,11 @@ On the Imperial DoC cluster, from the repo copy on `/vol/bitbucket`: put `SHA=<s
 `ANCHOR=<zip or .pt>` (default `RESUME`) in `slurm.env`
 (never `sbatch --export`, which gets jobs held), then `sbatch scripts/slurm_train.sbatch`. The job
 sets itself up, resumes from the newest checkpoint, uses all cores it gets (30 on a 32-core
-request), stops after 70.5 h, and pushes results every 20 min; extra arguments go to
-`porygon.train` (e.g. `sbatch scripts/slurm_train.sbatch --async-envs`). Fetch them anywhere with
+request), stops after 70.5 h, keeps its run directory and pool on the node's local disk (mirrored
+to the shared disk every 10 min, at the end and on `scancel`) and pushes results every 20 min;
+extra arguments go to `porygon.train`: `sbatch scripts/slurm_train.sbatch --async-envs --overlap-update`.
+`TOTAL` sets the learning-rate schedule (`x` = steps / `TOTAL`), so raise it to continue a
+finished run. Fetch results anywhere with
 `scripts/fetch_results.sh` (into `runs/remote/`). The push holds only the newest checkpoint and
 pool snapshots, so the fetch also copies them into `runs/archive/` (never overwritten); the full
 history stays on the cluster (`runs/<run>/checkpoints/` every 5M steps, `$POOL/*.pt` every 2.5M)
@@ -100,45 +110,42 @@ python -m porygon.expert generate MODEL --games 9000 --out data/round1 --ports 8
 python -m porygon.expert distill MODEL data/round1 --out runs/round1/distilled.zip      # --temperature 0.25
 ```
 Raw visit shares are much flatter than the move search plays (entropy ~1.2 vs the network's
-~0.25 nats), so `distill` sharpens them (`--temperature`). On the cluster: `EXPERT_MODEL=<zip>`
-(and optionally `EXPERT_GAMES`, `EXPERT_MS`) in `slurm.env`, then `sbatch scripts/slurm_expert.sbatch`;
-9000 battles (~1M decisions) take ~12 h on 30 cores. Search scores positions with poke-engine's own
-evaluation, so gains won't compound over rounds the way AlphaZero's do; that would need the
-network's value inside the search.
+~0.33 nats), so `distill` sharpens them (`--temperature`, default 0.25) and keeps the policy near
+its source (`--beta`, KL weight). On the cluster: `EXPERT_MODEL=<zip>` (optionally `EXPERT_GAMES`,
+`EXPERT_MS`) in `slurm.env`, then `sbatch scripts/slurm_expert.sbatch` (9,000 battles ≈ 640k
+decisions, ~11 h on 30 cores); re-distil existing data with `scripts/slurm_distill.sbatch`.
+
+**Result so far: no gain.** One round from 300M: the distilled raw network at best tied its source
+(50.5% with `--beta 3`; worse with weaker anchoring), and search with it as prior tied search with
+the source. A 300 ms search scored by poke-engine's evaluation is no better a teacher than PPO;
+it needs the network's value inside the search first.
 
 ## Evaluate / play
 ```bash
 python -m porygon.evaluate MODEL --port 8000 --n-battles 500 [--anchor OLD_MODEL]
 python -m porygon.tournament MODEL_A MODEL_B ... --n-battles 100   # .zip checkpoints or pool .pt
 python -m porygon.search MODEL --opponent {policy,heuristic,max_power,search} --n-battles 100
-python -m porygon.play MODEL --username USER --ladder 50 --search                # search player on the ladder
+python -m porygon.play MODEL --username USER --accept 5 --search                # search player; --ladder N for the ladder
 python scripts/vs_foulplay.py MODEL --player search --opponents fpa0 fpa1 ...   # setup in its docstring
 sbatch scripts/slurm_foulplay.sbatch MODEL 100 4   # the same on a cluster node: 4 Foul Play instances x 100 games
 PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_GAMES 4   # from a home connection
 ```
 
 ## Roadmap
-1. **Beat Foul Play convincingly**: 55% ± 5% with the 400M network is only just above even. Next:
-   the network's value inside the search (also what expert iteration needs), the search-fidelity
-   gaps below, and more PPO (+30 Elo per 100M steps at 400M).
-2. **Throughput decay**: lockstep steps/s fell within a job (1.4k → ~770 over 20 h) while CPU per
-   step and memory stayed flat, i.e. growing waits on the slowest battle. Check whether
-   `--async-envs` (first used from 278M) removes it; if not, restart jobs every ~12 h.
-3. **Ladder the search player** from a home connection for a real rating (the thesis bot: 1693
-   Elo / 79.5% GXE over 200 games): `play.py --search`, on the dedicated account `porygon-agent`.
-   Its first searches found no match for 40+ min while gen4 games were running; find out why.
-4. **Search fidelity**: poke-engine's gen4 build doesn't model taunt/encore/confusion durations;
-   Substitute HP is assumed ¼; occasional `NonFinite` engine panics (sample skipped). Tune time
-   per move further (1 s beat 0.3 s; more may help).
-5. **Expert iteration** (`porygon.expert`): one round from 300M (9,000 battles, 640k decisions)
-   did not help: the distilled raw network at best tied its source (50.5% with a strong KL to it),
-   and search with it as prior tied search with the source. A 300 ms search scored by poke-engine's
-   evaluation is no better a teacher than PPO; revisit once search uses the network's value.
-6. **Throughput**: async collection runs at ~4k steps/s but a rollout cycle is ~21 s, ~10 of them
-   the PPO update. Measure `--overlap-update` on a job (untested on the cluster: the shared disk was
-   too slow for an A/B run), watching for GIL contention between the collector thread and the
-   update; then try more battles per job and make the best combination the default.
-7. **gen9randombattle**: encoder, action space (tera) and vocab already support it; start from the
+1. **Beat Foul Play convincingly** (now 55.0% ± 4.9%). The biggest lever is the network's value
+   inside the search instead of poke-engine's evaluation; that is also what expert iteration needs
+   to work. Then the search-fidelity gaps (3) and more PPO (400M beats 300M 54.5%, ~+30 Elo per
+   100M steps; raise `TOTAL` to continue).
+2. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
+   runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
+   no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
+   needs team handling and usage-stat opponent priors instead of random-battle sets, and retraining.
+3. **Search fidelity**: poke-engine's gen4 build doesn't model taunt/encore/confusion durations;
+   Substitute HP is assumed ¼; occasional `NonFinite` engine panics (sample skipped). Tune time per
+   move (1 s beat 0.3 s; more may help).
+4. **Training speed**: make the PPO update cheaper (bf16, fewer/larger minibatches) and stop evals
+   from stalling collection; log per-rollout collect / update / callback time to find the rest.
+5. **gen9randombattle**: encoder, action space (tera) and vocab already support it; start from the
    gen4 model.
 
 ## Credits
