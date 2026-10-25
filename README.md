@@ -27,8 +27,9 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   Every checkpoint beats every earlier one; gains slow after ~30M steps.
 - **Search** (`porygon.search`, defaults 1000 ms/move, 4 sampled opponent sets, prior weight
   0.25): beats the raw network ~75% head-to-head and the heuristic bot 97%.
-- **vs Foul Play** (pmariglia's search bot, 1000 ms/move): search player 49% (204 battles), raw
-  network 16.5% (200).
+- **vs Foul Play** (pmariglia's search bot, 1000 ms/move, `scripts/slurm_foulplay.sbatch`): the search
+  player with the 400M network wins **55.0% ± 4.9%** (219-179, 400 battles; 49% with the 91M
+  network); the raw network alone 16.5% (91M, 200).
 - **Ladder**: 13-7 with the raw 60M network. Showdown locks datacenter IPs, so ladder games
   must run from a home connection.
 
@@ -117,7 +118,9 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
 ```
 
 ## Roadmap
-1. **Re-run the search player vs Foul Play** with the 400M network (last measured 49% with 91M).
+1. **Beat Foul Play convincingly**: 55% ± 5% with the 400M network is only just above even. Next:
+   the network's value inside the search (also what expert iteration needs), the search-fidelity
+   gaps below, and more PPO (+30 Elo per 100M steps at 400M).
 2. **Throughput decay**: lockstep steps/s fell within a job (1.4k → ~770 over 20 h) while CPU per
    step and memory stayed flat, i.e. growing waits on the slowest battle. Check whether
    `--async-envs` (first used from 278M) removes it; if not, restart jobs every ~12 h.
