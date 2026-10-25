@@ -20,8 +20,8 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 ## Results (gen4randombattle)
 - **Raw network** (PPO, 60M steps): 83.5% vs `SimpleHeuristicsPlayer`, 95% vs `MaxBasePowerPlayer`
   (200 battles each) — on par with the thesis (~80% at 40M, ~85% at 150M steps). Continued
-  training with the opponent pool holds ~84–86% vs the heuristic bot past 90M steps, but still
-  improves head-to-head: 121M beats 101M 56.5% and 60M 60% (200 battles each).
+  training with the opponent pool keeps improving: 300M beats 60M 71.5% and the heuristic bot
+  89.5% (400 battles each); 400M beats 300M 54.5% (600 battles).
 - **Checkpoint tournament** (`porygon.tournament`, 100 battles per pairing, Bradley-Terry Elo):
   60M 1711 > 46M 1663 > 31M 1635 > 10M 1493 > heuristic 1457 > 2.5M 1346 > max_power 1194.
   Every checkpoint beats every earlier one; gains slow after ~30M steps.
@@ -115,9 +115,7 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
 ```
 
 ## Roadmap
-1. **Finish the current long run** (opponent pool, resumed from 60M; stops at 300M steps, ~2026-10-23):
-   fetch it, run a tournament against the 60M/91M/121M models, and re-run the search player vs
-   Foul Play with the newest network.
+1. **Re-run the search player vs Foul Play** with the 400M network (last measured 49% with 91M).
 2. **Throughput decay**: lockstep steps/s fell within a job (1.4k → ~770 over 20 h) while CPU per
    step and memory stayed flat, i.e. growing waits on the slowest battle. Check whether
    `--async-envs` (first used from 278M) removes it; if not, restart jobs every ~12 h.
@@ -127,9 +125,10 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
 4. **Search fidelity**: poke-engine's gen4 build doesn't model taunt/encore/confusion durations;
    Substitute HP is assumed ¼; occasional `NonFinite` engine panics (sample skipped). Tune time
    per move further (1 s beat 0.3 s; more may help).
-5. **Expert iteration** (`porygon.expert`, built and smoke-tested): run a round on the cluster
-   from the 300M model, then evaluate the distilled network (tournament vs the source, search
-   head-to-head, Foul Play). If it is stronger, resume PPO from it.
+5. **Expert iteration** (`porygon.expert`): one round from 300M (9,000 battles, 640k decisions)
+   did not help: the distilled raw network at best tied its source (50.5% with a strong KL to it),
+   and search with it as prior tied search with the source. A 300 ms search scored by poke-engine's
+   evaluation is no better a teacher than PPO; revisit once search uses the network's value.
 6. **Throughput**: async collection runs at ~4k steps/s but a rollout cycle is ~21 s, ~10 of them
    the PPO update. Measure `--overlap-update` on a job (untested on the cluster: the shared disk was
    too slow for an A/B run), watching for GIL contention between the collector thread and the
