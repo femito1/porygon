@@ -49,7 +49,8 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `scripts/slurm_train.sbatch`, `slurm_expert.sbatch` | training / expert-iteration jobs for the Imperial DoC Slurm cluster |
 | `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
 | `scripts/pod_*.sh`, `pod_retry_deploy.py` | the same on RunPod |
-| `scripts/vs_foulplay.py`, `ladder_watchdog.sh` | benchmark vs Foul Play; long ladder sessions |
+| `scripts/vs_foulplay.py`, `slurm_foulplay.sbatch` | benchmark vs Foul Play, locally or as a cluster job |
+| `scripts/ladder_watchdog.sh` | long ladder sessions |
 
 ## Setup
 ```bash
@@ -111,6 +112,7 @@ python -m porygon.tournament MODEL_A MODEL_B ... --n-battles 100   # .zip checkp
 python -m porygon.search MODEL --opponent {policy,heuristic,max_power,search} --n-battles 100
 python -m porygon.play MODEL --username USER --ladder 50 --search                # search player on the ladder
 python scripts/vs_foulplay.py MODEL --player search --opponents fpa0 fpa1 ...   # setup in its docstring
+sbatch scripts/slurm_foulplay.sbatch MODEL 100 4   # the same on a cluster node: 4 Foul Play instances x 100 games
 PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_GAMES 4   # from a home connection
 ```
 
