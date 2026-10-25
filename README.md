@@ -30,6 +30,11 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 - **vs Foul Play** (pmariglia's search bot, 1000 ms/move, `scripts/slurm_foulplay.sbatch`): the search
   player with the 400M network wins **55.0% ± 4.9%** (219-179, 400 battles; 49% with the 91M
   network); the raw network alone 16.5% (91M, 200).
+- **Value lookahead** (`porygon.lookahead`: one turn ahead, every outcome scored by the network's value,
+  400M network, 300 battles each, `scripts/slurm_search.sbatch`): on its own it beats the raw network
+  only 53.3% ± 5.6%; mixed half-and-half into the search it beats the search 53.7% ± 5.6%, and replacing
+  the engine search with it loses 42.7% ± 5.6%. One turn of the network's value is not yet a better
+  evaluation than poke-engine's 1 s search.
 - **Ladder**: 13-7 with the raw 60M network. Both accounts used (femito, porygon-agent) are now
   flagged as bots by Showdown, which matches bots only with players who opted in to bot games;
   datacenter IPs are locked too, so ladder games could only run from a home connection anyway.
@@ -135,10 +140,11 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
 ```
 
 ## Roadmap
-1. **Beat Foul Play convincingly** (now 55.0% ± 4.9%). The biggest lever is the network's value
-   inside the search instead of poke-engine's evaluation; that is also what expert iteration needs
-   to work. Then the search-fidelity gaps (3) and more PPO (400M beats 300M 54.5%, ~+30 Elo per
-   100M steps; raise `TOTAL` to continue).
+1. **Beat Foul Play convincingly** (now 55.0% ± 4.9%). The network's value in the search, tried as a
+   one-turn lookahead, gives at most a small gain (see Results); deeper use of it (value at the leaves
+   of the engine's MCTS) needs a poke-engine fork and is only worth it once the value is sharper. More
+   PPO (400M beats 300M 54.5%, ~+30 Elo per 100M steps; raise `TOTAL` to continue) and the
+   search-fidelity gaps (3) remain.
 2. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
