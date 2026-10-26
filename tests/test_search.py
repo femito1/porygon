@@ -84,6 +84,40 @@ def test_switch_in_resets_last_move_and_protect_counter():
     assert st.side_two.side_conditions.protect == 1 and st.side_one.side_conditions.protect == 0
 
 
+def test_timed_volatiles_and_substitute_health():
+    log = """|turn|1
+|move|p2a: Jirachi|Taunt|p1a: Blissey
+|-start|p1a: Blissey|move: Taunt
+|move|p1a: Blissey|Confuse Ray|p2a: Jirachi
+|-start|p2a: Jirachi|confusion
+|turn|2
+|-activate|p2a: Jirachi|confusion
+|move|p2a: Jirachi|Substitute|p2a: Jirachi
+|-start|p2a: Jirachi|Substitute
+|-damage|p2a: Jirachi|75/100
+|move|p1a: Blissey|Ice Beam|p2a: Jirachi
+|-activate|p2a: Jirachi|Substitute|[damage]
+|turn|3"""
+    st = state_of(battle_from(log))
+    assert st.side_one.volatile_statuses == {"TAUNT"} and st.side_one.volatile_status_durations.taunt == 2
+    assert st.side_two.volatile_statuses == {"CONFUSION", "SUBSTITUTE"}  # no stray NONE (patched round trip)
+    assert st.side_two.volatile_status_durations.confusion == 1
+    full = st.side_two.pokemon[0].maxhp // 4
+    assert 1 <= st.side_two.substitute_health < full  # Ice Beam took some of it
+    st = state_of(battle_from(log + "\n|-end|p2a: Jirachi|Substitute\n|-end|p2a: Jirachi|confusion\n|turn|4"))
+    assert st.side_two.substitute_health == 0 and st.side_two.volatile_statuses == set()
+
+
+def test_engine_is_patched_for_gen4_durations():
+    """scripts/build_engine.sh: a taunt that has lasted 2 turns may end now (1/3), so the turn branches."""
+    st = state_of(battle_from("|turn|1\n|move|p2a: Jirachi|Taunt|p1a: Blissey\n|-start|p1a: Blissey|move: Taunt"
+                              "\n|move|p1a: Blissey|Seismic Toss|p2a: Jirachi\n|turn|2\n|turn|3"))
+    theirs = st.side_two.pokemon[0].moves[0].id.lower()
+    branches = pe.generate_instructions(st, "seismictoss", theirs)
+    assert any("RemoveVolatileStatus SideOne: TAUNT" in repr(b.instruction_list) for b in branches), \
+        "unpatched poke-engine: run scripts/build_engine.sh"
+
+
 def test_sample_species_follows_team_rules():
     rng = random.Random(0)
     for _ in range(200):

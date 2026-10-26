@@ -1,0 +1,379 @@
+diff --git a/src/genx/generate_instructions.rs b/src/genx/generate_instructions.rs
+index 3b173fe..99e66b9 100644
+--- a/src/genx/generate_instructions.rs
++++ b/src/genx/generate_instructions.rs
+@@ -2014,7 +2014,125 @@ fn generate_instructions_from_existing_status_conditions(
+     }
+ }
+ 
++// Gen 4 taunt, encore and confusion last a random number of turns (taunt 3-5 turns, encore 4-8 turns,
++// confusion ends on the 2nd-5th move attempt after it starts). The attacker's elapsed count is kept in
++// `volatile_status_durations`; before each move every such effect either ends, with the chance that the
++// duration is exactly this turn given it has lasted this long, or continues with its count incremented.
++#[cfg(feature = "gen4")]
++fn gen4_duration_end_chance(n: i8, lo: i8, hi: i8) -> f32 {
++    // P(D = n | D >= n) for D uniform on lo..=hi
++    if n < lo {
++        0.0
++    } else if n >= hi {
++        1.0
++    } else {
++        1.0 / (hi - n + 1) as f32
++    }
++}
++
++#[cfg(feature = "gen4")]
++fn gen4_duration_branches(
++    state: &mut State,
++    attacking_side: &SideReference,
++    incoming_instructions: &StateInstructions,
++) -> Vec<StateInstructions> {
++    state.apply_instructions(&incoming_instructions.instruction_list);
++    let side = state.get_side_immutable(attacking_side);
++    let durations = &side.volatile_status_durations;
++    let mut timed: Vec<(PokemonVolatileStatus, i8, f32)> = vec![];
++    for (vs, elapsed, lo, hi) in [
++        (PokemonVolatileStatus::TAUNT, durations.taunt, 3, 5),
++        (PokemonVolatileStatus::ENCORE, durations.encore, 4, 8),
++        (PokemonVolatileStatus::CONFUSION, durations.confusion, 2, 5),
++    ] {
++        if side.volatile_statuses.contains(&vs) {
++            timed.push((vs, elapsed, gen4_duration_end_chance(elapsed + 1, lo, hi)));
++        }
++    }
++    state.reverse_instructions(&incoming_instructions.instruction_list);
++
++    let mut branches = vec![];
++    for mask in 0..(1u8 << timed.len()) {
++        let mut branch = incoming_instructions.clone();
++        for (i, (vs, elapsed, end_chance)) in timed.iter().enumerate() {
++            let ends = mask & (1 << i) != 0;
++            branch.update_percentage(if ends { *end_chance } else { 1.0 - *end_chance });
++            branch
++                .instruction_list
++                .push(Instruction::ChangeVolatileStatusDuration(
++                    ChangeVolatileStatusDurationInstruction {
++                        side_ref: *attacking_side,
++                        volatile_status: *vs,
++                        amount: if ends { -*elapsed } else { 1 },
++                    },
++                ));
++            if ends {
++                branch
++                    .instruction_list
++                    .push(Instruction::RemoveVolatileStatus(
++                        RemoveVolatileStatusInstruction {
++                            side_ref: *attacking_side,
++                            volatile_status: *vs,
++                        },
++                    ));
++            }
++        }
++        if branch.percentage > 0.0 {
++            branches.push(branch);
++        }
++    }
++    branches
++}
++
+ pub fn generate_instructions_from_move(
++    state: &mut State,
++    choice: &mut Choice,
++    defender_choice: &Choice,
++    attacking_side: SideReference,
++    incoming_instructions: StateInstructions,
++    final_instructions: &mut Vec<StateInstructions>,
++    branch_on_damage: bool,
++) {
++    #[cfg(feature = "gen4")]
++    if choice.category != MoveCategory::Switch && choice.move_id != Choices::NONE {
++        let mut branches = gen4_duration_branches(state, &attacking_side, &incoming_instructions);
++        if let Some(last) = branches.pop() {
++            for branch in branches {
++                generate_move_instructions(
++                    state,
++                    &mut choice.clone(),
++                    defender_choice,
++                    attacking_side,
++                    branch,
++                    final_instructions,
++                    branch_on_damage,
++                );
++            }
++            // the caller may read the choice afterwards: the last branch uses it
++            generate_move_instructions(
++                state,
++                choice,
++                defender_choice,
++                attacking_side,
++                last,
++                final_instructions,
++                branch_on_damage,
++            );
++            return;
++        }
++    }
++    generate_move_instructions(
++        state,
++        choice,
++        defender_choice,
++        attacking_side,
++        incoming_instructions,
++        final_instructions,
++        branch_on_damage,
++    );
++}
++
++fn generate_move_instructions(
+     state: &mut State,
+     choice: &mut Choice,
+     defender_choice: &Choice,
+@@ -2295,7 +2413,7 @@ pub fn generate_instructions_from_move(
+             new_choice.sleep_talk_move = true;
+             let mut sleep_talk_instructions = incoming_instructions.clone();
+             sleep_talk_instructions.update_percentage(1.0 / num_choices);
+-            generate_instructions_from_move(
++            generate_move_instructions(
+                 state,
+                 &mut new_choice,
+                 defender_choice,
+diff --git a/src/genx/state.rs b/src/genx/state.rs
+index 518f3a1..b1473aa 100644
+--- a/src/genx/state.rs
++++ b/src/genx/state.rs
+@@ -1420,6 +1420,28 @@ impl State {
+                     side.volatile_status_durations.taunt = 0;
+                     false
+                 }
++                PokemonVolatileStatus::ENCORE => {
++                    instructions.push(Instruction::ChangeVolatileStatusDuration(
++                        ChangeVolatileStatusDurationInstruction {
++                            side_ref: *side_ref,
++                            volatile_status: *pkmn_volatile_status,
++                            amount: -1 * side.volatile_status_durations.encore,
++                        },
++                    ));
++                    side.volatile_status_durations.encore = 0;
++                    false
++                }
++                PokemonVolatileStatus::CONFUSION => {
++                    instructions.push(Instruction::ChangeVolatileStatusDuration(
++                        ChangeVolatileStatusDurationInstruction {
++                            side_ref: *side_ref,
++                            volatile_status: *pkmn_volatile_status,
++                            amount: -1 * side.volatile_status_durations.confusion,
++                        },
++                    ));
++                    side.volatile_status_durations.confusion = 0;
++                    false
++                }
+                 _ => false,
+             };
+ 
+diff --git a/src/state.rs b/src/state.rs
+index 2bf6db8..a001c25 100644
+--- a/src/state.rs
++++ b/src/state.rs
+@@ -1192,7 +1192,8 @@ impl Side {
+ 
+         let mut vs_bitset = VolatileStatusBitset::default();
+         if split[8] != "" {
+-            for item in split[8].split(":") {
++            // serialize() leaves a trailing ':' after every volatile status
++            for item in split[8].split(":").filter(|item| !item.is_empty()) {
+                 vs_bitset.insert(PokemonVolatileStatus::from_str(item).unwrap());
+             }
+         }
+diff --git a/tests/test_battle_mechanics.rs b/tests/test_battle_mechanics.rs
+index b1df01e..1d81f85 100644
+--- a/tests/test_battle_mechanics.rs
++++ b/tests/test_battle_mechanics.rs
+@@ -11900,6 +11900,150 @@ fn test_taunt_volatile_is_removed_end_of_turn_when_it_would_reach_3() {
+     assert_eq!(expected_instructions, vec_of_instructions);
+ }
+ 
++#[test]
++#[cfg(feature = "gen4")]
++fn test_gen4_taunt_branches_on_ending_after_its_minimum_duration() {
++    let mut state = State::default();
++    state.side_one.volatile_status_durations.taunt = 2;
++    state
++        .side_one
++        .volatile_statuses
++        .insert(PokemonVolatileStatus::TAUNT);
++
++    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
++        &mut state,
++        Choices::SPLASH,
++        Choices::SPLASH,
++    );
++
++    // taunt lasts 3-5 turns: after 2 turns it ends at the end of this one with chance 1/3
++    let expected_instructions = vec![
++        StateInstructions {
++            percentage: 100.0 * (1.0 - 1.0 / 3.0),
++            instruction_list: vec![Instruction::ChangeVolatileStatusDuration(
++                ChangeVolatileStatusDurationInstruction {
++                    side_ref: SideReference::SideOne,
++                    volatile_status: PokemonVolatileStatus::TAUNT,
++                    amount: 1,
++                },
++            )],
++        },
++        StateInstructions {
++            percentage: 100.0 * (1.0 / 3.0),
++            instruction_list: vec![
++                Instruction::ChangeVolatileStatusDuration(ChangeVolatileStatusDurationInstruction {
++                    side_ref: SideReference::SideOne,
++                    volatile_status: PokemonVolatileStatus::TAUNT,
++                    amount: -2,
++                }),
++                Instruction::RemoveVolatileStatus(RemoveVolatileStatusInstruction {
++                    side_ref: SideReference::SideOne,
++                    volatile_status: PokemonVolatileStatus::TAUNT,
++                }),
++            ],
++        },
++    ];
++    assert_eq!(expected_instructions, vec_of_instructions);
++}
++
++#[test]
++#[cfg(feature = "gen4")]
++fn test_gen4_encore_cannot_end_before_four_turns() {
++    let mut state = State::default();
++    state.side_one.volatile_status_durations.encore = 2;
++    state
++        .side_one
++        .volatile_statuses
++        .insert(PokemonVolatileStatus::ENCORE);
++    state.side_one.last_used_move = LastUsedMove::Move(PokemonMoveIndex::M0);
++
++    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
++        &mut state,
++        Choices::SPLASH,
++        Choices::SPLASH,
++    );
++
++    let expected_instructions = vec![StateInstructions {
++        percentage: 100.0,
++        instruction_list: vec![Instruction::ChangeVolatileStatusDuration(
++            ChangeVolatileStatusDurationInstruction {
++                side_ref: SideReference::SideOne,
++                volatile_status: PokemonVolatileStatus::ENCORE,
++                amount: 1,
++            },
++        )],
++    }];
++    assert_eq!(expected_instructions, vec_of_instructions);
++}
++
++#[test]
++#[cfg(feature = "gen4")]
++fn test_gen4_confusion_can_end_before_the_self_hit_check() {
++    let mut state = State::default();
++    state.side_one.volatile_status_durations.confusion = 1;
++    state
++        .side_one
++        .volatile_statuses
++        .insert(PokemonVolatileStatus::CONFUSION);
++
++    let vec_of_instructions = set_moves_on_pkmn_and_call_generate_instructions(
++        &mut state,
++        Choices::SPLASH,
++        Choices::SPLASH,
++    );
++
++    // 2nd attempt: confusion ends with chance 1/4; otherwise it is still a 50% self-hit
++    let mut percentages: Vec<f32> = vec_of_instructions.iter().map(|i| i.percentage).collect();
++    percentages.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    assert_eq!(vec![25.0, 37.5, 37.5], percentages);
++    let ended: Vec<&StateInstructions> = vec_of_instructions
++        .iter()
++        .filter(|i| {
++            i.instruction_list
++                .contains(&Instruction::RemoveVolatileStatus(
++                    RemoveVolatileStatusInstruction {
++                        side_ref: SideReference::SideOne,
++                        volatile_status: PokemonVolatileStatus::CONFUSION,
++                    },
++                ))
++        })
++        .collect();
++    assert_eq!(1, ended.len());
++    assert_eq!(25.0, ended[0].percentage);
++}
++
++#[test]
++#[cfg(feature = "gen4")]
++fn test_gen4_switching_out_resets_the_confusion_count() {
++    let mut state = State::default();
++    state.side_one.volatile_status_durations.confusion = 2;
++    state
++        .side_one
++        .volatile_statuses
++        .insert(PokemonVolatileStatus::CONFUSION);
++
++    let side_one_move = MoveChoice::Switch(PokemonIndex::P1);
++    let side_two_move = MoveChoice::None;
++    let vec_of_instructions =
++        generate_instructions_with_state_assertion(&mut state, &side_one_move, &side_two_move);
++
++    assert_eq!(1, vec_of_instructions.len());
++    let list = &vec_of_instructions[0].instruction_list;
++    assert!(list.contains(&Instruction::ChangeVolatileStatusDuration(
++        ChangeVolatileStatusDurationInstruction {
++            side_ref: SideReference::SideOne,
++            volatile_status: PokemonVolatileStatus::CONFUSION,
++            amount: -2,
++        }
++    )));
++    assert!(list.contains(&Instruction::RemoveVolatileStatus(
++        RemoveVolatileStatusInstruction {
++            side_ref: SideReference::SideOne,
++            volatile_status: PokemonVolatileStatus::CONFUSION,
++        }
++    )));
++}
++
+ #[test]
+ #[cfg(any(
+     feature = "gen5",
+@@ -20162,26 +20306,21 @@ fn test_taunt_into_glare() {
+         Choices::GLARE,
+     );
+ 
+-    let mut expected_instructions = vec![StateInstructions {
++    // gen4 counts the turn taunt is applied too (its duration is 3-5 turns of residuals)
++    let expected_instructions = vec![StateInstructions {
+         percentage: 100.0,
+-        instruction_list: vec![Instruction::ApplyVolatileStatus(
+-            ApplyVolatileStatusInstruction {
++        instruction_list: vec![
++            Instruction::ApplyVolatileStatus(ApplyVolatileStatusInstruction {
+                 side_ref: SideReference::SideTwo,
+                 volatile_status: PokemonVolatileStatus::TAUNT,
+-            },
+-        )],
++            }),
++            Instruction::ChangeVolatileStatusDuration(ChangeVolatileStatusDurationInstruction {
++                side_ref: SideReference::SideTwo,
++                volatile_status: PokemonVolatileStatus::TAUNT,
++                amount: 1,
++            }),
++        ],
+     }];
+-    if cfg!(not(feature = "gen4")) {
+-        expected_instructions[0]
+-            .instruction_list
+-            .push(Instruction::ChangeVolatileStatusDuration(
+-                ChangeVolatileStatusDurationInstruction {
+-                    side_ref: SideReference::SideTwo,
+-                    volatile_status: PokemonVolatileStatus::TAUNT,
+-                    amount: 1,
+-                },
+-            ))
+-    }
+     assert_eq!(expected_instructions, vec_of_instructions);
+ }
+ 

@@ -19,11 +19,14 @@ Desire timers, Rest's fixed sleep, both sides' last move (choice lock, encore, f
 two different moves in one stint (no choice item). Unrevealed opponent mons follow the gen4 random team rules
 (`sample_species`).
 
+Taunt / encore / confusion pass poke-env's elapsed counts; with the patched engine (scripts/build_engine.sh) they
+end after their random gen4 durations instead of lasting forever. Substitute HP is 1/4 max HP minus an estimate
+of every hit it took (`substitute_left`).
+
 Approximations / ignored (documented, not bugs): opponent PP = what poke-env tracks; hidden power is always
 70 BP and its type for the opponent comes from the sampled set; the random-battle item logic is a simplified
-re-implementation; taunt / encore / confusion / partial-trap / disable timers are not transferred (the gen4
-engine does not model most of them); substitute HP is assumed to be 1/4 max HP; weather from abilities is
-permanent (gen4), other weather lasts 5 turns from when we first saw it.
+re-implementation; partial-trap / disable timers are not transferred; weather from abilities is permanent
+(gen4), other weather lasts 5 turns from when we first saw it.
 
     python -m porygon.search runs/<run>/best_model.zip --opponent heuristic --n-battles 100
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
@@ -75,6 +78,7 @@ SCREEN_TURNS = {SideCondition.REFLECT: ("reflect", 5), SideCondition.LIGHT_SCREE
                 SideCondition.SAFEGUARD: ("safeguard", 5), SideCondition.MIST: ("mist", 5),
                 SideCondition.LUCKY_CHANT: ("lucky_chant", 5), SideCondition.TAILWIND: ("tailwind", 3)}
 SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effects poke-env may still hold
+TIMED_EFFECTS = {"taunt": Effect.TAUNT, "encore": Effect.ENCORE, "confusion": Effect.CONFUSION}
 # two-turn moves; the engine marks the charging turn with a volatile of the same name
 CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
 EV, IV = 85, 31
@@ -252,16 +256,19 @@ def sample_species(known: list[str], n: int, rng: random.Random) -> list[str]:
 
 class History:
     """What poke-env does not track, read from the battle log: per side ('p1' / 'p2') the turn Wish and Future
-    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, and mons that used two different
-    moves in one stint on the field (so they cannot hold a choice item)."""
+    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, mons that used two different
+    moves in one stint on the field (so they cannot hold a choice item), the hits (attacker, move) each
+    standing substitute took, and how many moves each confused mon has tried while confused."""
 
     def __init__(self, battle: AbstractBattle):
         self.wish: dict[str, int] = {}
         self.future: dict[str, tuple[int, str]] = {}
         self.rest: set[str] = set()
         self.unlocked: set[str] = set()
+        self.sub_hits: dict[str, list[tuple[str, str]]] = {}
+        self.confused: dict[str, int] = {}
         stint: dict[str, set[str]] = {}
-        turn = 0
+        turn, last = 0, ("", "")
         for ev in battle._replay_data:
             if len(ev) < 3:
                 continue
@@ -270,8 +277,11 @@ class History:
                 turn = int(ev[2])
             elif kind in ("switch", "drag"):
                 stint[key] = set()
+                self.sub_hits.pop(key, None)
+                self.confused.pop(key, None)
             elif kind == "move" and len(ev) > 3:
                 move = norm(ev[3])
+                last = (key, move)
                 if move == "wish":
                     self.wish[key[:2]] = turn
                 if move != "struggle" and not any(x.startswith("[from]") for x in ev[4:]):
@@ -284,6 +294,21 @@ class History:
                 (self.rest.add if ev[-1].endswith("move: Rest") else self.rest.discard)(key)
             elif kind in ("-curestatus", "faint"):
                 self.rest.discard(key)
+                if kind == "faint":
+                    self.sub_hits.pop(key, None)
+                    self.confused.pop(key, None)
+            elif kind == "-start" and len(ev) > 3 and ev[3] == "Substitute":
+                self.sub_hits[key] = []
+            elif kind == "-activate" and len(ev) > 3 and ev[3] in ("Substitute", "move: Substitute"):
+                self.sub_hits.setdefault(key, []).append(last)
+            elif kind == "-end" and len(ev) > 3 and ev[3] == "Substitute":
+                self.sub_hits.pop(key, None)
+            elif kind == "-start" and len(ev) > 3 and ev[3] == "confusion":
+                self.confused[key] = 0
+            elif kind == "-activate" and len(ev) > 3 and ev[3] == "confusion" and key in self.confused:
+                self.confused[key] += 1
+            elif kind == "-end" and len(ev) > 3 and ev[3] == "confusion":
+                self.confused.pop(key, None)
 
 
 def engine_move(move_id: str, hp_type: PokemonType | None = None) -> str:
@@ -395,8 +420,9 @@ def side_conditions(conds: dict[SideCondition, int], turn: int, active: Pokemon 
 
 def make_side(mons: list[pe.Pokemon], active: Pokemon | None, active_idx: int, conds: pe.SideConditions,
               last_move: int | None, battle: Battle, hist: History, role: str, team: list[str],
-              **kw: Any) -> pe.Side:
-    """`last_move`: index of the active mon's last move this stint (None: it just switched in)."""
+              sub_hp: int | None = None, **kw: Any) -> pe.Side:
+    """`last_move`: index of the active mon's last move this stint (None: it just switched in); `sub_hp`: HP of
+    its substitute if it has one (default 1/4 max HP)."""
     mons = (mons + [pe.Pokemon.create_fainted() for _ in range(6)])[:6]
     boosts = active.boosts if active else {}
     effects = {e for e in (active.effects if active else {}) if e not in SKIP_EFFECTS}
@@ -411,14 +437,17 @@ def make_side(mons: list[pe.Pokemon], active: Pokemon | None, active_idx: int, c
     preparing = active.preparing_move if active is not None else None
     if preparing is not None and preparing.id in CHARGE_MOVES:
         volatiles.add(preparing.id.upper())
-    sub = mons[active_idx].maxhp // 4 if Effect.SUBSTITUTE in effects else 0
+    sub = (mons[active_idx].maxhp // 4 if sub_hp is None else sub_hp) if Effect.SUBSTITUTE in effects else 0
+    counts = dict(active.effects) if active else {}  # poke-env counts the turns taunt / encore have lasted
+    counts[Effect.CONFUSION] = hist.confused.get(team[active_idx], 0) if active and team else 0
+    timed = {k: min(counts.get(e, 0), 9) for k, e in TIMED_EFFECTS.items() if e.name in volatiles}
     # Wish heals at the end of the turn after it was used, Future Sight hits at the end of the 2nd turn after
     wish = 2 - (battle.turn - hist.wish[role]) if role in hist.wish else 0
     fs_turn, fs_user = hist.future.get(role, (0, ""))
     fs = 3 - (battle.turn - fs_turn) if fs_user in team else 0
     return pe.Side(
         pokemon=mons, active_index=str(active_idx), side_conditions=conds, volatile_statuses=volatiles,
-        volatile_status_durations=pe.VolatileStatusDurations(yawn=int("YAWN" in volatiles)),
+        volatile_status_durations=pe.VolatileStatusDurations(yawn=int("YAWN" in volatiles), **timed),
         wish=(wish, mons[active_idx].maxhp // 2) if wish > 0 else (0, 0),
         future_sight=(fs, str(team.index(fs_user))) if fs > 0 else (0, "0"),
         substitute_health=sub, attack_boost=boosts.get("atk", 0), defense_boost=boosts.get("def", 0),
@@ -427,6 +456,28 @@ def make_side(mons: list[pe.Pokemon], active: Pokemon | None, active_idx: int, c
         evasion_boost=boosts.get("evasion", 0),
         last_used_move=f"switch:{active_idx}" if last_move is None else f"move:{last_move}", **kw,
     )
+
+
+def substitute_left(state: pe.State, ours: bool, hits: list[tuple[str, str]], facing: str,
+                    facing_moves: list[tuple[str, str]]) -> int:
+    """HP left on side one's (ours) or side two's substitute, made with 1/4 max HP, after `hits` [(attacker, move)].
+    A hit by the mon now facing it takes off the engine's damage for that move (its first roll), any other hit
+    half of what is left; it is never below 1 (it is still up)."""
+    side = state.side_one if ours else state.side_two
+    left = side.pokemon[int(side.active_index)].maxhp // 4
+    for attacker, move in hits:
+        damage = left // 2
+        engine_id = next((e for m, e in facing_moves if matches(move, m)), None) if attacker == facing else None
+        if engine_id:
+            try:  # side one's move first or second only matters for a few moves
+                ones, twos = pe.calculate_damage(state, "splash" if ours else engine_id,
+                                                 engine_id if ours else "splash", not ours)
+                damage = (twos if ours else ones)[0]
+            except BaseException as e:  # unknown move: Rust panics are pyo3 PanicExceptions
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise
+        left = max(1, left - damage)
+    return left
 
 
 def weather_turns(battle: AbstractBattle, weather: Weather, first_seen: int) -> int:
@@ -475,10 +526,6 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     avail = [k for k, m in active.moves.items() if any(m is a for a in battle.available_moves)]
     if last is None and len(avail) == 1 and avail[0] in own_moves:
         last = own_moves.index(avail[0])  # locked (encore, choice, outrage) without poke-env knowing the move
-    side_one = make_side(ours, active, active_idx, side_conditions(battle.side_conditions, battle.turn, active),
-                         last, battle, hist, role, keys, force_switch=bool(battle.force_switch),
-                         force_trapped=bool(battle.trapped))
-
     opp_keys = list(battle.opponent_team)
     opp = list(battle.opponent_team.values())
     unrevealed = sample_species([m.species for m in opp], max(0, min(6, battle.max_team_size or 6) - len(opp)), rng)
@@ -491,9 +538,6 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     opp_active = battle.opponent_active_pokemon
     opp_idx = next((i for i, m in enumerate(opp) if m is opp_active), 0)
     opp_last = last_used(opp_active, opp_moves[opp_idx]) if opp else None
-    side_two = make_side(theirs, opp_active, opp_idx,
-                         side_conditions(battle.opponent_side_conditions, battle.turn, opp_active),
-                         opp_last, battle, hist, opp_role, opp_keys)
 
     weather, turns = "none", 0
     for w in battle.weather:
@@ -501,8 +545,25 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
             weather, turns = WEATHER[w], weather_turns(battle, w, battle.turn if weather_seen is None else weather_seen)
     tr = Field.TRICK_ROOM in battle.fields
     tr_turns = max(1, 5 - (battle.turn - battle.fields[Field.TRICK_ROOM])) if tr else 0
-    state = pe.State(side_one=side_one, side_two=side_two, weather=weather, weather_turns_remaining=turns,
-                     trick_room=tr, trick_room_turns_remaining=tr_turns)
+
+    def build(sub_one: int | None = None, sub_two: int | None = None) -> pe.State:
+        side_one = make_side(ours, active, active_idx, side_conditions(battle.side_conditions, battle.turn, active),
+                             last, battle, hist, role, keys, sub_one, force_switch=bool(battle.force_switch),
+                             force_trapped=bool(battle.trapped))
+        side_two = make_side(theirs, opp_active, opp_idx,
+                             side_conditions(battle.opponent_side_conditions, battle.turn, opp_active),
+                             opp_last, battle, hist, opp_role, opp_keys, sub_two)
+        return pe.State(side_one=side_one, side_two=side_two, weather=weather, weather_turns_remaining=turns,
+                        trick_room=tr, trick_room_turns_remaining=tr_turns)
+
+    state = build()
+    opp_key = opp_keys[opp_idx] if opp else ""
+    our_hits, their_hits = hist.sub_hits.get(keys[active_idx]), hist.sub_hits.get(opp_key)
+    if (our_hits and state.side_one.substitute_health) or (their_hits and state.side_two.substitute_health):
+        theirs_ids = [(m, norm(engine_move(m))) for m in opp_moves[opp_idx]] if opp else []
+        state = build(substitute_left(state, True, our_hits, opp_key, theirs_ids) if our_hits else None,
+                      substitute_left(state, False, their_hits, keys[active_idx], list(zip(own_moves, move_ids)))
+                      if their_hits else None)
     return Converted(state, [norm(m.species) for m in team], move_ids)
 
 

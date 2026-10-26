@@ -62,6 +62,7 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
 | `scripts/pod_*.sh`, `pod_retry_deploy.py`, `vm_setup.sh` | fallbacks: RunPod pods, a plain GPU VM |
 | `scripts/vs_foulplay.py` | benchmark vs Foul Play (setup in its docstring) |
+| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48 with gen4 taunt / encore / confusion durations |
 | `scripts/ladder_watchdog.sh` | long ladder sessions |
 
 ## Setup
@@ -69,8 +70,7 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 git submodule update --init            # official smogon/pokemon-showdown
 cd pokemon-showdown && npm install && cd ..
 python -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/pip install poke-engine --no-cache-dir \
-  --config-settings="build-args=--features poke-engine/gen4 --no-default-features"   # for search; needs Rust
+scripts/build_engine.sh                # poke-engine 0.0.48 gen4 + patches/ (for search; needs Rust)
 node scripts/build_data.js             # only if the Showdown checkout changes
 ```
 
@@ -149,9 +149,12 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
    needs team handling and usage-stat opponent priors instead of random-battle sets, and retraining.
-3. **Search fidelity**: poke-engine's gen4 build doesn't model taunt/encore/confusion durations;
-   Substitute HP is assumed ¼; occasional `NonFinite` engine panics (sample skipped). Tune time per
-   move (1 s beat 0.3 s; more may help).
+3. **Search fidelity**: done: taunt / encore / confusion end after their random gen4 durations
+   (patched engine; stock 0.0.48 gen4 keeps them forever), Substitute HP is ¼ max HP minus an estimate
+   of each hit it took, charging two-turn moves and our recharge come from the request. Left: locked
+   moves (Outrage) always last 3 turns (gen4: 2-3), taunt applied after its target moved misses that
+   turn, encore needs the last move; occasional `NonFinite` engine panics (sample skipped). Tune time
+   per move (1 s beat 0.3 s; more may help).
 4. **Training speed**: make the PPO update cheaper (bf16, fewer/larger minibatches) and stop evals
    from stalling collection; log per-rollout collect / update / callback time to find the rest.
 5. **gen9randombattle**: encoder, action space (tera) and vocab already support it; start from the

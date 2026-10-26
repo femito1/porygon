@@ -167,3 +167,4 @@ package.json
 # Porygon
 runs/
 logs/
+.poke-engine/
