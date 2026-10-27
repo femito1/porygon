@@ -48,6 +48,7 @@ PORT=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 + 15 ))
 # duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged
 [ -f .showdown-eval/dist/server/index.js ] || scripts/build_eval_server.sh
 export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$ROOT/$OUT/battles.jsonl
+export PORYGON_DUPLICATE_TEAMS=$ROOT/$OUT/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS"  # true teams (--oracle)
 export PORYGON_DUPLICATE_GROUP='^fp'
 scripts/start_servers.sh 1 "$PORT"
 LOOPS=()

@@ -38,7 +38,7 @@ from poke_env.concurrency import handle_threaded_coroutines
 from porygon.env import PolicyPlayer, local_server
 from porygon.model import load_policy
 from porygon.decisions import LoggedSearchPlayer
-from porygon.search import CONFIG, SearchPlayer, add_value_args
+from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args
 
 log = logging.getLogger("vs_foulplay")
 
@@ -123,6 +123,7 @@ async def main():
     p.add_argument("--prior-weight", type=float, default=0.25)
     p.add_argument("--top-k", type=int, default=None)
     add_value_args(p)
+    add_oracle_args(p)
     p.add_argument("--workers", type=int, default=None, help="SearchPlayer engine processes (default cores-1)")
     p.add_argument("--search-timeout", type=float, default=30, help="seconds beyond --ms before a search is killed")
     p.add_argument("--accept-timeout", type=float, default=45)
@@ -143,12 +144,13 @@ async def main():
     for i, _ in enumerate(a.opponents):
         acc = AccountConfiguration(f"{a.player[:3]}{tag}x{i}", None)
         search = (partial(LoggedSearchPlayer, out=a.log_dir) if a.log_dir else SearchPlayer)
-        players.append(search(policy, **cfg, workers=a.workers, account_configuration=acc, **common)
+        players.append(search(policy, **cfg, workers=a.workers, oracle=a.oracle, oracle_dir=a.oracle_dir,
+                              account_configuration=acc, **common)
                        if a.player == "search" else PolicyPlayer(policy, account_configuration=acc, **common))
     for pl in players:
         if a.player == "search":
             guard_pool(pl.pool, a.search_timeout)
-    desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())})"
+    desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())}, oracle={a.oracle})"
             if a.player == "search" else "PolicyPlayer")
     start = time.time()
     with open(a.results, "a") as out:

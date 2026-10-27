@@ -19,6 +19,7 @@ OUT=runs/search-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
 # duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged
 [ -f .showdown-eval/dist/server/index.js ] || scripts/build_eval_server.sh
 export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$ROOT/$OUT/battles.jsonl
+export PORYGON_DUPLICATE_TEAMS=$ROOT/$OUT/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS"  # true teams (--oracle)
 export PORYGON_DUPLICATE_GROUP='^search'
 # Pull the Python environments into the page cache first: on a slow shared disk, modules imported lazily
 # during a websocket handshake can take longer than the 10 s handshake timeout.

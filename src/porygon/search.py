@@ -327,11 +327,18 @@ def engine_types(mon: Pokemon) -> tuple[str, str]:
     return ts[0], ts[1]
 
 
-def calc_stats(species: str, level: int, physical: bool) -> dict[str, int]:
+def calc_stats(species: str, level: int, physical: bool, evs: dict[str, int] | None = None,
+               ivs: dict[str, int] | None = None) -> dict[str, int]:
+    """Neutral-nature stats; `evs` / `ivs` (a true set's) override the random-battle defaults."""
     base = GEN.pokedex[species]["baseStats"]
-    out = {"hp": (2 * base["hp"] + IV + EV // 4) * level // 100 + level + 10}
+    def ev_iv(s: str) -> tuple[int, int]:
+        if evs is not None and ivs is not None:
+            return evs[s], ivs[s]
+        return (0, 0) if s == "atk" and not physical else (EV, IV)  # random battles minimise confusion damage
+    ev, iv = ev_iv("hp")
+    out = {"hp": (2 * base["hp"] + iv + ev // 4) * level // 100 + level + 10}
     for s in ("atk", "def", "spa", "spd", "spe"):
-        ev, iv = (0, 0) if s == "atk" and not physical else (EV, IV)  # random battles minimise confusion damage
+        ev, iv = ev_iv(s)
         out[s] = (2 * base[s] + iv + ev // 4) * level // 100 + 5
     return out
 
@@ -376,23 +383,32 @@ def own_mon(mon: Pokemon, disabled: set[str], rest: bool) -> tuple[pe.Pokemon, l
 
 
 def opp_mon(mon: Pokemon | None, species: str, rng: random.Random, hist: History | None = None,
-            key: str = "") -> tuple[pe.Pokemon, list[str]]:
+            key: str = "", truth: dict[str, Any] | None = None) -> tuple[pe.Pokemon, list[str]]:
     """Opponent mon (None = unrevealed, sampled from `species`) with hidden info determinized; also returns
     its poke-env move ids. A known item is kept (None = it has none), a choice item is only guessed if the mon
-    never used two different moves in one stint, and an active choice holder is locked into its last move."""
+    never used two different moves in one stint, and an active choice holder is locked into its last move.
+    `truth`: its true set (Showdown's PokemonSet, oracle runs), used instead of sampling."""
     revealed = [m for m in (mon.moves if mon else {}) if norm(m) != "struggle"]
     unlocked = hist is not None and key in hist.unlocked
     known_item = mon is not None and mon.item != GEN.UNKNOWN_ITEM
-    for _ in range(5):
-        role, moves, ability = sample_set(species, revealed, mon.ability if mon else None, rng)
-        item = (mon.item or "none") if known_item else guess_item(species, role, moves, ability, rng)
-        if known_item or not (unlocked and item.startswith("choice")):
-            break
+    if truth is not None:
+        pool = [norm(m) for m in truth["moves"]]
+        moves = [next((m for m in pool if matches(r, m)), r) for r in revealed][:4]
+        moves += [m for m in pool if m not in moves][:4 - len(moves)]
+        ability, item = norm(truth["ability"]), norm(truth["item"]) or "none"
+        level = truth["level"]
+        stats = calc_stats(species, level, False, truth["evs"], truth["ivs"])
     else:
-        item = "leftovers"
-    level = mon.level if mon else levels().get(species, 80)
-    physical = any(move_data(m).get("category") == "Physical" for m in moves)
-    stats = calc_stats(species, level, physical)
+        for _ in range(5):
+            role, moves, ability = sample_set(species, revealed, mon.ability if mon else None, rng)
+            item = (mon.item or "none") if known_item else guess_item(species, role, moves, ability, rng)
+            if known_item or not (unlocked and item.startswith("choice")):
+                break
+        else:
+            item = "leftovers"
+        level = mon.level if mon else levels().get(species, 80)
+        physical = any(move_data(m).get("category") == "Physical" for m in moves)
+        stats = calc_stats(species, level, physical)
     pp = {m: mv.current_pp for m, mv in mon.moves.items()} if mon else {}
     lock = last_used(mon, moves) if mon and mon.active and item.startswith("choice") else None
     mv = [(norm(engine_move(m)), pp.get("hiddenpower" if m.startswith("hiddenpower") else m, 16),
@@ -504,8 +520,12 @@ class Converted:
 
 
 def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
-            hist: History | None = None) -> Converted:
+            hist: History | None = None, truth: list[dict[str, Any]] | None = None,
+            oracle_all: bool = False) -> Converted:
+    """`truth`: the opponent's true team (oracle runs): revealed mons get their true sets, and with `oracle_all`
+    the unrevealed ones are the true remaining mons instead of samples."""
     hist = hist or History(battle)
+    true_sets = {norm(t["speciesId"]): t for t in truth or []}
     role, opp_role = battle.player_role or "p1", battle.opponent_role or "p2"
     keys = list(battle.team)
     team = list(battle.team.values())
@@ -528,13 +548,17 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
         last = own_moves.index(avail[0])  # locked (encore, choice, outrage) without poke-env knowing the move
     opp_keys = list(battle.opponent_team)
     opp = list(battle.opponent_team.values())
-    unrevealed = sample_species([m.species for m in opp], max(0, min(6, battle.max_team_size or 6) - len(opp)), rng)
+    n_unrevealed = max(0, min(6, battle.max_team_size or 6) - len(opp))
+    if oracle_all and true_sets:
+        unrevealed = [s for s in true_sets if s not in {norm(m.species) for m in opp}][:n_unrevealed]
+    else:
+        unrevealed = sample_species([m.species for m in opp], n_unrevealed, rng)
     theirs, opp_moves = [], []
     for key, m in zip(opp_keys, opp):
-        mon, moves = opp_mon(m, m.species, rng, hist, key)
+        mon, moves = opp_mon(m, m.species, rng, hist, key, true_sets.get(norm(m.species)))
         theirs.append(mon)
         opp_moves.append(moves)
-    theirs += [opp_mon(None, s, rng)[0] for s in unrevealed]
+    theirs += [opp_mon(None, s, rng, truth=true_sets.get(s) if oracle_all else None)[0] for s in unrevealed]
     opp_active = battle.opponent_active_pokemon
     opp_idx = next((i for i, m in enumerate(opp) if m is opp_active), 0)
     opp_last = last_used(opp_active, opp_moves[opp_idx]) if opp else None
@@ -581,12 +605,15 @@ def engine_pool(workers: int | None = None, python: str | None = None) -> Engine
 class SearchPlayer(Player):
     """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; value_weight=1
     replaces the engine search by the value lookahead (value_top_k: only the network's top-k actions,
-    value_min_prob: chance outcomes below it are dropped). engine_python: interpreter for the engine workers."""
+    value_min_prob: chance outcomes below it are dropped). engine_python: interpreter for the engine workers.
+    oracle ("revealed" / "all", diagnosis only): the opponent's true sets from `oracle_dir`, written by the
+    duplicate server (PORYGON_DUPLICATE_TEAMS), replace the samples for revealed mons, or for all of them."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
                  prior_weight: float = 0.25, top_k: int | None = None, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
-                 engine_python: str | None = None, seed: int | None = None, **kwargs: Any):
+                 engine_python: str | None = None, oracle: str | None = None, oracle_dir: str | None = None,
+                 seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
@@ -600,6 +627,9 @@ class SearchPlayer(Player):
         self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0,
                       "value_failed": 0}
         self.last_convs: dict[str, list[Converted]] = {}  # battle tag -> its last determinizations
+        assert oracle in (None, "revealed", "all") and (oracle is None or oracle_dir), "oracle needs oracle_dir"
+        self.oracle, self.oracle_dir = oracle, oracle_dir
+        self.truth: dict[str, list[dict[str, Any]] | None] = {}
 
     def network_probs(self, battle: Battle) -> tuple[np.ndarray, np.ndarray]:
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.float32)
@@ -626,7 +656,8 @@ class SearchPlayer(Player):
         lookahead's (value_weight). If one of the two fails, the other is used alone."""
         first_seen = self._weather_first_seen(battle)
         hist = History(battle)
-        convs = [convert(battle, self.rng, first_seen, hist) for _ in range(self.samples)]
+        truth = self.true_team(battle)
+        convs = [convert(battle, self.rng, first_seen, hist, truth, self.oracle == "all") for _ in range(self.samples)]
         self.last_convs[battle.battle_tag] = convs
         w = self.value_weight
         value = (asyncio.create_task(asyncio.to_thread(self.lookahead.shares, battle, convs, probs, mask))
@@ -648,6 +679,18 @@ class SearchPlayer(Player):
             else:
                 return v if mcts is None else (1 - w) * mcts + w * v
         return mcts
+
+    def true_team(self, battle: Battle) -> list[dict[str, Any]] | None:
+        if not self.oracle:
+            return None
+        if battle.battle_tag not in self.truth:
+            try:
+                teams = json.loads((Path(self.oracle_dir) / f"{battle.battle_tag}.json").read_text())
+                self.truth[battle.battle_tag] = teams["p2team"] if teams["p1"] == self.username else teams["p1team"]
+            except OSError as e:
+                log.warning("no true team for %s: %s", battle.battle_tag, e)
+                return None
+        return self.truth[battle.battle_tag]
 
     async def mcts_shares(self, convs: list[Converted]) -> np.ndarray:
         results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms) for c in convs),
@@ -715,6 +758,7 @@ class SearchPlayer(Player):
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         self.weather_seen.pop(battle.battle_tag, None)
         self.last_convs.pop(battle.battle_tag, None)
+        self.truth.pop(battle.battle_tag, None)
 
 
 # ---------------------------------------------------------------- CLI
@@ -734,10 +778,11 @@ async def run(args: argparse.Namespace) -> None:
     cfg = config(args)
     if args.log_dir:
         from porygon.decisions import LoggedSearchPlayer  # it imports this module
-        player = LoggedSearchPlayer(policy, **cfg, workers=args.workers, out=args.log_dir,
+        player = LoggedSearchPlayer(policy, **cfg, workers=args.workers, out=args.log_dir, oracle=args.oracle,
+                                    oracle_dir=args.oracle_dir,
                                     account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     else:
-        player = SearchPlayer(policy, **cfg, workers=args.workers,
+        player = SearchPlayer(policy, **cfg, workers=args.workers, oracle=args.oracle, oracle_dir=args.oracle_dir,
                               account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     opp_conf = AccountConfiguration(f"opp{args.opponent[:8]}{tag}", None)
     opp_policy = load_policy(args.opp_model, args.device) if args.opp_model else policy
@@ -776,6 +821,12 @@ def add_value_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--engine-python", help="interpreter for the engine workers (default: this one)")
 
 
+def add_oracle_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--oracle", choices=["revealed", "all"], help="diagnosis: search with the opponent's true sets")
+    p.add_argument("--oracle-dir", default=os.environ.get("PORYGON_DUPLICATE_TEAMS"),
+                   help="true teams from the duplicate server (default $PORYGON_DUPLICATE_TEAMS)")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("model")
@@ -791,6 +842,7 @@ def main():
         p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))
     p.add_argument("--concurrency", type=int, default=3, help="simultaneous battles")
     p.add_argument("--log-dir", help="record MODEL's decisions and replays here (porygon.decisions)")
+    add_oracle_args(p)
     p.add_argument("--workers", type=int, default=None, help="engine processes (default: cores - 1)")
     p.add_argument("--format", default="gen4randombattle")
     p.add_argument("--port", type=int, default=8000)
