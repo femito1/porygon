@@ -1,0 +1,79 @@
+diff --git a/server/room-battle.ts b/server/room-battle.ts
+index ce18056..78e623d 100644
+--- a/server/room-battle.ts
++++ b/server/room-battle.ts
+@@ -23,6 +23,28 @@ import type { GameTimerSettings } from '../sim/dex-formats';
+ import type { LadderRating } from './ladders';
+ 
+ type ChannelIndex = 0 | 1 | 2 | 3 | 4;
++/**
++ * Porygon duplicate battles (benchmarking only, off unless PORYGON_DUPLICATE is set): battles come in pairs
++ * with the same two team seeds and the same battle seed, the teams swapped in the second game, so team luck
++ * cancels out when a pair is scored together. The player whose name matches PORYGON_DUPLICATE_GROUP (default:
++ * p1) gets team A in the first game of a pair and team B in the second. Every finished battle is appended to
++ * PORYGON_DUPLICATE_LOG (JSON lines: pair, game, players, winner, both true teams).
++ */
++let porygonBattles = 0;
++function porygonDuplicate(names: string[]) {
++	const base = process.env.PORYGON_DUPLICATE;
++	if (!base) return null;
++	const k = porygonBattles++;
++	const pair = k >> 1, second = k & 1;
++	const crypto = require('crypto') as typeof import('crypto');
++	const seed = (tag: string) => `sodium,${crypto.createHash('sha256').update(`${base}:${pair}:${tag}`).digest('hex')}`;
++	const group = process.env.PORYGON_DUPLICATE_GROUP;
++	const anchor = group ? Math.max(0, names.findIndex(name => new RegExp(group).test(name))) : 0;
++	const teams = [seed('A'), seed('B')];
++	const playerSeeds = names.map((_, i) => teams[(i === anchor ? 0 : 1) ^ second]);
++	return { pair, second, battleSeed: seed('battle') as PRNGSeed, playerSeeds };
++}
++
+ export type PlayerIndex = 1 | 2 | 3 | 4;
+ export type ChallengeType = 'rated' | 'unrated' | 'challenge' | 'tour';
+ 
+@@ -537,6 +559,7 @@ export class RoomBattle extends RoomGame<RoomBattlePlayer> {
+ 	 */
+ 	score: number[] | null = null;
+ 	inputLog: string[] | null = null;
++	porygon: ReturnType<typeof porygonDuplicate> = null;
+ 	turn = 0;
+ 	rqid = 1;
+ 	requestCount = 0;
+@@ -569,11 +592,13 @@ export class RoomBattle extends RoomGame<RoomBattlePlayer> {
+ 
+ 		this.room.battle = this;
+ 
++		this.porygon = options.inputLog ? null :
++			porygonDuplicate(options.players.map(p => (p?.user && typeof p.user !== 'string' ? p.user.name : '')));
+ 		const battleOptions = {
+ 			formatid: this.format,
+ 			roomid: this.roomid,
+ 			rated: ratedMessage,
+-			seed: options.seed,
++			seed: options.seed || this.porygon?.battleSeed,
+ 		};
+ 		if (options.inputLog) {
+ 			void this.stream.write(options.inputLog);
+@@ -832,6 +857,14 @@ export class RoomBattle extends RoomGame<RoomBattlePlayer> {
+ 
+ 		case 'end':
+ 			this.logData = JSON.parse(lines[1]);
++			if (this.porygon && process.env.PORYGON_DUPLICATE_LOG) {
++				const d = this.logData!;
++				const fs = require('fs') as typeof import('fs');
++				fs.appendFileSync(process.env.PORYGON_DUPLICATE_LOG, JSON.stringify({
++					roomid: this.roomid, pair: this.porygon.pair, game: this.porygon.second, winner: d.winner,
++					p1: d.p1, p2: d.p2, turns: d.turns, p1team: d.p1team, p2team: d.p2team,
++				}) + '\n');
++			}
+ 			this.score = this.logData!.score;
+ 			this.inputLog = this.logData!.inputLog;
+ 			this.started = true;
+@@ -1079,6 +1112,7 @@ export class RoomBattle extends RoomGame<RoomBattlePlayer> {
+ 				avatar: user ? `${user.avatar}` : '',
+ 				team: playerOpts.team || undefined,
+ 				rating: Math.round(playerOpts.rating || 0),
++				seed: this.porygon?.playerSeeds[this.players.indexOf(player)],
+ 			};
+ 			void this.stream.write(`>player ${slot} ${JSON.stringify(options)}`);
+ 			player.hasTeam = true;

@@ -569,28 +569,28 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
 
 # ---------------------------------------------------------------- player
 
-_POOLS: dict[int, EnginePool] = {}
+_POOLS: dict[tuple[int, str | None], EnginePool] = {}
 
 
-def engine_pool(workers: int | None = None) -> EnginePool:
+def engine_pool(workers: int | None = None, python: str | None = None) -> EnginePool:
     """Process-wide pool of poke-engine worker subprocesses, shared by all SearchPlayers."""
     n = workers or max(1, (os.cpu_count() or 2) - 1)
-    return _POOLS.setdefault(n, EnginePool(n))
+    return _POOLS.setdefault((n, python), EnginePool(n, python=python))
 
 
 class SearchPlayer(Player):
     """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; value_weight=1
     replaces the engine search by the value lookahead (value_top_k: only the network's top-k actions,
-    value_min_prob: chance outcomes below it are dropped)."""
+    value_min_prob: chance outcomes below it are dropped). engine_python: interpreter for the engine workers."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
                  prior_weight: float = 0.25, top_k: int | None = None, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
-                 seed: int | None = None, **kwargs: Any):
+                 engine_python: str | None = None, seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
-        self.pool = engine_pool(workers)
+        self.pool = engine_pool(workers, engine_python)
         self.lookahead = None
         if value_weight > 0:
             from porygon.lookahead import Lookahead  # it imports this module
@@ -599,6 +599,7 @@ class SearchPlayer(Player):
         self.weather_seen: dict[str, tuple[Weather, int]] = {}
         self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0,
                       "value_failed": 0}
+        self.last_convs: dict[str, list[Converted]] = {}  # battle tag -> its last determinizations
 
     def network_probs(self, battle: Battle) -> tuple[np.ndarray, np.ndarray]:
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.float32)
@@ -626,6 +627,7 @@ class SearchPlayer(Player):
         first_seen = self._weather_first_seen(battle)
         hist = History(battle)
         convs = [convert(battle, self.rng, first_seen, hist) for _ in range(self.samples)]
+        self.last_convs[battle.battle_tag] = convs
         w = self.value_weight
         value = (asyncio.create_task(asyncio.to_thread(self.lookahead.shares, battle, convs, probs, mask))
                  if self.lookahead else None)
@@ -712,11 +714,12 @@ class SearchPlayer(Player):
 
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         self.weather_seen.pop(battle.battle_tag, None)
+        self.last_convs.pop(battle.battle_tag, None)
 
 
 # ---------------------------------------------------------------- CLI
 
-CONFIG = ("ms", "samples", "prior_weight", "top_k", "value_weight", "value_top_k", "value_min_prob")
+CONFIG = ("ms", "samples", "prior_weight", "top_k", "value_weight", "value_top_k", "value_min_prob", "engine_python")
 
 
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
@@ -729,8 +732,13 @@ async def run(args: argparse.Namespace) -> None:
     common = dict(battle_format=args.format, server_configuration=local_server(args.port),
                   max_concurrent_battles=args.concurrency, log_level=40)
     cfg = config(args)
-    player = SearchPlayer(policy, **cfg, workers=args.workers,
-                          account_configuration=AccountConfiguration(f"search{tag}", None), **common)
+    if args.log_dir:
+        from porygon.decisions import LoggedSearchPlayer  # it imports this module
+        player = LoggedSearchPlayer(policy, **cfg, workers=args.workers, out=args.log_dir,
+                                    account_configuration=AccountConfiguration(f"search{tag}", None), **common)
+    else:
+        player = SearchPlayer(policy, **cfg, workers=args.workers,
+                              account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     opp_conf = AccountConfiguration(f"opp{args.opponent[:8]}{tag}", None)
     opp_policy = load_policy(args.opp_model, args.device) if args.opp_model else policy
     if args.opponent == "search":
@@ -756,7 +764,7 @@ async def run(args: argparse.Namespace) -> None:
           f"same as network argmax {s['agree'] / max(s['searched'], 1):.1%}, {time.time() - start:.0f}s")
 
 
-FLOAT_CONFIG = ("prior_weight", "value_weight", "value_min_prob")
+CONFIG_TYPES = {"prior_weight": float, "value_weight": float, "value_min_prob": float, "engine_python": str}
 
 
 def add_value_args(p: argparse.ArgumentParser) -> None:
@@ -765,6 +773,7 @@ def add_value_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--value-top-k", type=int, default=None, help="lookahead: only the network's top-k actions")
     p.add_argument("--value-min-prob", type=float, default=0.0, help="lookahead: drop rarer chance outcomes")
     p.add_argument("--device", default="cpu", help="for the network (cuda: the lookahead's leaf values)")
+    p.add_argument("--engine-python", help="interpreter for the engine workers (default: this one)")
 
 
 def main():
@@ -779,8 +788,9 @@ def main():
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
     add_value_args(p)
     for k in CONFIG:  # the --opponent search configuration
-        p.add_argument(f"--opp-{k.replace('_', '-')}", type=float if k in FLOAT_CONFIG else int, default=p.get_default(k))
+        p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))
     p.add_argument("--concurrency", type=int, default=3, help="simultaneous battles")
+    p.add_argument("--log-dir", help="record MODEL's decisions and replays here (porygon.decisions)")
     p.add_argument("--workers", type=int, default=None, help="engine processes (default: cores - 1)")
     p.add_argument("--format", default="gen4randombattle")
     p.add_argument("--port", type=int, default=8000)

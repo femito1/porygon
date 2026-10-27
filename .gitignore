@@ -168,3 +168,5 @@ package.json
 runs/
 logs/
 .poke-engine/
+.showdown-eval/
+.venv-stock/

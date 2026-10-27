@@ -2,12 +2,14 @@
 
 poke-engine holds the GIL while it searches, so parallel searches need processes. Workers are
 plain subprocesses (`python -m porygon.engine_worker`) speaking one JSON object per line, so they
-import only poke-engine (no torch / poke-env) and never re-run the caller's __main__.
+import only poke-engine (no torch / poke-env) and never re-run the caller's __main__. `EnginePool(python=...)`
+runs them under another interpreter, e.g. a venv with a different poke-engine build (A/B tests).
 """
 
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import poke_engine as pe
 
@@ -36,14 +38,14 @@ class EnginePool:
     poke-engine can loop forever on some states (seen on a forced switch after our own U-turn),
     which would otherwise stall the player until the battle timer forfeits it."""
 
-    def __init__(self, n: int, grace: float = 30.0):
-        self.n, self.grace = n, grace
+    def __init__(self, n: int, grace: float = 30.0, python: str | None = None):
+        self.n, self.grace, self.python = n, grace, python
         self.idle: asyncio.Queue | None = None
 
-    @staticmethod
-    async def _spawn() -> asyncio.subprocess.Process:
+    async def _spawn(self) -> asyncio.subprocess.Process:
+        cmd = [self.python, str(Path(__file__))] if self.python else [sys.executable, "-m", "porygon.engine_worker"]
         return await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "porygon.engine_worker",
+            *cmd,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, limit=2**24,
         )
 

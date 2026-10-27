@@ -29,6 +29,7 @@ import json
 import logging
 import random
 import time
+from functools import partial
 
 import numpy as np
 from poke_env import AccountConfiguration
@@ -36,6 +37,7 @@ from poke_env.concurrency import handle_threaded_coroutines
 
 from porygon.env import PolicyPlayer, local_server
 from porygon.model import load_policy
+from porygon.decisions import LoggedSearchPlayer
 from porygon.search import CONFIG, SearchPlayer, add_value_args
 
 log = logging.getLogger("vs_foulplay")
@@ -127,6 +129,7 @@ async def main():
     p.add_argument("--retries", type=int, default=3)
     p.add_argument("--battle-timeout", type=float, default=1800)
     p.add_argument("--results", default="foulplay_results.jsonl", help="per-battle JSONL (appended)")
+    p.add_argument("--log-dir", help="search: record decisions and replays here (porygon.decisions)")
     p.add_argument("--format", default="gen4randombattle")
     a = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
@@ -139,7 +142,8 @@ async def main():
     players = []
     for i, _ in enumerate(a.opponents):
         acc = AccountConfiguration(f"{a.player[:3]}{tag}x{i}", None)
-        players.append(SearchPlayer(policy, **cfg, workers=a.workers, account_configuration=acc, **common)
+        search = (partial(LoggedSearchPlayer, out=a.log_dir) if a.log_dir else SearchPlayer)
+        players.append(search(policy, **cfg, workers=a.workers, account_configuration=acc, **common)
                        if a.player == "search" else PolicyPlayer(policy, account_configuration=acc, **common))
     for pl in players:
         if a.player == "search":

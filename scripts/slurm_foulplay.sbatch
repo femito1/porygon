@@ -45,6 +45,10 @@ EOF
 OUT=runs/foulplay-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
 LOGS=${TMPDIR:-/tmp}/porygon-fp-$SLURM_JOB_ID; mkdir -p "$LOGS"  # Foul Play logs are chatty: keep them off the shared disk
 PORT=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 + 15 ))
+# duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged
+[ -f .showdown-eval/dist/server/index.js ] || scripts/build_eval_server.sh
+export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$ROOT/$OUT/battles.jsonl
+export PORYGON_DUPLICATE_GROUP='^fp'
 scripts/start_servers.sh 1 "$PORT"
 LOOPS=()
 trap 'kill "${LOOPS[@]}" 2>/dev/null || true
@@ -52,6 +56,9 @@ trap 'kill "${LOOPS[@]}" 2>/dev/null || true
       pkill -u "$USER" -f "run.py --websocket-uri ws://localhost:$PORT/" || true
       cp "$LOGS"/fp0.log "$OUT"/ 2>/dev/null || true; rm -rf "$LOGS"' EXIT
 
+# Pull the Python environments into the page cache first: on a slow shared disk, modules imported lazily
+# during a websocket handshake can take longer than the 10 s handshake timeout.
+find "$FP/.venv" "$FP/fp" .venv/lib/python3.12/site-packages/{websockets,poke_env} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
 NAMES=()
 for ((i = 0; i < K; i++)); do
   NAMES+=("fp${SLURM_JOB_ID}x$i")
@@ -71,7 +78,8 @@ echo "$K Foul Play instances up on port $PORT"
 # our search: ~4 engine workers per simultaneous battle; leave a core per Foul Play instance + overhead
 WORKERS=$(( $(nproc) - K - 3 ))
 .venv/bin/python scripts/vs_foulplay.py "$MODEL" --player search --port "$PORT" --opponents "${NAMES[@]}" \
-  --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" "$@" 2>&1 | tee "$OUT/vs.log" || true
+  --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" "$@" 2>&1 | tee "$OUT/vs.log" || true
+.venv/bin/python scripts/analyze_benchmark.py "$OUT" 2>&1 | tee "$OUT/analysis.txt" || true
 python3 - "$OUT/results.jsonl" <<'EOF'
 import json, math, sys
 r = [json.loads(line) for line in open(sys.argv[1])]

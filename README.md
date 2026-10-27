@@ -28,8 +28,16 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 - **Search** (`porygon.search`, defaults 1000 ms/move, 4 sampled opponent sets, prior weight
   0.25): beats the raw network ~75% head-to-head and the heuristic bot 97%.
 - **vs Foul Play** (pmariglia's search bot, 1000 ms/move, `scripts/slurm_foulplay.sbatch`): the search
-  player with the 400M network wins **55.0% ± 4.9%** (219-179, 400 battles; 49% with the 91M
-  network); the raw network alone 16.5% (91M, 200).
+  player wins **52.6% ± 2.2%** over every run of the default search (1048-944: 400M, 400M with the
+  fidelity fixes, 500M three times; single 400-battle runs ranged 50-55%, 49% with the 91M network);
+  the raw network alone 16.5% (91M, 200). None of the changes since the 400M network (fidelity fixes,
+  500M, value lookahead 0.5: 49.7%, prior weight 1.0: 49.6%) moved it measurably; the engine patch is
+  neutral head-to-head too (49.1% ± 4.1% vs the stock engine, 200 duplicate pairs).
+- **Benchmark method**: benchmarks run on a patched Showdown (`scripts/build_eval_server.sh`) that plays
+  duplicate pairs (same seeds, teams swapped) and logs the true teams; `scripts/analyze_benchmark.py`
+  scores the pairs, our opponent inference and the decisive turns. Pairing is worth only ~1.1x the games
+  vs Foul Play (1.4x search vs search): outcomes are mostly decided in-battle, not by the teams. Our
+  determinizations get a hidden ability right ~95%, an item ~60%, a move ~65%, a whole set ~35%.
 - **Value lookahead** (`porygon.lookahead`: one turn ahead, every outcome scored by the network's value,
   400M network, 300 battles each, `scripts/slurm_search.sbatch`): on its own it beats the raw network
   only 53.3% ± 5.6%; mixed half-and-half into the search it beats the search 53.7% ± 5.6%, and replacing
@@ -62,6 +70,8 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
 | `scripts/pod_*.sh`, `pod_retry_deploy.py`, `vm_setup.sh` | fallbacks: RunPod pods, a plain GPU VM |
 | `scripts/vs_foulplay.py` | benchmark vs Foul Play (setup in its docstring) |
+| `src/porygon/decisions.py`, `scripts/analyze_benchmark.py` | benchmark decision logs; duplicate scoring, inference accuracy, swings |
+| `scripts/build_eval_server.sh`, `patches/showdown-*` | benchmark Showdown: duplicate battles, true teams logged |
 | `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48 with gen4 taunt / encore / confusion durations |
 | `scripts/ladder_watchdog.sh` | long ladder sessions |
 
@@ -140,11 +150,11 @@ PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_G
 ```
 
 ## Roadmap
-1. **Beat Foul Play convincingly** (now 55.0% ± 4.9%). The network's value in the search, tried as a
-   one-turn lookahead, gives at most a small gain (see Results); deeper use of it (value at the leaves
-   of the engine's MCTS) needs a poke-engine fork and is only worth it once the value is sharper. More
-   PPO (400M beats 300M 54.5%, ~+30 Elo per 100M steps; raise `TOTAL` to continue) and the
-   search-fidelity gaps (3) remain.
+1. **Beat Foul Play convincingly** (now 52.6% ± 2.2%, mostly from using 4x its compute). The value
+   lookahead, the fidelity fixes, more PPO (600M trained) and a higher prior weight all left it where it
+   was, so the next step is diagnosis: an oracle run that gives the search the true sets of revealed
+   mons bounds what better opponent inference (items ~60%, moves ~65% right) can be worth. The network
+   in the engine's tree (priors, then values) is the other candidate.
 2. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
