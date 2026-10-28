@@ -72,7 +72,7 @@ def test_opponent_choice_lock_and_toxic():
     assert side.last_used_move == "move:0" and side.side_conditions.toxic_count == 1
     # two different moves in one stint -> never guess a choice item
     battle = battle_from(log + "\n|move|p2a: Jirachi|U-turn|p1a: Blissey\n|turn|3")
-    assert "p2: Jirachi" in History(battle).unlocked
+    assert "p2: Jirachi" in History(battle).evidence.unlocked
     assert not any(state_of(battle, s).side_two.pokemon[0].item.startswith("CHOICE") for s in range(30))
 
 

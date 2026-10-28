@@ -1,10 +1,9 @@
 """Decision-time search on top of the PPO network (Wang 2024, ch. 5 style), using poke-engine.
 
 Each decision we
-  1. sample `samples` determinizations of the battle: our side is fully known; the opponent's
-     unrevealed moves / item / ability / mons are drawn from the gen4 random-battle sets,
-     consistent with what has been revealed, and stats follow the random-battle rules
-     (level from the data, 85 EVs, 31 IVs, neutral nature);
+  1. sample `samples` determinizations of the battle: our side is fully known; each opponent mon gets a whole
+     gen4 random-battle set (moves, item, ability, EVs / IVs) consistent with everything the battle has shown
+     (`porygon.inference`), and unrevealed mons follow the gen4 random team rules (`sample_species`);
   2. run poke-engine's simultaneous-move MCTS on every sample for `ms` milliseconds (in parallel
      worker processes, `porygon.engine_worker`);
   3. score each legal action as  mean visit share over samples + prior_weight * network prob,
@@ -15,18 +14,16 @@ With value_weight > 0 the visit shares are mixed with a one-turn lookahead score
 Any failure (conversion, engine panic, unmappable choice) falls back to the network's argmax.
 
 Tracked beyond what poke-env exposes (`History`, read from the battle log): Wish and Future Sight / Doom
-Desire timers, Rest's fixed sleep, both sides' last move (choice lock, encore, fake out), and mons seen using
-two different moves in one stint (no choice item). Unrevealed opponent mons follow the gen4 random team rules
-(`sample_species`).
+Desire timers, Rest's fixed sleep, both sides' last move (choice lock, encore, fake out), and the evidence about
+the opponent's sets (`inference.Evidence`).
 
 Taunt / encore / confusion pass poke-env's elapsed counts; with the patched engine (scripts/build_engine.sh) they
 end after their random gen4 durations instead of lasting forever. Substitute HP is 1/4 max HP minus an estimate
 of every hit it took (`substitute_left`).
 
 Approximations / ignored (documented, not bugs): opponent PP = what poke-env tracks; hidden power is always
-70 BP and its type for the opponent comes from the sampled set; the random-battle item logic is a simplified
-re-implementation; partial-trap / disable timers are not transferred; weather from abilities is permanent
-(gen4), other weather lasts 5 turns from when we first saw it.
+70 BP and its type for the opponent comes from the sampled set; partial-trap / disable timers are not
+transferred; weather from abilities is permanent (gen4), other weather lasts 5 turns from when we first saw it.
 
     python -m porygon.search runs/<run>/best_model.zip --opponent heuristic --n-battles 100
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
@@ -58,6 +55,7 @@ from poke_env.environment import SinglesEnv
 from poke_env.player import BattleOrder, DefaultBattleOrder, Player
 from stable_baselines3.common.policies import ActorCriticPolicy
 
+from porygon import inference
 from porygon.encoder import embed_battle
 from porygon.engine_worker import EnginePool
 from porygon.env import PolicyPlayer, local_server
@@ -66,8 +64,6 @@ from porygon.model import load_policy
 
 log = logging.getLogger("porygon.search")
 GEN = GenData.from_gen(4)
-SETS_PATH = Path(__file__).resolve().parents[2] / "pokemon-showdown/data/random-battles/gen4/sets.json"
-UNION_PATH = Path(__file__).parent / "data/gen4randombattle_sets.json"
 
 STATUS = {Status.BRN: "burn", Status.SLP: "sleep", Status.FRZ: "freeze", Status.PAR: "paralyze",
           Status.PSN: "poison", Status.TOX: "toxic"}
@@ -81,107 +77,18 @@ SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effect
 TIMED_EFFECTS = {"taunt": Effect.TAUNT, "encore": Effect.ENCORE, "confusion": Effect.CONFUSION}
 # two-turn moves; the engine marks the charging turn with a volatile of the same name
 CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
-EV, IV = 85, 31
+DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
+                            dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets
+
+norm, matches = inference.norm, inference.matches
 
 
-def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-# ---------------------------------------------------------------- random-battle set data
-
-@cache
-def role_sets() -> dict[str, list[dict[str, Any]]]:
-    """species -> [{role, movepool, abilities}] from the Showdown checkout, else the movepool union."""
-    if SETS_PATH.exists():
-        raw = json.loads(SETS_PATH.read_text())
-        return {sp: [{"role": s["role"], "movepool": s["movepool"], "abilities": [norm(a) for a in s["abilities"]]}
-                     for s in v["sets"]] for sp, v in raw.items()}
-    union = json.loads(UNION_PATH.read_text())
-    return {sp: [{"role": "", "movepool": v["moves"], "abilities": v["abilities"]}] for sp, v in union.items()}
+# ---------------------------------------------------------------- random teams
 
 
 @cache
 def levels() -> dict[str, int]:
-    return {sp: v["level"] for sp, v in json.loads(UNION_PATH.read_text()).items()}
-
-
-def move_data(move: str) -> dict[str, Any]:
-    return GEN.moves.get("hiddenpower" if move.startswith("hiddenpower") else move, {})
-
-
-def matches(revealed: str, pool_move: str) -> bool:
-    # poke-env reports the opponent's hidden power without its type
-    return pool_move == revealed or (revealed == "hiddenpower" and pool_move.startswith("hiddenpower"))
-
-
-def guess_item(species: str, role: str, moves: list[str], ability: str, rng: random.Random) -> str:
-    """Simplified version of the gen4 random-battle item choice (pokemon-showdown teams.ts)."""
-    dex = GEN.pokedex[species]
-    spe, atk, spa = dex["baseStats"]["spe"], dex["baseStats"]["atk"], dex["baseStats"]["spa"]
-    cats = [move_data(m).get("category") for m in moves]
-    phys, spec = cats.count("Physical"), cats.count("Special")
-    has = set(moves).__contains__
-    priority = any(move_data(m).get("priority", 0) > 0 and move_data(m).get("category") != "Status" for m in moves)
-    scarf_ok = role != "Wallbreaker" and 60 <= spe <= 108 and not priority and not has("pursuit")
-    fixed = {"latias": "souldew", "latios": "souldew", "marowak": "thickclub", "pikachu": "lightball",
-             "shedinja": "focussash", "smeargle": "focussash", "wobbuffet": "custapberry",
-             "shuckle": "leftovers", "honchkrow": "lifeorb", "palkia": "lustrousorb",
-             "giratinaorigin": "griseousorb", "farfetchd": "stick"}
-    if species in fixed:
-        return fixed[species]
-    if ability == "poisonheal" or has("facade"):
-        return "toxicorb"
-    if has("trick") or has("switcheroo") or has("healingwish"):
-        return "choicescarf" if scarf_ok else "choiceband" if phys > spec else "choicespecs"
-    if has("bellydrum") or ability == "unburden":
-        return "sitrusberry"
-    if has("waterspout"):
-        return "choicescarf"
-    if ability == "magicguard":
-        return "lifeorb"
-    if has("reflect") and has("lightscreen"):
-        return "lightclay"
-    if has("rest") and not has("sleeptalk") and ability not in ("naturalcure", "shedskin"):
-        return "chestoberry"
-    if role == "Staller":
-        item = "leftovers"
-    elif spec == 4:
-        item = "choicescarf" if scarf_ok and spa >= 90 and rng.random() < 0.5 else "choicespecs"
-    elif phys == 4 and not (has("fakeout") or has("rapidspin")):
-        item = "choicescarf" if scarf_ok and atk >= 100 and rng.random() < 0.5 else "choiceband"
-    elif has("protect") or has("substitute"):
-        item = "leftovers"
-    elif role == "Fast Support":
-        item = "lifeorb" if phys + spec >= 3 and not (has("rapidspin") or has("uturn")) else "leftovers"
-    elif role in ("Fast Attacker", "Setup Sweeper", "Wallbreaker") and not has("rapidspin"):
-        item = "lifeorb"
-    else:
-        item = "leftovers"
-    return "blacksludge" if item == "leftovers" and "Poison" in dex["types"] else item
-
-
-def sample_set(species: str, revealed_moves: list[str], ability: str | None,
-               rng: random.Random) -> tuple[str, list[str], str]:
-    """(role, 4 moves, ability) of a random-battle set consistent with what was revealed."""
-    sets = role_sets().get(species) or [{"role": "", "movepool": revealed_moves or ["tackle"], "abilities": []}]
-    ok = [s for s in sets
-          if all(any(matches(r, m) for m in s["movepool"]) for r in revealed_moves)
-          and (ability is None or not s["abilities"] or ability in s["abilities"])]
-    chosen = rng.choice(ok or sets)
-    pool = chosen["movepool"]
-    moves = [next((m for m in pool if matches(r, m)), r) for r in revealed_moves][:4]
-    rest = [m for m in pool if m not in moves]
-    rng.shuffle(rest)
-    for m in rest:
-        if len(moves) == 4:
-            break
-        if m.startswith("hiddenpower") and any(x.startswith("hiddenpower") for x in moves):
-            continue
-        moves.append(m)
-    if ability is None:
-        ability = rng.choice(chosen["abilities"]) if chosen["abilities"] else "none"
-    return chosen["role"], moves, ability
+    return {sp: level for sp, (level, _) in inference.library().items()}
 
 
 TYPES = ["BUG", "DARK", "DRAGON", "ELECTRIC", "FIGHTING", "FIRE", "FLYING", "GHOST", "GRASS", "GROUND", "ICE",
@@ -203,7 +110,7 @@ def species_info(species: str) -> tuple[str, list[str], list[int]]:
 @cache
 def base_species_pool() -> dict[str, list[str]]:
     pool: dict[str, list[str]] = {}
-    for sp in role_sets():
+    for sp in inference.library():
         if sp in GEN.pokedex:
             pool.setdefault(species_info(sp)[0], []).append(sp)
     return pool
@@ -256,18 +163,17 @@ def sample_species(known: list[str], n: int, rng: random.Random) -> list[str]:
 
 class History:
     """What poke-env does not track, read from the battle log: per side ('p1' / 'p2') the turn Wish and Future
-    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, mons that used two different
-    moves in one stint on the field (so they cannot hold a choice item), the hits (attacker, move) each
-    standing substitute took, and how many moves each confused mon has tried while confused."""
+    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, the hits (attacker, move) each
+    standing substitute took, how many moves each confused mon has tried while confused, and the evidence
+    about the opponent's sets."""
 
     def __init__(self, battle: AbstractBattle):
         self.wish: dict[str, int] = {}
         self.future: dict[str, tuple[int, str]] = {}
         self.rest: set[str] = set()
-        self.unlocked: set[str] = set()
         self.sub_hits: dict[str, list[tuple[str, str]]] = {}
         self.confused: dict[str, int] = {}
-        stint: dict[str, set[str]] = {}
+        self.evidence = inference.battle_evidence(battle)
         turn, last = 0, ("", "")
         for ev in battle._replay_data:
             if len(ev) < 3:
@@ -276,7 +182,6 @@ class History:
             if kind == "turn":
                 turn = int(ev[2])
             elif kind in ("switch", "drag"):
-                stint[key] = set()
                 self.sub_hits.pop(key, None)
                 self.confused.pop(key, None)
             elif kind == "move" and len(ev) > 3:
@@ -284,10 +189,6 @@ class History:
                 last = (key, move)
                 if move == "wish":
                     self.wish[key[:2]] = turn
-                if move != "struggle" and not any(x.startswith("[from]") for x in ev[4:]):
-                    stint.setdefault(key, set()).add(move)
-                    if len(stint[key]) > 1:
-                        self.unlocked.add(key)
             elif kind == "-start" and len(ev) > 3 and norm(ev[3]).endswith(("futuresight", "doomdesire")):
                 self.future[key[:2]] = (turn, key)
             elif kind == "-status" and len(ev) > 3 and ev[3] == "slp":
@@ -327,19 +228,12 @@ def engine_types(mon: Pokemon) -> tuple[str, str]:
     return ts[0], ts[1]
 
 
-def calc_stats(species: str, level: int, physical: bool, evs: dict[str, int] | None = None,
-               ivs: dict[str, int] | None = None) -> dict[str, int]:
-    """Neutral-nature stats; `evs` / `ivs` (a true set's) override the random-battle defaults."""
+def calc_stats(species: str, level: int, evs: dict[str, int], ivs: dict[str, int]) -> dict[str, int]:
+    """Neutral-nature stats (random battles have no natures)."""
     base = GEN.pokedex[species]["baseStats"]
-    def ev_iv(s: str) -> tuple[int, int]:
-        if evs is not None and ivs is not None:
-            return evs[s], ivs[s]
-        return (0, 0) if s == "atk" and not physical else (EV, IV)  # random battles minimise confusion damage
-    ev, iv = ev_iv("hp")
-    out = {"hp": (2 * base["hp"] + iv + ev // 4) * level // 100 + level + 10}
-    for s in ("atk", "def", "spa", "spd", "spe"):
-        ev, iv = ev_iv(s)
-        out[s] = (2 * base[s] + iv + ev // 4) * level // 100 + 5
+    out = {"hp": (2 * base["hp"] + ivs["hp"] + evs["hp"] // 4) * level // 100 + level + 10}
+    for st in ("atk", "def", "spa", "spd", "spe"):
+        out[st] = (2 * base[st] + ivs[st] + evs[st] // 4) * level // 100 + 5
     return out
 
 
@@ -382,33 +276,30 @@ def own_mon(mon: Pokemon, disabled: set[str], rest: bool) -> tuple[pe.Pokemon, l
                     item, mv, *status_of(mon, rest), mon.weight), ids
 
 
+def true_set(truth: dict[str, Any]) -> inference.Set:
+    """A true set (Showdown's PokemonSet, oracle runs) as a library set."""
+    return inference.Set(tuple(norm(m) for m in truth["moves"]), norm(truth["ability"]), norm(truth["item"]),
+                         truth.get("role", ""), truth["evs"], truth["ivs"], 1, 0)
+
+
 def opp_mon(mon: Pokemon | None, species: str, rng: random.Random, hist: History | None = None,
             key: str = "", truth: dict[str, Any] | None = None) -> tuple[pe.Pokemon, list[str]]:
-    """Opponent mon (None = unrevealed, sampled from `species`) with hidden info determinized; also returns
-    its poke-env move ids. A known item is kept (None = it has none), a choice item is only guessed if the mon
-    never used two different moves in one stint, and an active choice holder is locked into its last move.
-    `truth`: its true set (Showdown's PokemonSet, oracle runs), used instead of sampling."""
+    """Opponent mon (None = unrevealed, sampled from `species`) with its set drawn by `inference.sample`; also
+    returns its poke-env move ids. A known item is kept (None = it has none), and an active choice holder is
+    locked into its last move. `truth`: its true set (oracle runs), used instead of sampling."""
     revealed = [m for m in (mon.moves if mon else {}) if norm(m) != "struggle"]
-    unlocked = hist is not None and key in hist.unlocked
-    known_item = mon is not None and mon.item != GEN.UNKNOWN_ITEM
     if truth is not None:
-        pool = [norm(m) for m in truth["moves"]]
-        moves = [next((m for m in pool if matches(r, m)), r) for r in revealed][:4]
-        moves += [m for m in pool if m not in moves][:4 - len(moves)]
-        ability, item = norm(truth["ability"]), norm(truth["item"]) or "none"
-        level = truth["level"]
-        stats = calc_stats(species, level, False, truth["evs"], truth["ivs"])
+        level, s = truth["level"], true_set(truth)
     else:
-        for _ in range(5):
-            role, moves, ability = sample_set(species, revealed, mon.ability if mon else None, rng)
-            item = (mon.item or "none") if known_item else guess_item(species, role, moves, ability, rng)
-            if known_item or not (unlocked and item.startswith("choice")):
-                break
-        else:
-            item = "leftovers"
-        level = mon.level if mon else levels().get(species, 80)
-        physical = any(move_data(m).get("category") == "Physical" for m in moves)
-        stats = calc_stats(species, level, physical)
+        level, s = inference.sample(species, mon, rng, hist.evidence if hist else None, key)
+    s = s or DEFAULT_SET
+    if mon is not None:
+        level = mon.level
+    moves = [next((m for m in s.moves if matches(r, m)), r) for r in revealed][:4]
+    moves += [m for m in s.moves if m not in moves][:4 - len(moves)]
+    ability = norm(mon.ability) if mon and mon.ability else s.ability
+    item = (mon.item or "none") if mon is not None and mon.item != GEN.UNKNOWN_ITEM else s.item or "none"
+    stats = calc_stats(species, level, s.evs, s.ivs)
     pp = {m: mv.current_pp for m, mv in mon.moves.items()} if mon else {}
     lock = last_used(mon, moves) if mon and mon.active and item.startswith("choice") else None
     mv = [(norm(engine_move(m)), pp.get("hiddenpower" if m.startswith("hiddenpower") else m, 16),
@@ -550,12 +441,12 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     opp = list(battle.opponent_team.values())
     n_unrevealed = max(0, min(6, battle.max_team_size or 6) - len(opp))
     if oracle_all and true_sets:
-        unrevealed = [s for s in true_sets if s not in {norm(m.species) for m in opp}][:n_unrevealed]
+        unrevealed = [s for s in true_sets if s not in {inference.set_species(m.species) for m in opp}][:n_unrevealed]
     else:
         unrevealed = sample_species([m.species for m in opp], n_unrevealed, rng)
     theirs, opp_moves = [], []
     for key, m in zip(opp_keys, opp):
-        mon, moves = opp_mon(m, m.species, rng, hist, key, true_sets.get(norm(m.species)))
+        mon, moves = opp_mon(m, m.species, rng, hist, key, true_sets.get(inference.set_species(m.species)))
         theirs.append(mon)
         opp_moves.append(moves)
     theirs += [opp_mon(None, s, rng, truth=true_sets.get(s) if oracle_all else None)[0] for s in unrevealed]

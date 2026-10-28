@@ -25,4 +25,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-porygon = ["data/*.json"]
+porygon = ["data/*.json", "data/*.json.gz"]
