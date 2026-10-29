@@ -14,7 +14,8 @@ from poke_env.player import SimpleHeuristicsPlayer  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
 from porygon.env import local_server  # noqa: E402
-from porygon.search import History, SearchPlayer, convert, sample_species, species_info  # noqa: E402
+from porygon.search import (  # noqa: E402
+    DEFAULT_SET, History, SearchPlayer, calc_stats, convert, make_mon, sample_species, species_info)
 
 MODEL = Path(__file__).resolve().parents[1] / "runs/20261019-185359/best_model.zip"
 START = """|player|p1|me|
@@ -118,6 +119,21 @@ def test_engine_is_patched_for_gen4_durations():
         "unpatched poke-engine: run scripts/build_engine.sh"
 
 
+def test_root_priors_steer_the_search():
+    """scripts/build_engine.sh's root-priors patch: PUCT sends visits to the prior's choice, none to a zero prior."""
+    def mon(species: str, moves: list[str]) -> pe.Pokemon:
+        st = calc_stats(species, 80, DEFAULT_SET.evs, DEFAULT_SET.ivs)
+        return make_mon(species, 80, ("normal", "typeless"), st["hp"], st["hp"], st, "none", "none",
+                        [(m, 16, False) for m in moves], "none", 0, 0, 50.0)
+    side = lambda moves: pe.Side(pokemon=[mon("snorlax", moves), mon("chansey", ["splash"])]  # noqa: E731
+                                 + [pe.Pokemon.create_fainted()] * 4)
+    state = pe.State(side_one=side(["bodyslam", "splash"]), side_two=side(["bodyslam"]))
+    visits = lambda r: {o.move_choice: o.visits for o in r.side_one}  # noqa: E731
+    plain = visits(pe.monte_carlo_tree_search(state, iterations=20000))
+    steered = visits(pe.monte_carlo_tree_search_priors(state, {"splash": 1.0}, 8.0, iterations=20000))
+    assert steered["splash"] > 3 * plain["splash"] and steered["switch chansey"] <= 1
+
+
 def test_sample_species_follows_team_rules():
     rng = random.Random(0)
     for _ in range(200):
@@ -129,12 +145,13 @@ def test_sample_species_follows_team_rules():
 
 
 @pytest.mark.skipif(not MODEL.exists(), reason="needs a trained model")
-def test_search_battles(n_battles=3):
+@pytest.mark.parametrize("c_puct", [0.0, 4.0])
+def test_search_battles(c_puct, n_battles=3):
     policy = PPO.load(MODEL, device="cpu").policy.eval()
     tag = random.randint(0, 10**6)
     common = dict(battle_format="gen4randombattle", server_configuration=local_server(8000),
                   max_concurrent_battles=n_battles, log_level=40)
-    player = SearchPlayer(policy, ms=50, samples=2, workers=4,
+    player = SearchPlayer(policy, ms=50, samples=2, workers=4, c_puct=c_puct,
                           account_configuration=AccountConfiguration(f"stest{tag}", None), **common)
     opponent = SimpleHeuristicsPlayer(account_configuration=AccountConfiguration(f"htest{tag}", None), **common)
     asyncio.run(player.battle_against(opponent, n_battles=n_battles))

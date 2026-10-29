@@ -8,6 +8,9 @@ Each decision we
      worker processes, `porygon.engine_worker`);
   3. score each legal action as  mean visit share over samples + prior_weight * network prob,
      optionally only among the network's top-k actions, and play the argmax.
+With c_puct > 0 the network's probabilities also steer the search itself: our root options are chosen by
+PUCT on them (floored at PUCT_EPS / number of legal actions) instead of UCB1 (scripts/build_engine.sh's
+root-priors patch); deeper nodes and the opponent keep UCB1.
 With value_weight > 0 the visit shares are mixed with a one-turn lookahead scored by the network's value
 (`porygon.lookahead`), run on the same determinizations while the engine searches:
   share = (1 - value_weight) * visit share + value_weight * lookahead equilibrium probability.
@@ -77,6 +80,7 @@ SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effect
 TIMED_EFFECTS = {"taunt": Effect.TAUNT, "encore": Effect.ENCORE, "confusion": Effect.CONFUSION}
 # two-turn moves; the engine marks the charging turn with a volatile of the same name
 CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
+PUCT_EPS = 0.1  # share of the PUCT priors spread evenly over the legal actions, so none goes unexplored
 DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
                             dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets
 
@@ -403,6 +407,12 @@ class Converted:
         self.state_str = state.to_string()
         self.switch_ids, self.move_ids = switch_ids, move_ids
 
+    def priors(self, probs: np.ndarray, mask: np.ndarray) -> dict[str, float]:
+        """The network's probabilities (floored, `PUCT_EPS`) by engine choice, for the root PUCT."""
+        names = dict(enumerate(f"switch {s}" for s in self.switch_ids)) | {6 + i: m for i, m in enumerate(self.move_ids)}
+        legal = [a for a in np.flatnonzero(mask > 0) if a in names]
+        return {names[a]: float((1 - PUCT_EPS) * probs[a] + PUCT_EPS / len(legal)) for a in legal}
+
     def action(self, choice: str) -> int | None:
         if choice.startswith("switch "):
             name = choice[len("switch "):]
@@ -494,20 +504,22 @@ def engine_pool(workers: int | None = None, python: str | None = None) -> Engine
 
 
 class SearchPlayer(Player):
-    """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; value_weight=1
+    """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; c_puct > 0: PUCT on
+    the network's priors at our root options instead of UCB1 (needs the patched engine); value_weight=1
     replaces the engine search by the value lookahead (value_top_k: only the network's top-k actions,
     value_min_prob: chance outcomes below it are dropped). engine_python: interpreter for the engine workers.
     oracle ("revealed" / "all", diagnosis only): the opponent's true sets from `oracle_dir`, written by the
     duplicate server (PORYGON_DUPLICATE_TEAMS), replace the samples for revealed mons, or for all of them."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
-                 prior_weight: float = 0.25, top_k: int | None = None, value_weight: float = 0.0,
+                 prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
                  engine_python: str | None = None, oracle: str | None = None, oracle_dir: str | None = None,
                  seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
+        self.c_puct = c_puct
         self.pool = engine_pool(workers, engine_python)
         self.lookahead = None
         if value_weight > 0:
@@ -554,7 +566,7 @@ class SearchPlayer(Player):
         value = (asyncio.create_task(asyncio.to_thread(self.lookahead.shares, battle, convs, probs, mask))
                  if self.lookahead else None)
         try:
-            mcts = await self.mcts_shares(convs) if w < 1 else None
+            mcts = await self.mcts_shares(convs, probs, mask) if w < 1 else None
         except Exception:
             if value is None:
                 raise
@@ -583,9 +595,10 @@ class SearchPlayer(Player):
                 return None
         return self.truth[battle.battle_tag]
 
-    async def mcts_shares(self, convs: list[Converted]) -> np.ndarray:
-        results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms) for c in convs),
-                                       return_exceptions=True)
+    async def mcts_shares(self, convs: list[Converted], probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        searches = [self.pool.search(c.state_str, self.ms, c.priors(probs, mask), self.c_puct) if self.c_puct > 0
+                    else self.pool.search(c.state_str, self.ms) for c in convs]
+        results = await asyncio.gather(*searches, return_exceptions=True)
         shares, ok, errors = np.zeros(10), 0, []
         for conv, options in zip(convs, results):  # a failed sample (engine panic) is just skipped
             try:
@@ -654,7 +667,8 @@ class SearchPlayer(Player):
 
 # ---------------------------------------------------------------- CLI
 
-CONFIG = ("ms", "samples", "prior_weight", "top_k", "value_weight", "value_top_k", "value_min_prob", "engine_python")
+CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "value_weight", "value_top_k", "value_min_prob",
+          "engine_python")
 
 
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
@@ -700,7 +714,8 @@ async def run(args: argparse.Namespace) -> None:
           f"same as network argmax {s['agree'] / max(s['searched'], 1):.1%}, {time.time() - start:.0f}s")
 
 
-CONFIG_TYPES = {"prior_weight": float, "value_weight": float, "value_min_prob": float, "engine_python": str}
+CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "value_weight": float, "value_min_prob": float,
+                "engine_python": str}
 
 
 def add_value_args(p: argparse.ArgumentParser) -> None:
@@ -728,6 +743,7 @@ def main():
     p.add_argument("--samples", type=int, default=4, help="determinizations per decision")
     p.add_argument("--prior-weight", type=float, default=0.25, help="0 = pure engine search")
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
+    p.add_argument("--c-puct", type=float, default=0.0, help="PUCT on the network's priors at our root (0 = UCB1)")
     add_value_args(p)
     for k in CONFIG:  # the --opponent search configuration
         p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))

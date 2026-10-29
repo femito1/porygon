@@ -14,9 +14,15 @@ from pathlib import Path
 import poke_engine as pe
 
 
-def search(state_str: str, ms: int) -> list[tuple[str, int, float]]:
-    """MCTS on one determinization -> [(our engine choice, visits, total score in [0, visits])]."""
-    result = pe.monte_carlo_tree_search(pe.State.from_string(state_str), duration_ms=ms)
+def search(state_str: str, ms: int, priors: dict[str, float] | None = None,
+           c_puct: float = 0.0) -> list[tuple[str, int, float]]:
+    """MCTS on one determinization -> [(our engine choice, visits, total score in [0, visits])]. With c_puct > 0
+    our root options are chosen by PUCT on `priors` (engine choice -> prior; needs the patched engine)."""
+    state = pe.State.from_string(state_str)
+    if c_puct > 0:
+        result = pe.monte_carlo_tree_search_priors(state, priors or {}, c_puct, duration_ms=ms)
+    else:
+        result = pe.monte_carlo_tree_search(state, duration_ms=ms)
     return [(o.move_choice, o.visits, o.total_score) for o in result.side_one]
 
 
@@ -24,7 +30,7 @@ def main() -> None:
     for line in sys.stdin:
         req = json.loads(line)
         try:
-            reply = {"ok": search(req["state"], req["ms"])}
+            reply = {"ok": search(req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0))}
         except BaseException as e:  # Rust panics surface as pyo3 PanicException (a BaseException)
             reply = {"error": f"{type(e).__name__}: {e}"}
         sys.stdout.write(json.dumps(reply) + "\n")
@@ -49,14 +55,16 @@ class EnginePool:
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, limit=2**24,
         )
 
-    async def search(self, state_str: str, ms: int) -> list[tuple[str, int, float]]:
+    async def search(self, state_str: str, ms: int, priors: dict[str, float] | None = None,
+                     c_puct: float = 0.0) -> list[tuple[str, int, float]]:
         if self.idle is None:
             self.idle = asyncio.Queue()
             for _ in range(self.n):
                 self.idle.put_nowait(await self._spawn())
         proc, line = await self.idle.get(), b""
         try:
-            proc.stdin.write((json.dumps({"state": state_str, "ms": ms}) + "\n").encode())
+            req = {"state": state_str, "ms": ms} | ({"priors": priors, "c_puct": c_puct} if c_puct > 0 else {})
+            proc.stdin.write((json.dumps(req) + "\n").encode())
             await proc.stdin.drain()
             line = await asyncio.wait_for(proc.stdout.readline(), ms / 1000 + self.grace)
         finally:

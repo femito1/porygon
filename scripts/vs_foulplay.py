@@ -50,9 +50,9 @@ def guard_pool(pool, timeout: float) -> None:
         return
     search = pool.search
 
-    async def guarded(state_str: str, ms: int):
+    async def guarded(state_str: str, ms: int, *args):
         try:
-            return await asyncio.wait_for(search(state_str, ms), timeout + ms / 1000)
+            return await asyncio.wait_for(search(state_str, ms, *args), timeout + ms / 1000)
         except asyncio.TimeoutError:
             log.warning("poke-engine search exceeded %.0fs, worker replaced", timeout + ms / 1000)
             raise RuntimeError("poke-engine search timed out")
@@ -121,6 +121,7 @@ async def main():
     p.add_argument("--ms", type=int, default=1000, help="SearchPlayer: MCTS ms per determinization")
     p.add_argument("--samples", type=int, default=4, help="SearchPlayer: determinizations per decision")
     p.add_argument("--prior-weight", type=float, default=0.25)
+    p.add_argument("--c-puct", type=float, default=0.0, help="SearchPlayer: PUCT on the network's priors at the root")
     p.add_argument("--top-k", type=int, default=None)
     add_value_args(p)
     add_oracle_args(p)
