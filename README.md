@@ -39,8 +39,9 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   `scripts/score_inference.py`): sampling whole sets from Showdown's own generator, conditioned on
   what the log shows and rules out, gets a revealed mon's whole set right 58% of the time (the old
   re-implemented set logic: 35%), a hidden item 83–86% (58–60%), a hidden move 78% (65%); the same live.
-  Against Foul Play it scored 50.7% ± 4.2% (500M, 400 games): no measurable gain yet. A third of the way
-  from 35% to exact sets is worth ~+3 points if the oracle's +9 scales, which needs ~2000 games to see.
+  Against Foul Play (500M, 400 games each) it scored 50.7% ± 4.2% with 4 samples and 53.6% ± 4.3% with 8
+  (2x the compute): no measurable gain. A third of the way from 35% to exact sets is worth ~+3 points if
+  the oracle's +9 scales, which needs ~2000 games per arm to see.
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
   beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
   a replacement for the engine search 42.7%. The value is not yet sharper than poke-engine's search.
