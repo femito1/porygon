@@ -27,9 +27,9 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   Every checkpoint beats every earlier one; gains slow after ~30M steps.
 - **Search** (`porygon.search`, defaults 1000 ms/move, 4 sampled opponent sets, prior weight
   0.25): beats the raw network ~75% head-to-head and the heuristic bot 97%.
-- **vs Foul Play** (pmariglia's search bot, 1000 ms/move on one core): our search wins **52.6% ± 2.2%**
-  (all runs of the default search with the 400M–500M networks; 49% with 91M; the raw network alone
-  16.5%), using 4x its compute (4 parallel 1 s searches). It did not move with the patched engine
+- **vs Foul Play** (pmariglia's search bot, 1000 ms/move on one core), before the inference rebuild below:
+  our search won **52.6% ± 2.2%** (all runs of the default search with the 400M–500M networks; 49% with
+  91M; the raw network alone 16.5%), using 4x its compute (4 parallel 1 s searches). It did not move with the patched engine
   (49.1% ± 4.1% head-to-head vs the stock engine), 500M vs 400M, prior weight 0.5 (54.2%) or 1.0
   (49.6%), or the value lookahead.
 - **Oracle** (the search given the opponent's true sets, 500M, 400 battles each): true sets of the
@@ -39,9 +39,13 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   `scripts/score_inference.py`): sampling whole sets from Showdown's own generator, conditioned on
   what the log shows and rules out, gets a revealed mon's whole set right 58% of the time (the old
   re-implemented set logic: 35%), a hidden item 83–86% (58–60%), a hidden move 78% (65%); the same live.
-  Against Foul Play (500M, 400 games each) it scored 50.7% ± 4.2% with 4 samples and 53.6% ± 4.3% with 8
-  (2x the compute): no measurable gain. A third of the way from 35% to exact sets is worth ~+3 points if
-  the oracle's +9 scales, which needs ~2000 games per arm to see.
+  Against Foul Play (500M) the default search with it wins **54.2% ± 1.8%** (6 runs, 2398 games; single
+  runs 50.7–57.8%), +1.6 ± 2.8 over the old inference: probably a small gain, not yet significant. 8 samples
+  instead of 4 (2x the compute): 53.6% ± 4.3%.
+- **Root PUCT** (`--c-puct`: the network's priors steer our root options in the engine's MCTS instead of the
+  post-hoc mix, `patches/poke-engine-0.0.48-root-priors.patch`; 400 games each, `--prior-weight 0`):
+  c = 2 56.4% ± 4.6%, c = 8 53.2% ± 3.8%. No significant change; poke-engine's Q values differ by only a
+  few hundredths between moves, so the engine still overrides a strong network favourite.
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
   beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
   a replacement for the engine search 42.7%. The value is not yet sharper than poke-engine's search.
@@ -178,12 +182,13 @@ is ±4.5%; compare against the pooled 52.6% ± 2.2%.
    weather at the time). Score on the logged benchmarks first (`scripts/score_inference.py`; new
    evidence must stay 100% consistent with the true teams), then a 400-game Foul Play run. Rebuild the
    library (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
-2. **The network inside the search tree**: priors at every node (PUCT) instead of the 0.25 post-hoc
-   mix, later its value at the leaves. This is where Rust pays: poke-engine's MCTS already runs in
-   Rust (~430k iterations/s), and Python is only per-decision glue (tens of ms against a fixed 1 s
-   budget), so porting that buys nothing; but network evaluations inside the tree must run in Rust
-   (e.g. ONNX through `ort` / `tract` in the patched engine, `patches/`) since Python callbacks cap at
-   ~1k evaluations/s. The value needs to be sharper first (see Value lookahead).
+2. **The network inside the search tree**: root PUCT (`--c-puct`) is built and did not move the result
+   (see Results); c = 2 is worth one more 400-game run before it is dropped. Priors at interior nodes and
+   the network's value at the leaves would need its evaluations inside poke-engine's Rust MCTS (e.g. ONNX
+   through `ort` / `tract` in `patches/`, plus a Rust port of the leaf encoder in `porygon.lookahead`):
+   Python callbacks cap at ~1k evaluations/s against the engine's ~430k iterations/s, while porting the
+   per-decision Python glue (tens of ms per 1 s search) buys nothing. Worth it only once the value is
+   sharper than the engine's evaluation (see Value lookahead).
 3. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
