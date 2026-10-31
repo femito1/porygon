@@ -33,12 +33,14 @@ def true_set(t: dict) -> inference.Set:
 
 
 def fill_ours(battle: Battle, team: list[dict]) -> None:
-    """What our requests would have told poke-env: our mons' speed, ability and (original) item."""
+    """What our requests would have told poke-env: our mons' stats, ability and (original) item."""
     by_species = {t["speciesId"]: t for t in team}
     for mon in battle.team.values():
         t = by_species.get(inference.set_species(mon.species))
         if t is not None and not mon.stats.get("spe"):
-            mon._stats = {"spe": inference.speed(norm(mon.species), t["level"], true_set(t))}
+            st = inference.stats(norm(mon.species), t["level"], t["evs"], t["ivs"])
+            mon._stats = {k: st[k] for k in ("atk", "def", "spa", "spd", "spe")}
+            mon._max_hp = st["hp"]
             mon._ability = norm(t["ability"])
             if mon.item == inference.GEN.UNKNOWN_ITEM:
                 mon._item = norm(t["item"])
@@ -127,6 +129,11 @@ def score(dirs: list[Path], samples: int, max_battles: int | None, seed: int) ->
                             rates["evidence 'speed' decisive"].add(call is not None)
                             if call is not None:
                                 rates["evidence 'speed' correct"].add(call == r.first)
+                    for h in ev.hits.get(key, []):
+                        call = inference.damage_fits(norm(mon.species), t["level"], true_set(t), h)
+                        rates["evidence 'damage' decisive"].add(call is not None)
+                        if call is not None:
+                            rates["evidence 'damage' correct"].add(call)
                     if key in ev.item:
                         rates["evidence: original item correct"].add(ev.item[key] == norm(t["item"]))
     for where, xs in mass.items():

@@ -232,13 +232,7 @@ def engine_types(mon: Pokemon) -> tuple[str, str]:
     return ts[0], ts[1]
 
 
-def calc_stats(species: str, level: int, evs: dict[str, int], ivs: dict[str, int]) -> dict[str, int]:
-    """Neutral-nature stats (random battles have no natures)."""
-    base = GEN.pokedex[species]["baseStats"]
-    out = {"hp": (2 * base["hp"] + ivs["hp"] + evs["hp"] // 4) * level // 100 + level + 10}
-    for st in ("atk", "def", "spa", "spd", "spe"):
-        out[st] = (2 * base[st] + ivs[st] + evs[st] // 4) * level // 100 + 5
-    return out
+calc_stats = inference.stats
 
 
 def make_mon(species: str, level: int, types: tuple[str, str], hp: int, maxhp: int, stats: dict[str, int],

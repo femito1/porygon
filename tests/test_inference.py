@@ -17,6 +17,7 @@ def log_of(text: str) -> list[list[str]]:
 def ev_of(text: str, ours: dict | None = None) -> inference.Evidence:
     ev = inference.evidence(log_of(text), "p2")
     ev.races = inference.races(log_of(text), "p2", ours or {})
+    ev.hits = inference.hits(log_of(text), "p2", ours or {})
     return ev
 
 
@@ -95,7 +96,8 @@ def test_speed_order_finds_a_choice_scarf():
 |
 |upkeep
 |turn|2"""
-    ours = {"p1: Blissey": (200, "naturalcure", "leftovers")}  # Heracross: 180, 270 with a scarf
+    ours = {"p1: Blissey": inference.Ours("blissey", 84, ("normal", "typeless"), 300, (50, 50, 150, 250, 200),
+                                          "naturalcure", "leftovers", 46.8)}  # Heracross: 180, 270 with a scarf
     race = race.replace("|-damage|p2a: Heracross|90/100|[from] item: Life Orb\n", "")
     ev = ev_of(race, ours)
     assert ev.races["p2: Heracross"][0].first
@@ -104,3 +106,25 @@ def test_speed_order_finds_a_choice_scarf():
     paralyzed = ev_of("|-status|p2a: Heracross|par\n|\n|upkeep\n|turn|2\n|\n" + race.replace("turn|2", "turn|3"), ours)
     assert paralyzed.races["p2: Heracross"][0].paralyzed
     assert items(paralyzed) == {"toxicorb", "choicescarf", "choiceband"}  # no recoil: no life orb
+
+
+def test_damage_tells_a_choice_band_apart():
+    blissey = inference.Ours("blissey", 84, ("normal", "typeless"), 300, (50, 400, 150, 250, 100), "naturalcure",
+                             "leftovers", 46.8)
+    band = next(s for s in inference.library()["heracross"][1] if s.item == "choiceband")
+    probe = inference.Hit("closecombat", 0, False, blissey, 300, 1.0, "", "", "")
+    lo, hi = inference.damage_range("heracross", 79, band, probe)
+    assert hi < 300
+    hit = f"""|move|p2a: Heracross|Close Combat|p1a: Blissey
+|-supereffective|p1a: Blissey
+|-damage|p1a: Blissey|{300 - hi}/300
+|-unboost|p2a: Heracross|def|1
+|-unboost|p2a: Heracross|spd|1
+|
+|upkeep
+|turn|2"""
+    ev = ev_of(hit, {"p1: Blissey": blissey})
+    assert [h.dealt for h in ev.hits["p2: Heracross"]] == [hi]
+    assert items(ev) == {"choiceband"}  # life orb (x1.3) cannot reach band's (x1.5) top roll, no item even less
+    crit = ev_of(hit.replace("|-supereffective|", "|-crit|p1a: Blissey\n|-supereffective|"), {"p1: Blissey": blissey})
+    assert not crit.hits  # crits are not modelled
