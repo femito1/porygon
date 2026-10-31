@@ -39,12 +39,14 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   `scripts/score_inference.py`): sampling whole sets from Showdown's own generator, conditioned on
   what the log shows and rules out, gets a revealed mon's whole set right 58% of the time (the old
   re-implemented set logic: 35%), a hidden item 83–86% (58–60%), a hidden move 78% (65%); the same live.
+  Damage evidence (each hit against poke-engine's damage range per set) then lifts items to 86–89% and
+  whole sets to 59%; every kind of evidence agrees with the true teams in every decisive check.
   Against Foul Play (500M) the default search with it wins **54.2% ± 1.8%** (6 runs, 2398 games; single
   runs 50.7–57.8%), +1.6 ± 2.8 over the old inference: probably a small gain, not yet significant. 8 samples
   instead of 4 (2x the compute): 53.6% ± 4.3%.
 - **Root PUCT** (`--c-puct`: the network's priors steer our root options in the engine's MCTS instead of the
   post-hoc mix, `patches/poke-engine-0.0.48-root-priors.patch`; 400 games each, `--prior-weight 0`):
-  c = 2 56.4% ± 4.6%, c = 8 53.2% ± 3.8%. No significant change; poke-engine's Q values differ by only a
+  c = 2 55.0% ± 3.2% (2 runs), c = 8 53.2% ± 3.8%: no change from the default; poke-engine's Q values differ by only a
   few hundredths between moves, so the engine still overrides a strong network favourite.
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
   beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
@@ -176,14 +178,14 @@ is ±4.5%; compare against the pooled 52.6% ± 2.2%.
   PORYGON_DUPLICATE_LOG=<file> PORYGON_DUPLICATE_TEAMS=<dir> scripts/start_servers.sh 1 8001`.
 
 ## Roadmap
-1. **Opponent inference, what is left**: the remaining item misses are mostly Choice Band vs Life Orb /
-   Silk Scarf / Choice Specs, which only damage tells apart: compare the damage each hit did with the
-   engine's damage range for every candidate set (`pe.calculate_damage`; crits, screens, boosts and
-   weather at the time). Score on the logged benchmarks first (`scripts/score_inference.py`; new
-   evidence must stay 100% consistent with the true teams), then a 400-game Foul Play run. Rebuild the
-   library (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
+1. **Opponent inference, what is left**: P(true set) is ~59% and most of the rest is the generator's own
+   randomness among sets the battle cannot tell apart yet, so more evidence of the same kind has little
+   left to give. Damage evidence skips crits, stat stages and screens; modelling them would add hits. New
+   evidence: score it on the logged benchmarks first (`scripts/score_inference.py`; it must stay 100%
+   consistent with the true teams), then a Foul Play run. Rebuild the library
+   (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
 2. **The network inside the search tree**: root PUCT (`--c-puct`) is built and did not move the result
-   (see Results); c = 2 is worth one more 400-game run before it is dropped. Priors at interior nodes and
+   (see Results). Priors at interior nodes and
    the network's value at the leaves would need its evaluations inside poke-engine's Rust MCTS (e.g. ONNX
    through `ort` / `tract` in `patches/`, plus a Rust port of the leaf encoder in `porygon.lookahead`):
    Python callbacks cap at ~1k evaluations/s against the engine's ~430k iterations/s, while porting the
