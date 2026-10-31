@@ -26,11 +26,21 @@ def search(state_str: str, ms: int, priors: dict[str, float] | None = None,
     return [(o.move_choice, o.visits, o.total_score) for o in result.side_one]
 
 
+def search_joint(state_str: str, ms: int, priors: dict[str, float] | None = None, c_puct: float = 0.0):
+    """As `search`, plus the opponent's root options and the root's joint statistics
+    [(our choice, their choice, visits, our total score)] (needs the patched engine)."""
+    result, joint = pe.monte_carlo_tree_search_joint(pe.State.from_string(state_str), duration_ms=ms,
+                                                     priors=priors, c_puct=c_puct)
+    return ([(o.move_choice, o.visits, o.total_score) for o in result.side_one],
+            [o.move_choice for o in result.side_two], joint)
+
+
 def main() -> None:
     for line in sys.stdin:
         req = json.loads(line)
         try:
-            reply = {"ok": search(req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0))}
+            args = req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0)
+            reply = {"ok": search_joint(*args) if req.get("joint") else search(*args)}
         except BaseException as e:  # Rust panics surface as pyo3 PanicException (a BaseException)
             reply = {"error": f"{type(e).__name__}: {e}"}
         sys.stdout.write(json.dumps(reply) + "\n")
@@ -56,7 +66,8 @@ class EnginePool:
         )
 
     async def search(self, state_str: str, ms: int, priors: dict[str, float] | None = None,
-                     c_puct: float = 0.0) -> list[tuple[str, int, float]]:
+                     c_puct: float = 0.0, joint: bool = False):
+        """`search` in a worker; with `joint`, `search_joint`'s (ours, their options, joint statistics)."""
         if self.idle is None:
             self.idle = asyncio.Queue()
             for _ in range(self.n):
@@ -64,6 +75,7 @@ class EnginePool:
         proc, line = await self.idle.get(), b""
         try:
             req = {"state": state_str, "ms": ms} | ({"priors": priors, "c_puct": c_puct} if c_puct > 0 else {})
+            req |= {"joint": True} if joint else {}
             proc.stdin.write((json.dumps(req) + "\n").encode())
             await proc.stdin.drain()
             line = await asyncio.wait_for(proc.stdout.readline(), ms / 1000 + self.grace)
@@ -78,6 +90,9 @@ class EnginePool:
         reply = json.loads(line)
         if "error" in reply:
             raise RuntimeError(f"poke-engine: {reply['error']}")
+        if joint:
+            ours, theirs, pairs = reply["ok"]
+            return [tuple(o) for o in ours], theirs, [tuple(p) for p in pairs]
         return [tuple(o) for o in reply["ok"]]
 
 

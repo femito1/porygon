@@ -49,7 +49,7 @@ class LoggedSearchPlayer(SearchPlayer):
             value = float(self.policy.predict_values(obs)[0, 0])
         phi = potential(pe.State.from_string(convs[0].state_str))[0] if convs else 0.0
         rec = {"battle": battle.battle_tag, "turn": battle.turn, "player": self.username,
-               "action": self.combine(shares, probs, mask), "mask": mask.astype(int).tolist(),
+               "action": self.last_action[battle.battle_tag], "mask": mask.astype(int).tolist(),
                "probs": np.round(probs, 4).tolist(), "shares": np.round(shares, 4).tolist(),
                "value": round(value + phi, 4), "revealed": revealed(battle),
                "samples": [opponent_samples(c.state_str) for c in convs]}

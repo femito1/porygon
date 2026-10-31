@@ -15,7 +15,8 @@ from stable_baselines3 import PPO  # noqa: E402
 
 from porygon.env import local_server  # noqa: E402
 from porygon.search import (  # noqa: E402
-    DEFAULT_SET, History, SearchPlayer, calc_stats, convert, make_mon, sample_species, species_info)
+    DEFAULT_SET, History, SearchPlayer, bayes_root, calc_stats, convert, make_mon, root_matrix, sample_species,
+    species_info)
 
 MODEL = Path(__file__).resolve().parents[1] / "runs/20261019-185359/best_model.zip"
 START = """|player|p1|me|
@@ -134,6 +135,22 @@ def test_root_priors_steer_the_search():
     assert steered["splash"] > 3 * plain["splash"] and steered["switch chansey"] <= 1
 
 
+def test_bayes_root():
+    """Matching pennies is 50/50; and with two equally likely opponent sets, where move 0 wins big against one
+    set (if they do not see it coming) and move 1 is safe against both, the opponent's knowledge of its set
+    makes the safe move right, though move 0 has the higher average score over the samples' matrices."""
+    import numpy as np
+    pennies = np.array([[1.0, 0.0], [0.0, 1.0]])
+    assert np.allclose(bayes_root([pennies], [1.0], 3000), [0.5, 0.5], atol=0.03)
+    bold = np.array([[1.0, 0.3], [0.6, 0.6]])  # set 1: they can dodge move 0 (column 1)
+    other = np.array([[0.9, 0.9], [0.6, 0.6]])  # set 2: move 0 just wins
+    risky = np.array([[0.2], [0.6]])  # set 3: move 0 loses
+    x = bayes_root([bold, other, risky], [1 / 3] * 3)
+    assert x[1] > 0.9, x  # avg over samples favours move 0 (0.63 vs 0.6); the Bayesian game does not
+    m = root_matrix(["a", "b"], ["c"], [("a", "c", 100, 80.0), ("b", "c", 0, 0.0)])
+    assert m[0, 0] == 0.8 and m[1, 0] == 0.0  # an unvisited row has no mean to shrink to
+
+
 def test_sample_species_follows_team_rules():
     rng = random.Random(0)
     for _ in range(200):
@@ -145,16 +162,18 @@ def test_sample_species_follows_team_rules():
 
 
 @pytest.mark.skipif(not MODEL.exists(), reason="needs a trained model")
-@pytest.mark.parametrize("c_puct", [0.0, 4.0])
-def test_search_battles(c_puct, n_battles=3):
+@pytest.mark.parametrize("c_puct,root_game", [(0.0, None), (4.0, None), (0.0, "sample")])
+def test_search_battles(c_puct, root_game, n_battles=3):
     policy = PPO.load(MODEL, device="cpu").policy.eval()
     tag = random.randint(0, 10**6)
     common = dict(battle_format="gen4randombattle", server_configuration=local_server(8000),
                   max_concurrent_battles=n_battles, log_level=40)
-    player = SearchPlayer(policy, ms=50, samples=2, workers=4, c_puct=c_puct,
+    player = SearchPlayer(policy, ms=50, samples=2, workers=4, c_puct=c_puct, root_game=root_game,
                           account_configuration=AccountConfiguration(f"stest{tag}", None), **common)
     opponent = SimpleHeuristicsPlayer(account_configuration=AccountConfiguration(f"htest{tag}", None), **common)
     asyncio.run(player.battle_against(opponent, n_battles=n_battles))
     assert player.n_finished_battles == n_battles
     assert player.stats["searched"] > 10 * n_battles
     assert player.stats["fallbacks"] == 0
+    if root_game:
+        assert player.stats["root_game_failed"] < player.stats["searched"] / 2

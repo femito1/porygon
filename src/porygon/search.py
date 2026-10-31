@@ -11,6 +11,12 @@ Each decision we
 With c_puct > 0 the network's probabilities also steer the search itself: our root options are chosen by
 PUCT on them (floored at PUCT_EPS / number of legal actions) instead of UCB1 (scripts/build_engine.sh's
 root-priors patch); deeper nodes and the opponent keep UCB1.
+With root_game set, step 3 instead solves the root as a Bayesian game (`bayes_root`): each determinization's
+MCTS gives a matrix of our average score for every (our move, their move) pair; the opponent knows which
+determinization is true and best-responds within it, we play one mixed strategy for all of them (which
+removes our side's strategy fusion at the root: the per-sample searches each assume we know their set).
+root_game="max" plays the strategy's most likely action (+ prior_weight * network prob), "sample" draws
+from it.
 With value_weight > 0 the visit shares are mixed with a one-turn lookahead scored by the network's value
 (`porygon.lookahead`), run on the same determinizations while the engine searches:
   share = (1 - value_weight) * visit share + value_weight * lookahead equilibrium probability.
@@ -80,6 +86,9 @@ SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effect
 TIMED_EFFECTS = {"taunt": Effect.TAUNT, "encore": Effect.ENCORE, "confusion": Effect.CONFUSION}
 # two-turn moves; the engine marks the charging turn with a volatile of the same name
 CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
+ROOT_SHRINK = 20  # visits: a thin cell of a root matrix is pulled to its row's mean (`root_matrix`)
+ROOT_ITERS = 1000  # regret matching+ iterations for `bayes_root`
+ROOT_SAMPLE_MIN = 0.1  # root_game="sample" ignores actions below this share of the most likely one
 PUCT_EPS = 0.1  # share of the PUCT priors spread evenly over the legal actions, so none goes unexplored
 DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
                             dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets
@@ -486,6 +495,51 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     return Converted(state, [norm(m.species) for m in team], move_ids)
 
 
+# ---------------------------------------------------------------- root game
+
+def root_matrix(ours: list[str], theirs: list[str], joint: list[tuple[str, str, int, float]]) -> np.ndarray:
+    """Our average score (side one's, in [0, 1]) for each (our option, their option) pair at the root."""
+    n, s = np.zeros((len(ours), len(theirs))), np.zeros((len(ours), len(theirs)))
+    row, col = {o: i for i, o in enumerate(ours)}, {o: j for j, o in enumerate(theirs)}
+    for a, b, visits, score in joint:
+        n[row[a], col[b]] += visits
+        s[row[a], col[b]] += score
+    mean = s.sum(1, keepdims=True) / np.maximum(n.sum(1, keepdims=True), 1)
+    return (s + ROOT_SHRINK * mean) / (n + ROOT_SHRINK)
+
+
+def bayes_root(matrices: list[np.ndarray], weights: list[float], iters: int = ROOT_ITERS) -> np.ndarray:
+    """Our equilibrium strategy of the zero-sum Bayesian game where nature draws determinization k (weight p_k),
+    the opponent knows k and plays y_k, and we play one x:  max_x  sum_k p_k min_{y_k} x^T A_k y_k.
+    Regret matching+ with linear averaging; the opponents' matrices are padded with columns they never pick."""
+    k, n = len(matrices), matrices[0].shape[0]
+    m = max(a.shape[1] for a in matrices)
+    a = np.full((k, n, m), 2.0)  # > any score: a padded column is never the opponent's best
+    for i, mat in enumerate(matrices):
+        a[i, :, :mat.shape[1]] = mat
+    real = np.zeros((k, m), bool)
+    for i, mat in enumerate(matrices):
+        real[i, :mat.shape[1]] = True
+    p = np.asarray(weights, float)[:, None]
+    rx, ry = np.zeros(n), np.zeros((k, m))
+    avg = np.zeros(n)
+
+    def strategy(r: np.ndarray, allowed: np.ndarray | None = None) -> np.ndarray:
+        pos = np.maximum(r, 0) if allowed is None else np.where(allowed, np.maximum(r, 0), 0)
+        tot = pos.sum(-1, keepdims=True)
+        uniform = np.ones_like(pos) if allowed is None else allowed.astype(float)
+        return np.where(tot > 0, pos / np.where(tot > 0, tot, 1), uniform / uniform.sum(-1, keepdims=True))
+
+    for t in range(1, iters + 1):
+        x, y = strategy(rx), strategy(ry, real)
+        ux = (p * np.einsum("knm,km->kn", a, y)).sum(0)  # our expected score per action
+        uy = -np.einsum("n,knm->km", x, a)  # theirs per action, per determinization
+        rx = np.maximum(rx + ux - x @ ux, 0)
+        ry = np.maximum(ry + uy - (y * uy).sum(1, keepdims=True), 0)
+        avg += t * x
+    return avg / avg.sum()
+
+
 # ---------------------------------------------------------------- player
 
 _POOLS: dict[tuple[int, str | None], EnginePool] = {}
@@ -506,7 +560,8 @@ class SearchPlayer(Player):
     duplicate server (PORYGON_DUPLICATE_TEAMS), replace the samples for revealed mons, or for all of them."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
-                 prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0, value_weight: float = 0.0,
+                 prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0,
+                 root_game: str | None = None, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
                  engine_python: str | None = None, oracle: str | None = None, oracle_dir: str | None = None,
                  seed: int | None = None, **kwargs: Any):
@@ -514,6 +569,9 @@ class SearchPlayer(Player):
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.c_puct = c_puct
+        assert root_game in (None, "max", "sample"), root_game
+        self.root_game = root_game
+        self.last_action: dict[str, int] = {}  # battle tag -> the action of its last searched decision
         self.pool = engine_pool(workers, engine_python)
         self.lookahead = None
         if value_weight > 0:
@@ -522,7 +580,7 @@ class SearchPlayer(Player):
         self.rng = random.Random(seed)
         self.weather_seen: dict[str, tuple[Weather, int]] = {}
         self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0,
-                      "value_failed": 0}
+                      "value_failed": 0, "root_game_failed": 0}
         self.last_convs: dict[str, list[Converted]] = {}  # battle tag -> its last determinizations
         assert oracle in (None, "revealed", "all") and (oracle is None or oracle_dir), "oracle needs oracle_dir"
         self.oracle, self.oracle_dir = oracle, oracle_dir
@@ -590,9 +648,21 @@ class SearchPlayer(Player):
         return self.truth[battle.battle_tag]
 
     async def mcts_shares(self, convs: list[Converted], probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        searches = [self.pool.search(c.state_str, self.ms, c.priors(probs, mask), self.c_puct) if self.c_puct > 0
-                    else self.pool.search(c.state_str, self.ms) for c in convs]
-        results = await asyncio.gather(*searches, return_exceptions=True)
+        """Mean MCTS visit share per action index, or with root_game the Bayesian root game's strategy."""
+        priors = (lambda c: c.priors(probs, mask)) if self.c_puct > 0 else (lambda c: None)
+        if self.root_game:
+            results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, joint=True)
+                                             for c in convs), return_exceptions=True)
+            try:
+                return self._root_game(convs, results)
+            except Exception as e:  # a failed sample, options that differ between samples: visit shares instead
+                self.stats["root_game_failed"] += 1
+                log.debug("root game failed: %s", e)
+                results = [r if isinstance(r, BaseException) else r[0] for r in results]
+        else:
+            searches = [self.pool.search(c.state_str, self.ms, priors(c), self.c_puct) if self.c_puct > 0
+                        else self.pool.search(c.state_str, self.ms) for c in convs]
+            results = await asyncio.gather(*searches, return_exceptions=True)
         shares, ok, errors = np.zeros(10), 0, []
         for conv, options in zip(convs, results):  # a failed sample (engine panic) is just skipped
             try:
@@ -604,6 +674,22 @@ class SearchPlayer(Player):
         if not ok:
             raise errors[0]
         return shares / ok
+
+    @staticmethod
+    def _root_game(convs: list[Converted], results: list) -> np.ndarray:
+        if any(isinstance(r, BaseException) for r in results):
+            raise next(r for r in results if isinstance(r, BaseException))
+        ours = [o for o, _, _ in results[0][0]]
+        if "No Move" in ours or any([o for o, _, _ in r[0]] != ours for r in results):
+            raise ValueError(f"root options differ between samples or cannot act: {ours}")
+        x = bayes_root([root_matrix(ours, theirs, joint) for _, theirs, joint in results], [1.0] * len(results))
+        shares = np.zeros(10)
+        for choice, share in zip(ours, x):
+            a = convs[0].action(choice)
+            if a is None:
+                raise ValueError(f"unmappable engine choice {choice!r}")
+            shares[a] += share
+        return shares
 
     @staticmethod
     def _sample_shares(conv: Converted, options: list | BaseException) -> np.ndarray:
@@ -623,6 +709,9 @@ class SearchPlayer(Player):
         legal = mask > 0
         if self.top_k:
             legal &= probs >= np.sort(np.where(legal, probs, -1))[::-1][min(self.top_k, int(legal.sum())) - 1]
+        if self.root_game == "sample":  # draw from the root game's strategy (its tiny shares are noise)
+            p = np.where(legal & (shares >= ROOT_SAMPLE_MIN * shares[legal].max()), shares, 0)
+            return int(self.rng.choices(range(len(p)), weights=p)[0])
         score = np.where(legal, shares + self.prior_weight * probs, -np.inf)
         return int(np.argmax(score))
 
@@ -641,7 +730,7 @@ class SearchPlayer(Player):
                     return SinglesEnv.action_to_order(np.int64(action), battle, strict=False)
                 if shares[mask > 0].sum() < 0.5:  # the engine searched mostly illegal options -> desync
                     raise ValueError(f"engine options disagree with the request: {shares} vs mask {mask}")
-                action = self.combine(shares, probs, mask)
+                action = self.last_action[battle.battle_tag] = self.combine(shares, probs, mask)
                 self.on_decision(battle, probs, mask, shares)
                 self.stats["searched"] += 1
                 self.stats["agree"] += action == net_action
@@ -656,13 +745,14 @@ class SearchPlayer(Player):
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         self.weather_seen.pop(battle.battle_tag, None)
         self.last_convs.pop(battle.battle_tag, None)
+        self.last_action.pop(battle.battle_tag, None)
         self.truth.pop(battle.battle_tag, None)
 
 
 # ---------------------------------------------------------------- CLI
 
-CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "value_weight", "value_top_k", "value_min_prob",
-          "engine_python")
+CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "root_game", "value_weight", "value_top_k",
+          "value_min_prob", "engine_python")
 
 
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
@@ -708,8 +798,8 @@ async def run(args: argparse.Namespace) -> None:
           f"same as network argmax {s['agree'] / max(s['searched'], 1):.1%}, {time.time() - start:.0f}s")
 
 
-CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "value_weight": float, "value_min_prob": float,
-                "engine_python": str}
+CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "root_game": str, "value_weight": float,
+                "value_min_prob": float, "engine_python": str}
 
 
 def add_value_args(p: argparse.ArgumentParser) -> None:
@@ -738,6 +828,7 @@ def main():
     p.add_argument("--prior-weight", type=float, default=0.25, help="0 = pure engine search")
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
     p.add_argument("--c-puct", type=float, default=0.0, help="PUCT on the network's priors at our root (0 = UCB1)")
+    p.add_argument("--root-game", choices=["max", "sample"], help="solve the Bayesian root game over the samples")
     add_value_args(p)
     for k in CONFIG:  # the --opponent search configuration
         p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))

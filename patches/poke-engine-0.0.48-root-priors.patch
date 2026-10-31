@@ -1,8 +1,8 @@
 diff --git a/poke-engine-py/python/poke_engine/__init__.py b/poke-engine-py/python/poke_engine/__init__.py
-index 9e579cc..54df9d9 100644
+index 9e579cc..de3dd75 100644
 --- a/poke-engine-py/python/poke_engine/__init__.py
 +++ b/poke-engine-py/python/poke_engine/__init__.py
-@@ -165,6 +165,16 @@ def monte_carlo_tree_search(
+@@ -165,6 +165,27 @@ def monte_carlo_tree_search(
      return MctsResult._from_rust(mcts(state, duration_ms, iterations, threads))
  
  
@@ -16,11 +16,22 @@ index 9e579cc..54df9d9 100644
 +    return MctsResult._from_rust(mcts_priors(state, duration_ms, iterations, priors, c_puct))
 +
 +
++def monte_carlo_tree_search_joint(
++    state: State, duration_ms: int = 1000, iterations: int = 0, priors: dict | None = None, c_puct: float = 0.0
++) -> tuple:
++    """
++    Single-threaded MCTS (optionally PUCT at side one's root, as monte_carlo_tree_search_priors), plus the
++    root's joint statistics: (MctsResult, [(side one choice, side two choice, visits, side one's total score)])
++    """
++    result, joint = mcts_joint(state, duration_ms, iterations, priors or {}, c_puct)
++    return MctsResult._from_rust(result), joint
++
++
  def iterative_deepening_expectiminimax(
      state: State, duration_ms: int = 1000
  ) -> IterativeDeepeningResult:
 diff --git a/poke-engine-py/src/lib.rs b/poke-engine-py/src/lib.rs
-index 032da2e..b754a5e 100644
+index 032da2e..c42788e 100644
 --- a/poke-engine-py/src/lib.rs
 +++ b/poke-engine-py/src/lib.rs
 @@ -1,7 +1,7 @@
@@ -32,16 +43,18 @@ index 032da2e..b754a5e 100644
  
  use poke_engine::choices::{Choices, MoveCategory, MOVES};
  use poke_engine::engine::abilities::Abilities;
-@@ -11,7 +11,7 @@ use poke_engine::engine::generate_instructions::{
+@@ -11,7 +11,9 @@ use poke_engine::engine::generate_instructions::{
  use poke_engine::engine::items::Items;
  use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
  use poke_engine::instruction::{Instruction, StateInstructions};
 -use poke_engine::mcts::{perform_mcts, MctsResult, MctsSideResult};
-+use poke_engine::mcts::{perform_mcts, perform_mcts_with_priors, MctsResult, MctsSideResult};
++use poke_engine::mcts::{
++    perform_mcts, perform_mcts_joint, perform_mcts_with_priors, MctsResult, MctsSideResult,
++};
  use poke_engine::mcts_threaded::perform_mcts_shared_tree;
  use poke_engine::pokemon::PokemonName;
  use poke_engine::search::iterative_deepen_expectiminimax;
-@@ -951,6 +951,31 @@ fn mcts(
+@@ -951,6 +953,69 @@ fn mcts(
      Ok(py_mcts_result)
  }
  
@@ -70,22 +83,69 @@ index 032da2e..b754a5e 100644
 +    Ok(PyMctsResult::from_mcts_result(mcts_result, &state))
 +}
 +
++// as mcts_priors, plus the root's joint statistics: [(s1 choice, s2 choice, visits, s1 total score)]
++#[pyfunction]
++fn mcts_joint(
++    py_state: PyState,
++    duration_ms: u64,
++    mut iterations: u32,
++    priors: HashMap<String, f32>,
++    c_puct: f32,
++) -> PyResult<(PyMctsResult, Vec<(String, String, u32, f32)>)> {
++    let mut state: State = py_state.into();
++    let duration = Duration::from_millis(duration_ms);
++    let (s1_options, s2_options) = state.root_get_all_options();
++    if s1_options.len() <= 1 {
++        iterations = 100; // if there's only one option, force a quick exit
++    }
++    let s1_priors: Vec<f32> = s1_options
++        .iter()
++        .map(|o| *priors.get(&movechoice_to_string(&state.side_one, o)).unwrap_or(&0.0))
++        .collect();
++    let mut joint = Vec::new();
++    let mcts_result = perform_mcts_joint(
++        &mut state, s1_options.clone(), s2_options.clone(), duration, iterations, &s1_priors, c_puct,
++        Some(&mut joint),
++    );
++    let pairs = joint
++        .into_iter()
++        .map(|(i, j, n, score)| {
++            (
++                movechoice_to_string(&state.side_one, &s1_options[i]),
++                movechoice_to_string(&state.side_two, &s2_options[j]),
++                n,
++                score,
++            )
++        })
++        .collect();
++    Ok((PyMctsResult::from_mcts_result(mcts_result, &state), pairs))
++}
++
  #[pyfunction]
  fn id(py_state: PyState, duration_ms: u64) -> PyResult<PyIterativeDeepeningResult> {
      let mut state: State = py_state.into();
-@@ -1129,6 +1154,7 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+@@ -1129,6 +1194,8 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
      m.add_function(wrap_pyfunction!(calculate_damage, m)?)?;
      m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
      m.add_function(wrap_pyfunction!(id, m)?)?;
 +    m.add_function(wrap_pyfunction!(mcts_priors, m)?)?;
++    m.add_function(wrap_pyfunction!(mcts_joint, m)?)?;
      m.add_function(wrap_pyfunction!(mcts, m)?)?;
      m.add_class::<PyState>()?;
      m.add_class::<PySide>()?;
 diff --git a/src/mcts.rs b/src/mcts.rs
-index f1fb0ae..33386d8 100644
+index f1fb0ae..6a16de2 100644
 --- a/src/mcts.rs
 +++ b/src/mcts.rs
-@@ -28,6 +28,9 @@ pub struct Node {
+@@ -18,6 +18,7 @@ pub struct Node {
+     pub root: bool,
+     pub parent: *mut Node,
+     pub times_visited: u32,
++    pub total_score: f32, // side one's, over every iteration through this node
+ 
+     // represents the instructions & s1/s2 moves that led to this node from the parent
+     pub instructions: StateInstructions,
+@@ -28,6 +29,9 @@ pub struct Node {
      // de-coupled for s1 and s2
      pub s1_options: Option<Vec<MoveNode>>,
      pub s2_options: Option<Vec<MoveNode>>,
@@ -95,7 +155,12 @@ index f1fb0ae..33386d8 100644
  }
  
  impl Node {
-@@ -41,6 +44,7 @@ impl Node {
+@@ -37,10 +41,12 @@ impl Node {
+             parent: std::ptr::null_mut(),
+             instructions: StateInstructions::default(),
+             times_visited: 0,
++            total_score: 0.0,
+             s1_choice: 0,
              s2_choice: 0,
              s1_options: None,
              s2_options: None,
@@ -103,7 +168,7 @@ index f1fb0ae..33386d8 100644
          }
      }
      unsafe fn populate(&mut self, s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) {
-@@ -50,6 +54,7 @@ impl Node {
+@@ -50,6 +56,7 @@ impl Node {
                  move_choice: x.clone(),
                  total_score: 0.0,
                  visits: 0,
@@ -111,7 +176,7 @@ index f1fb0ae..33386d8 100644
              })
              .collect();
          let s2_options_vec: Vec<MoveNode> = s2_options
-@@ -58,6 +63,7 @@ impl Node {
+@@ -58,6 +65,7 @@ impl Node {
                  move_choice: x.clone(),
                  total_score: 0.0,
                  visits: 0,
@@ -119,7 +184,7 @@ index f1fb0ae..33386d8 100644
              })
              .collect();
  
-@@ -78,6 +84,20 @@ impl Node {
+@@ -78,6 +86,20 @@ impl Node {
          choice
      }
  
@@ -140,7 +205,7 @@ index f1fb0ae..33386d8 100644
      pub unsafe fn selection(
          &mut self,
          state: &mut State,
-@@ -89,7 +109,11 @@ impl Node {
+@@ -89,7 +111,11 @@ impl Node {
              self.populate(s1_options, s2_options);
          }
  
@@ -153,7 +218,15 @@ index f1fb0ae..33386d8 100644
          let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap());
          let key = (self as *mut Node as usize, s1_mc_index, s2_mc_index);
          match children.get_mut(&key) {
-@@ -207,6 +231,7 @@ pub struct MoveNode {
+@@ -169,6 +195,7 @@ impl Node {
+ 
+     pub unsafe fn backpropagate(&mut self, score: f32, state: &mut State) {
+         self.times_visited += 1;
++        self.total_score += score;
+         if self.root {
+             return;
+         }
+@@ -207,6 +234,7 @@ pub struct MoveNode {
      pub move_choice: MoveChoice,
      pub total_score: f32,
      pub visits: u32,
@@ -161,7 +234,7 @@ index f1fb0ae..33386d8 100644
  }
  
  impl MoveNode {
-@@ -222,6 +247,15 @@ impl MoveNode {
+@@ -222,6 +250,15 @@ impl MoveNode {
          let score = self.total_score / self.visits as f32;
          score
      }
@@ -177,7 +250,7 @@ index f1fb0ae..33386d8 100644
  }
  
  #[derive(Clone)]
-@@ -302,12 +336,39 @@ pub fn perform_mcts(
+@@ -302,12 +339,63 @@ pub fn perform_mcts(
      side_two_options: Vec<MoveChoice>,
      max_time: Duration,
      max_iterations: u32,
@@ -202,6 +275,30 @@ index f1fb0ae..33386d8 100644
 +    max_iterations: u32,
 +    side_one_priors: &[f32],
 +    c_puct: f32,
++) -> MctsResult {
++    perform_mcts_joint(
++        state,
++        side_one_options,
++        side_two_options,
++        max_time,
++        max_iterations,
++        side_one_priors,
++        c_puct,
++        None,
++    )
++}
++
++// as perform_mcts_with_priors; `joint` receives the root's (s1 option, s2 option, visits, side one's total score)
++// for every pair of options searched
++pub fn perform_mcts_joint(
++    state: &mut State,
++    side_one_options: Vec<MoveChoice>,
++    side_two_options: Vec<MoveChoice>,
++    max_time: Duration,
++    max_iterations: u32,
++    side_one_priors: &[f32],
++    c_puct: f32,
++    joint: Option<&mut Vec<(usize, usize, u32, f32)>>,
  ) -> MctsResult {
      let mut root_node = Node::new();
      unsafe {
@@ -217,3 +314,21 @@ index f1fb0ae..33386d8 100644
      let mut children: HashMap<(usize, usize, usize), Box<[Node]>> = HashMap::new();
  
      let root_eval = evaluate(state);
+@@ -324,6 +412,17 @@ pub fn perform_mcts(
+         search_limit,
+     );
+ 
++    if let Some(joint) = joint {
++        let root_key = &root_node as *const Node as usize;
++        for ((node, i, j), outcomes) in children.iter() {
++            if *node == root_key {
++                let visits: u32 = outcomes.iter().map(|n| n.times_visited).sum();
++                let score: f32 = outcomes.iter().map(|n| n.total_score).sum();
++                joint.push((*i, *j, visits, score));
++            }
++        }
++    }
++
+     let result = MctsResult {
+         s1: root_node
+             .s1_options
