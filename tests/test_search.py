@@ -121,7 +121,7 @@ def test_engine_is_patched_for_gen4_durations():
 
 
 def test_root_priors_steer_the_search():
-    """scripts/build_engine.sh's root-priors patch: PUCT sends visits to the prior's choice, none to a zero prior."""
+    """scripts/build_engine.sh's search-options patch: PUCT sends visits to the prior's choice, none to a zero prior."""
     def mon(species: str, moves: list[str]) -> pe.Pokemon:
         st = calc_stats(species, 80, DEFAULT_SET.evs, DEFAULT_SET.ivs)
         return make_mon(species, 80, ("normal", "typeless"), st["hp"], st["hp"], st, "none", "none",
@@ -133,6 +133,11 @@ def test_root_priors_steer_the_search():
     plain = visits(pe.monte_carlo_tree_search(state, iterations=20000))
     steered = visits(pe.monte_carlo_tree_search_priors(state, {"splash": 1.0}, 8.0, iterations=20000))
     assert steered["splash"] > 3 * plain["splash"] and steered["switch chansey"] <= 1
+    # regret matching (rm_gamma) finds the dominant move too, and explores every option at least gamma / n
+    result, joint = pe.monte_carlo_tree_search_joint(state, iterations=20000, rm_gamma=0.15)
+    rm = visits(result)
+    assert max(rm, key=rm.get) == "bodyslam" and min(rm.values()) > 0.15 / 3 * 20000 * 0.8
+    assert sum(n for _, _, n, _ in joint) == sum(rm.values())
 
 
 def test_bayes_root():
@@ -162,13 +167,14 @@ def test_sample_species_follows_team_rules():
 
 
 @pytest.mark.skipif(not MODEL.exists(), reason="needs a trained model")
-@pytest.mark.parametrize("c_puct,root_game", [(0.0, None), (4.0, None), (0.0, "sample")])
-def test_search_battles(c_puct, root_game, n_battles=3):
+@pytest.mark.parametrize("c_puct,root_game,rm_gamma", [(0.0, None, 0.0), (4.0, None, 0.0), (0.0, "sample", 0.0),
+                                                        (0.0, "max", 0.1)])
+def test_search_battles(c_puct, root_game, rm_gamma, n_battles=3):
     policy = PPO.load(MODEL, device="cpu").policy.eval()
     tag = random.randint(0, 10**6)
     common = dict(battle_format="gen4randombattle", server_configuration=local_server(8000),
                   max_concurrent_battles=n_battles, log_level=40)
-    player = SearchPlayer(policy, ms=50, samples=2, workers=4, c_puct=c_puct, root_game=root_game,
+    player = SearchPlayer(policy, ms=50, samples=2, workers=4, c_puct=c_puct, root_game=root_game, rm_gamma=rm_gamma,
                           account_configuration=AccountConfiguration(f"stest{tag}", None), **common)
     opponent = SimpleHeuristicsPlayer(account_configuration=AccountConfiguration(f"htest{tag}", None), **common)
     asyncio.run(player.battle_against(opponent, n_battles=n_battles))

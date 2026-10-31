@@ -45,7 +45,7 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   runs 50.7–57.8%), +1.6 ± 2.8 over the old inference: probably a small gain, not yet significant. 8 samples
   instead of 4 (2x the compute): 53.6% ± 4.3%.
 - **Root PUCT** (`--c-puct`: the network's priors steer our root options in the engine's MCTS instead of the
-  post-hoc mix, `patches/poke-engine-0.0.48-root-priors.patch`; 400 games each, `--prior-weight 0`):
+  post-hoc mix, `patches/poke-engine-0.0.48-search-options.patch`; 400 games each, `--prior-weight 0`):
   c = 2 55.0% ± 3.2% (2 runs), c = 8 53.2% ± 3.8%: no change from the default; poke-engine's Q values differ by only a
   few hundredths between moves, so the engine still overrides a strong network favourite.
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it

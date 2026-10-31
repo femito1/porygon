@@ -123,6 +123,7 @@ async def main():
     p.add_argument("--prior-weight", type=float, default=0.25)
     p.add_argument("--c-puct", type=float, default=0.0, help="SearchPlayer: PUCT on the network's priors at the root")
     p.add_argument("--root-game", choices=["max", "sample"], help="SearchPlayer: solve the Bayesian root game")
+    p.add_argument("--rm-gamma", type=float, default=0.0, help="SearchPlayer: regret matching in the engine's MCTS")
     p.add_argument("--top-k", type=int, default=None)
     add_value_args(p)
     add_oracle_args(p)

@@ -10,13 +10,15 @@ Each decision we
      optionally only among the network's top-k actions, and play the argmax.
 With c_puct > 0 the network's probabilities also steer the search itself: our root options are chosen by
 PUCT on them (floored at PUCT_EPS / number of legal actions) instead of UCB1 (scripts/build_engine.sh's
-root-priors patch); deeper nodes and the opponent keep UCB1.
+search-options patch); deeper nodes and the opponent keep UCB1.
 With root_game set, step 3 instead solves the root as a Bayesian game (`bayes_root`): each determinization's
 MCTS gives a matrix of our average score for every (our move, their move) pair; the opponent knows which
 determinization is true and best-responds within it, we play one mixed strategy for all of them (which
 removes our side's strategy fusion at the root: the per-sample searches each assume we know their set).
 root_game="max" plays the strategy's most likely action (+ prior_weight * network prob), "sample" draws
-from it.
+from it. rm_gamma > 0 replaces the engine's decoupled UCB1 by regret matching (with that much uniform
+exploration) at every node of the tree (SM-MCTS-RM, Lisy et al. 2013), which converges to an equilibrium
+in simultaneous-move games where decoupled UCB1 does not.
 With value_weight > 0 the visit shares are mixed with a one-turn lookahead scored by the network's value
 (`porygon.lookahead`), run on the same determinizations while the engine searches:
   share = (1 - value_weight) * visit share + value_weight * lookahead equilibrium probability.
@@ -561,7 +563,7 @@ class SearchPlayer(Player):
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, ms: int = 1000, samples: int = 4,
                  prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0,
-                 root_game: str | None = None, value_weight: float = 0.0,
+                 root_game: str | None = None, rm_gamma: float = 0.0, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
                  engine_python: str | None = None, oracle: str | None = None, oracle_dir: str | None = None,
                  seed: int | None = None, **kwargs: Any):
@@ -570,7 +572,7 @@ class SearchPlayer(Player):
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.c_puct = c_puct
         assert root_game in (None, "max", "sample"), root_game
-        self.root_game = root_game
+        self.root_game, self.rm_gamma = root_game, rm_gamma
         self.last_action: dict[str, int] = {}  # battle tag -> the action of its last searched decision
         self.pool = engine_pool(workers, engine_python)
         self.lookahead = None
@@ -650,9 +652,10 @@ class SearchPlayer(Player):
     async def mcts_shares(self, convs: list[Converted], probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """Mean MCTS visit share per action index, or with root_game the Bayesian root game's strategy."""
         priors = (lambda c: c.priors(probs, mask)) if self.c_puct > 0 else (lambda c: None)
+        kw = {"rm_gamma": self.rm_gamma} if self.rm_gamma > 0 else {}
         if self.root_game:
-            results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, joint=True)
-                                             for c in convs), return_exceptions=True)
+            results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, joint=True,
+                                                              **kw) for c in convs), return_exceptions=True)
             try:
                 return self._root_game(convs, results)
             except Exception as e:  # a failed sample, options that differ between samples: visit shares instead
@@ -660,7 +663,7 @@ class SearchPlayer(Player):
                 log.debug("root game failed: %s", e)
                 results = [r if isinstance(r, BaseException) else r[0] for r in results]
         else:
-            searches = [self.pool.search(c.state_str, self.ms, priors(c), self.c_puct) if self.c_puct > 0
+            searches = [self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, **kw) if self.c_puct > 0 or kw
                         else self.pool.search(c.state_str, self.ms) for c in convs]
             results = await asyncio.gather(*searches, return_exceptions=True)
         shares, ok, errors = np.zeros(10), 0, []
@@ -751,8 +754,8 @@ class SearchPlayer(Player):
 
 # ---------------------------------------------------------------- CLI
 
-CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "root_game", "value_weight", "value_top_k",
-          "value_min_prob", "engine_python")
+CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "root_game", "rm_gamma", "value_weight",
+          "value_top_k", "value_min_prob", "engine_python")
 
 
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
@@ -798,7 +801,7 @@ async def run(args: argparse.Namespace) -> None:
           f"same as network argmax {s['agree'] / max(s['searched'], 1):.1%}, {time.time() - start:.0f}s")
 
 
-CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "root_game": str, "value_weight": float,
+CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "root_game": str, "rm_gamma": float, "value_weight": float,
                 "value_min_prob": float, "engine_python": str}
 
 
@@ -829,6 +832,7 @@ def main():
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
     p.add_argument("--c-puct", type=float, default=0.0, help="PUCT on the network's priors at our root (0 = UCB1)")
     p.add_argument("--root-game", choices=["max", "sample"], help="solve the Bayesian root game over the samples")
+    p.add_argument("--rm-gamma", type=float, default=0.0, help="regret matching in the MCTS, this much exploration")
     add_value_args(p)
     for k in CONFIG:  # the --opponent search configuration
         p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))

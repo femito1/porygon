@@ -1,8 +1,8 @@
 diff --git a/poke-engine-py/python/poke_engine/__init__.py b/poke-engine-py/python/poke_engine/__init__.py
-index 9e579cc..de3dd75 100644
+index 9e579cc..d3889c9 100644
 --- a/poke-engine-py/python/poke_engine/__init__.py
 +++ b/poke-engine-py/python/poke_engine/__init__.py
-@@ -165,6 +165,27 @@ def monte_carlo_tree_search(
+@@ -165,6 +165,29 @@ def monte_carlo_tree_search(
      return MctsResult._from_rust(mcts(state, duration_ms, iterations, threads))
  
  
@@ -17,13 +17,15 @@ index 9e579cc..de3dd75 100644
 +
 +
 +def monte_carlo_tree_search_joint(
-+    state: State, duration_ms: int = 1000, iterations: int = 0, priors: dict | None = None, c_puct: float = 0.0
++    state: State, duration_ms: int = 1000, iterations: int = 0, priors: dict | None = None, c_puct: float = 0.0,
++    rm_gamma: float = 0.0,
 +) -> tuple:
 +    """
-+    Single-threaded MCTS (optionally PUCT at side one's root, as monte_carlo_tree_search_priors), plus the
-+    root's joint statistics: (MctsResult, [(side one choice, side two choice, visits, side one's total score)])
++    Single-threaded MCTS (optionally PUCT at side one's root, as monte_carlo_tree_search_priors; with rm_gamma > 0
++    regret matching with that much exploration at every node instead of UCB1), plus the root's joint statistics:
++    (MctsResult, [(side one choice, side two choice, visits, side one's total score)])
 +    """
-+    result, joint = mcts_joint(state, duration_ms, iterations, priors or {}, c_puct)
++    result, joint = mcts_joint(state, duration_ms, iterations, priors or {}, c_puct, rm_gamma)
 +    return MctsResult._from_rust(result), joint
 +
 +
@@ -31,7 +33,7 @@ index 9e579cc..de3dd75 100644
      state: State, duration_ms: int = 1000
  ) -> IterativeDeepeningResult:
 diff --git a/poke-engine-py/src/lib.rs b/poke-engine-py/src/lib.rs
-index 032da2e..c42788e 100644
+index 032da2e..60195f2 100644
 --- a/poke-engine-py/src/lib.rs
 +++ b/poke-engine-py/src/lib.rs
 @@ -1,7 +1,7 @@
@@ -54,7 +56,7 @@ index 032da2e..c42788e 100644
  use poke_engine::mcts_threaded::perform_mcts_shared_tree;
  use poke_engine::pokemon::PokemonName;
  use poke_engine::search::iterative_deepen_expectiminimax;
-@@ -951,6 +953,69 @@ fn mcts(
+@@ -951,6 +953,71 @@ fn mcts(
      Ok(py_mcts_result)
  }
  
@@ -83,7 +85,8 @@ index 032da2e..c42788e 100644
 +    Ok(PyMctsResult::from_mcts_result(mcts_result, &state))
 +}
 +
-+// as mcts_priors, plus the root's joint statistics: [(s1 choice, s2 choice, visits, s1 total score)]
++// as mcts_priors, plus the root's joint statistics: [(s1 choice, s2 choice, visits, s1 total score)];
++// rm_gamma > 0: regret matching (with that much exploration) instead of UCB1 at every node
 +#[pyfunction]
 +fn mcts_joint(
 +    py_state: PyState,
@@ -91,6 +94,7 @@ index 032da2e..c42788e 100644
 +    mut iterations: u32,
 +    priors: HashMap<String, f32>,
 +    c_puct: f32,
++    rm_gamma: f32,
 +) -> PyResult<(PyMctsResult, Vec<(String, String, u32, f32)>)> {
 +    let mut state: State = py_state.into();
 +    let duration = Duration::from_millis(duration_ms);
@@ -105,7 +109,7 @@ index 032da2e..c42788e 100644
 +    let mut joint = Vec::new();
 +    let mcts_result = perform_mcts_joint(
 +        &mut state, s1_options.clone(), s2_options.clone(), duration, iterations, &s1_priors, c_puct,
-+        Some(&mut joint),
++        Some(&mut joint), rm_gamma,
 +    );
 +    let pairs = joint
 +        .into_iter()
@@ -124,7 +128,7 @@ index 032da2e..c42788e 100644
  #[pyfunction]
  fn id(py_state: PyState, duration_ms: u64) -> PyResult<PyIterativeDeepeningResult> {
      let mut state: State = py_state.into();
-@@ -1129,6 +1194,8 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+@@ -1129,6 +1196,8 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
      m.add_function(wrap_pyfunction!(calculate_damage, m)?)?;
      m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
      m.add_function(wrap_pyfunction!(id, m)?)?;
@@ -134,7 +138,7 @@ index 032da2e..c42788e 100644
      m.add_class::<PyState>()?;
      m.add_class::<PySide>()?;
 diff --git a/src/mcts.rs b/src/mcts.rs
-index f1fb0ae..6a16de2 100644
+index f1fb0ae..92965e1 100644
 --- a/src/mcts.rs
 +++ b/src/mcts.rs
 @@ -18,6 +18,7 @@ pub struct Node {
@@ -145,17 +149,24 @@ index f1fb0ae..6a16de2 100644
  
      // represents the instructions & s1/s2 moves that led to this node from the parent
      pub instructions: StateInstructions,
-@@ -28,6 +29,9 @@ pub struct Node {
+@@ -28,6 +29,16 @@ pub struct Node {
      // de-coupled for s1 and s2
      pub s1_options: Option<Vec<MoveNode>>,
      pub s2_options: Option<Vec<MoveNode>>,
 +
 +    // > 0: side one's options at this node are chosen by PUCT on their priors instead of UCB1
 +    pub c_puct: f32,
++
++    // > 0: both sides' options are drawn by regret matching mixed with this much uniform exploration
++    // (SM-MCTS-RM, Lisy et al. 2013) instead of chosen by UCB1; children inherit it.
++    // s1_prob / s2_prob: the probability with which this iteration's options were drawn
++    pub rm_gamma: f32,
++    pub s1_prob: f32,
++    pub s2_prob: f32,
  }
  
  impl Node {
-@@ -37,10 +41,12 @@ impl Node {
+@@ -37,10 +48,15 @@ impl Node {
              parent: std::ptr::null_mut(),
              instructions: StateInstructions::default(),
              times_visited: 0,
@@ -165,26 +176,33 @@ index f1fb0ae..6a16de2 100644
              s1_options: None,
              s2_options: None,
 +            c_puct: 0.0,
++            rm_gamma: 0.0,
++            s1_prob: 1.0,
++            s2_prob: 1.0,
          }
      }
      unsafe fn populate(&mut self, s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) {
-@@ -50,6 +56,7 @@ impl Node {
+@@ -50,6 +66,9 @@ impl Node {
                  move_choice: x.clone(),
                  total_score: 0.0,
                  visits: 0,
 +                prior: 0.0,
++                regret: 0.0,
++                strategy_sum: 0.0,
              })
              .collect();
          let s2_options_vec: Vec<MoveNode> = s2_options
-@@ -58,6 +65,7 @@ impl Node {
+@@ -58,6 +77,9 @@ impl Node {
                  move_choice: x.clone(),
                  total_score: 0.0,
                  visits: 0,
 +                prior: 0.0,
++                regret: 0.0,
++                strategy_sum: 0.0,
              })
              .collect();
  
-@@ -78,6 +86,20 @@ impl Node {
+@@ -78,6 +100,20 @@ impl Node {
          choice
      }
  
@@ -205,20 +223,41 @@ index f1fb0ae..6a16de2 100644
      pub unsafe fn selection(
          &mut self,
          state: &mut State,
-@@ -89,7 +111,11 @@ impl Node {
+@@ -89,8 +125,23 @@ impl Node {
              self.populate(s1_options, s2_options);
          }
  
 -        let s1_mc_index = self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap());
-+        let s1_mc_index = if self.c_puct > 0.0 {
-+            self.maximize_puct_for_side(self.s1_options.as_ref().unwrap())
+-        let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap());
++        let (s1_mc_index, s2_mc_index) = if self.rm_gamma > 0.0 {
++            let (i, p1) = regret_matching_draw(self.s1_options.as_mut().unwrap(), self.rm_gamma, rng);
++            let (j, p2) = regret_matching_draw(self.s2_options.as_mut().unwrap(), self.rm_gamma, rng);
++            self.s1_prob = p1;
++            self.s2_prob = p2;
++            (i, j)
++        } else if self.c_puct > 0.0 {
++            (
++                self.maximize_puct_for_side(self.s1_options.as_ref().unwrap()),
++                self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap()),
++            )
 +        } else {
-+            self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap())
++            (
++                self.maximize_ucb_for_side(self.s1_options.as_ref().unwrap()),
++                self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap()),
++            )
 +        };
-         let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap());
          let key = (self as *mut Node as usize, s1_mc_index, s2_mc_index);
          match children.get_mut(&key) {
-@@ -169,6 +195,7 @@ impl Node {
+             Some(child_vector) => {
+@@ -150,6 +201,7 @@ impl Node {
+             new_node.instructions = state_instructions;
+             new_node.s1_choice = s1_move_index as u8;
+             new_node.s2_choice = s2_move_index as u8;
++            new_node.rm_gamma = self.rm_gamma;
+             this_pair_vec.push(new_node);
+         }
+ 
+@@ -169,6 +221,7 @@ impl Node {
  
      pub unsafe fn backpropagate(&mut self, score: f32, state: &mut State) {
          self.times_visited += 1;
@@ -226,15 +265,63 @@ index f1fb0ae..6a16de2 100644
          if self.root {
              return;
          }
-@@ -207,6 +234,7 @@ pub struct MoveNode {
+@@ -183,6 +236,16 @@ impl Node {
+         parent_s2_movenode.total_score += 1.0 - score;
+         parent_s2_movenode.visits += 1;
+ 
++        if (*self.parent).rm_gamma > 0.0 {
++            // importance-weighted regret update: every option's regret falls by the score, the drawn one's
++            // rises by score / P(drawn)
++            let parent = &mut *self.parent;
++            regret_update(parent.s1_options.as_mut().unwrap(), self.s1_choice as usize, score, parent.s1_prob);
++            regret_update(
++                parent.s2_options.as_mut().unwrap(), self.s2_choice as usize, 1.0 - score, parent.s2_prob,
++            );
++        }
++
+         state.reverse_instructions(&self.instructions.instruction_list);
+         (*self.parent).backpropagate(score, state);
+     }
+@@ -207,6 +270,38 @@ pub struct MoveNode {
      pub move_choice: MoveChoice,
      pub total_score: f32,
      pub visits: u32,
 +    pub prior: f32,
++    pub regret: f32,
++    pub strategy_sum: f32, // regret matching's strategy, summed over the draws at this node
++}
++
++// draw an option from regret matching's strategy mixed with `gamma` uniform; returns (index, its probability)
++fn regret_matching_draw(options: &mut [MoveNode], gamma: f32, rng: &mut impl Rng) -> (usize, f32) {
++    let n = options.len() as f32;
++    let positive: f32 = options.iter().map(|o| o.regret.max(0.0)).sum();
++    let mut threshold = rng.random_range(0.0..1.0f32);
++    let mut chosen: Option<(usize, f32)> = None;
++    let mut last = (0, 0.0);
++    for (i, o) in options.iter_mut().enumerate() {
++        let sigma = if positive > 0.0 { o.regret.max(0.0) / positive } else { 1.0 / n };
++        o.strategy_sum += sigma;
++        let p = (1.0 - gamma) * sigma + gamma / n;
++        last = (i, p);
++        if chosen.is_none() {
++            threshold -= p;
++            if threshold <= 0.0 {
++                chosen = Some((i, p));
++            }
++        }
++    }
++    chosen.unwrap_or(last) // float rounding
++}
++
++fn regret_update(options: &mut [MoveNode], chosen: usize, score: f32, prob: f32) {
++    for o in options.iter_mut() {
++        o.regret -= score;
++    }
++    options[chosen].regret += score / prob.max(1e-6);
  }
  
  impl MoveNode {
-@@ -222,6 +250,15 @@ impl MoveNode {
+@@ -222,6 +317,15 @@ impl MoveNode {
          let score = self.total_score / self.visits as f32;
          score
      }
@@ -250,7 +337,7 @@ index f1fb0ae..6a16de2 100644
  }
  
  #[derive(Clone)]
-@@ -302,12 +339,63 @@ pub fn perform_mcts(
+@@ -302,12 +406,66 @@ pub fn perform_mcts(
      side_two_options: Vec<MoveChoice>,
      max_time: Duration,
      max_iterations: u32,
@@ -285,6 +372,7 @@ index f1fb0ae..6a16de2 100644
 +        side_one_priors,
 +        c_puct,
 +        None,
++        0.0,
 +    )
 +}
 +
@@ -299,8 +387,10 @@ index f1fb0ae..6a16de2 100644
 +    side_one_priors: &[f32],
 +    c_puct: f32,
 +    joint: Option<&mut Vec<(usize, usize, u32, f32)>>,
++    rm_gamma: f32,
  ) -> MctsResult {
      let mut root_node = Node::new();
++    root_node.rm_gamma = rm_gamma;
      unsafe {
          root_node.populate(side_one_options, side_two_options);
      }
@@ -314,7 +404,7 @@ index f1fb0ae..6a16de2 100644
      let mut children: HashMap<(usize, usize, usize), Box<[Node]>> = HashMap::new();
  
      let root_eval = evaluate(state);
-@@ -324,6 +412,17 @@ pub fn perform_mcts(
+@@ -324,6 +482,17 @@ pub fn perform_mcts(
          search_limit,
      );
  

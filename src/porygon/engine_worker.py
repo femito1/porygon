@@ -14,33 +14,30 @@ from pathlib import Path
 import poke_engine as pe
 
 
-def search(state_str: str, ms: int, priors: dict[str, float] | None = None,
-           c_puct: float = 0.0) -> list[tuple[str, int, float]]:
-    """MCTS on one determinization -> [(our engine choice, visits, total score in [0, visits])]. With c_puct > 0
-    our root options are chosen by PUCT on `priors` (engine choice -> prior; needs the patched engine)."""
+def search(state_str: str, ms: int, priors: dict[str, float] | None = None, c_puct: float = 0.0,
+           rm_gamma: float = 0.0, joint: bool = False):
+    """MCTS on one determinization -> [(our engine choice, visits, total score in [0, visits])]; with `joint` also
+    the opponent's root options and the root's joint statistics [(our choice, their choice, visits, our total
+    score)]. Patched engine only (scripts/build_engine.sh): c_puct > 0: our root options are chosen by PUCT on
+    `priors` (engine choice -> prior); rm_gamma > 0: regret matching instead of UCB1 at every node."""
     state = pe.State.from_string(state_str)
-    if c_puct > 0:
+    if joint or rm_gamma > 0:
+        result, pairs = pe.monte_carlo_tree_search_joint(state, duration_ms=ms, priors=priors, c_puct=c_puct,
+                                                         rm_gamma=rm_gamma)
+    elif c_puct > 0:
         result = pe.monte_carlo_tree_search_priors(state, priors or {}, c_puct, duration_ms=ms)
     else:
         result = pe.monte_carlo_tree_search(state, duration_ms=ms)
-    return [(o.move_choice, o.visits, o.total_score) for o in result.side_one]
-
-
-def search_joint(state_str: str, ms: int, priors: dict[str, float] | None = None, c_puct: float = 0.0):
-    """As `search`, plus the opponent's root options and the root's joint statistics
-    [(our choice, their choice, visits, our total score)] (needs the patched engine)."""
-    result, joint = pe.monte_carlo_tree_search_joint(pe.State.from_string(state_str), duration_ms=ms,
-                                                     priors=priors, c_puct=c_puct)
-    return ([(o.move_choice, o.visits, o.total_score) for o in result.side_one],
-            [o.move_choice for o in result.side_two], joint)
+    ours = [(o.move_choice, o.visits, o.total_score) for o in result.side_one]
+    return (ours, [o.move_choice for o in result.side_two], pairs) if joint else ours
 
 
 def main() -> None:
     for line in sys.stdin:
         req = json.loads(line)
         try:
-            args = req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0)
-            reply = {"ok": search_joint(*args) if req.get("joint") else search(*args)}
+            reply = {"ok": search(req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0),
+                                  req.get("rm_gamma", 0.0), req.get("joint", False))}
         except BaseException as e:  # Rust panics surface as pyo3 PanicException (a BaseException)
             reply = {"error": f"{type(e).__name__}: {e}"}
         sys.stdout.write(json.dumps(reply) + "\n")
@@ -66,8 +63,8 @@ class EnginePool:
         )
 
     async def search(self, state_str: str, ms: int, priors: dict[str, float] | None = None,
-                     c_puct: float = 0.0, joint: bool = False):
-        """`search` in a worker; with `joint`, `search_joint`'s (ours, their options, joint statistics)."""
+                     c_puct: float = 0.0, rm_gamma: float = 0.0, joint: bool = False):
+        """`search` in a worker."""
         if self.idle is None:
             self.idle = asyncio.Queue()
             for _ in range(self.n):
@@ -75,7 +72,7 @@ class EnginePool:
         proc, line = await self.idle.get(), b""
         try:
             req = {"state": state_str, "ms": ms} | ({"priors": priors, "c_puct": c_puct} if c_puct > 0 else {})
-            req |= {"joint": True} if joint else {}
+            req |= ({"joint": True} if joint else {}) | ({"rm_gamma": rm_gamma} if rm_gamma > 0 else {})
             proc.stdin.write((json.dumps(req) + "\n").encode())
             await proc.stdin.drain()
             line = await asyncio.wait_for(proc.stdout.readline(), ms / 1000 + self.grace)

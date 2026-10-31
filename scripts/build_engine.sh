@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build poke-engine 0.0.48 (gen4) with patches/poke-engine-0.0.48-*.patch into .venv:
 #   gen4-durations: gen4 taunt / encore / confusion end after their random durations instead of lasting forever;
-#   root-priors: monte_carlo_tree_search_priors, side one's root options chosen by PUCT on given priors.
+#   search-options: monte_carlo_tree_search_priors (side one's root options chosen by PUCT on given priors) and
+#   monte_carlo_tree_search_joint (also the root's joint statistics; rm_gamma: regret matching at every node).
 # Needs Rust (cargo). The checkout lives in .poke-engine/ and is reset to the tag on every build.
 #   scripts/build_engine.sh
 #   STOCK=1 VENV=.venv-stock scripts/build_engine.sh   # unpatched build in its own venv (engine A/B tests)
