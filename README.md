@@ -88,7 +88,7 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `src/porygon/decisions.py`, `scripts/analyze_benchmark.py` | benchmark decision logs; duplicate scoring, inference accuracy, swings |
 | `scripts/build_set_library.js`, `score_inference.py` | build the gen4 set library (`data/*library.json.gz`); score inference offline |
 | `scripts/build_eval_server.sh`, `patches/showdown-*` | benchmark Showdown: duplicate battles, true teams logged |
-| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48 with gen4 taunt / encore / confusion durations |
+| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48: gen4 taunt / encore / confusion durations; search options (root priors, joint root statistics, regret matching) |
 | `scripts/ladder_watchdog.sh` | long ladder sessions |
 
 ## Setup
@@ -176,10 +176,15 @@ and they log every searched decision (`porygon.decisions`). Output in `runs/{fou
 determinization's opponent team), `replays/`, `teams/`, and `analysis.txt` from
 `scripts/analyze_benchmark.py` (pair-scored win rate, inference accuracy against the true teams,
 largest value drops of lost-both pairs). Pairing is worth only ~1.1–1.4x the games, so a 400-game run
-is ±4.5%; compare against the pooled 52.6% ± 2.2%.
+is ±4.5% and a 3-point change needs ~2000 games per arm; compare against the pooled 54.5% ± 1.5%. Judge
+changes by general strength: confirm a Foul Play gain head-to-head against our previous search too.
 - `--oracle revealed|all`: search with the true sets of the revealed mons / the whole team (diagnosis).
 - `--engine-python .venv-stock/bin/python` (`--opp-engine-python` for the opponent): engine workers
   under another poke-engine build (`STOCK=1 VENV=.venv-stock scripts/build_engine.sh`), for engine A/Bs.
+- Search options (all off by default, none helped vs Foul Play, see Results): `--c-puct` (root PUCT on the
+  network's priors), `--root-game max|sample` (Bayesian root game over the samples), `--rm-gamma` (regret
+  matching at every node). They need the engine's search-options patch; on the cluster only `.venv-puct`
+  has it so far, so add `--engine-python .venv-puct/bin/python`.
 - Locally: `scripts/build_eval_server.sh`, then `PS_DIR=$PWD/.showdown-eval PORYGON_DUPLICATE=<seed>
   PORYGON_DUPLICATE_LOG=<file> PORYGON_DUPLICATE_TEAMS=<dir> scripts/start_servers.sh 1 8001`.
 
@@ -190,12 +195,16 @@ is ±4.5%; compare against the pooled 52.6% ± 2.2%.
    evidence: score it on the logged benchmarks first (`scripts/score_inference.py`; it must stay 100%
    consistent with the true teams), then a Foul Play run. Rebuild the library
    (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
-2. **Exploit Foul Play's actual play** (next): equilibrium play lost to plain best responses (Results), since
-   Foul Play does not adapt. Its decision rule is known (sum each sample's visit shares, keep the moves within
-   75% of the best, draw one in proportion), so model it: run poke-engine from its side with what it can know
-   of our team, turn that into its move distribution, and best-respond with the root's joint matrix
-   (`monte_carlo_tree_search_joint`, `root_matrix`). Check offline first how well the model predicts its logged
-   moves. The network inside the tree (root PUCT `--c-puct` did not help) would need its evaluations in Rust.
+2. **Tune poke-engine's leaf evaluation** (next). Every MCTS iteration ends in `evaluate()`
+   (`src/genx/evaluate.rs`: a hand-set linear score of HP fractions, alive mons, status, an item held, boost
+   stages, hazards, screens, substitute / leech seed / confusion, side one minus side two), scored as
+   sigmoid(0.0125 · (eval − root eval)). Refit those weights to game outcomes (Texel tuning): collect positions
+   with their final result (self-play or the logged benchmarks), compute evaluate()'s terms in Python on
+   `pe.State`, fit a logistic regression, and put the weights (rescaled to the 0.0125 sigmoid) into the engine
+   patch, so the evaluation stays as fast. Accept only if it predicts held-out outcomes better than the current
+   weights and the search with it beats the current search head-to-head, then a Foul Play run. General
+   strength only: no modelling of one opponent's decision rule. The network inside the tree (root PUCT did
+   not help) would need its evaluations in Rust.
 3. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
@@ -204,7 +213,8 @@ is ±4.5%; compare against the pooled 52.6% ± 2.2%.
    after its target moved misses that turn, encore needs the engine's last-move tracking, occasional
    `NonFinite` engine panics (sample skipped). Time per move: 1 s beat 0.3 s; more may help.
 5. **Training**: PPO reached 600M (`slurm.env` `TOTAL` = 600M; raise it to continue); 400M → 600M did
-   not move the Foul Play result, so resume only once the network weighs more in the search (2).
+   not move the Foul Play result, and neither the prior weight nor root PUCT changed the search's
+   strength, so more PPO pays only once the network weighs more in the search.
    Cheaper PPO updates (bf16, larger minibatches) and evals that don't stall collection would help.
    Moving training off Showdown onto a Rust simulator would multiply throughput but risks training
    on mechanics that differ from Showdown's.
