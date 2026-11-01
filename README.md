@@ -41,13 +41,19 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   re-implemented set logic: 35%), a hidden item 83–86% (58–60%), a hidden move 78% (65%); the same live.
   Damage evidence (each hit against poke-engine's damage range per set) then lifts items to 86–89% and
   whole sets to 59%; every kind of evidence agrees with the true teams in every decisive check.
-  Against Foul Play (500M) the default search with it wins **54.2% ± 1.8%** (6 runs, 2398 games; single
-  runs 50.7–57.8%), +1.6 ± 2.8 over the old inference: probably a small gain, not yet significant. 8 samples
-  instead of 4 (2x the compute): 53.6% ± 4.3%.
+  Against Foul Play (500M) the default search with it wins **54.5% ± 1.5%** (8 runs, 3198 games, incl. the
+  damage evidence; single runs 50.7–57.8%), +1.9 ± 2.7 over the old inference: probably a small gain, not
+  yet significant. 8 samples instead of 4 (2x the compute): 53.6% ± 4.3%.
 - **Root PUCT** (`--c-puct`: the network's priors steer our root options in the engine's MCTS instead of the
   post-hoc mix, `patches/poke-engine-0.0.48-search-options.patch`; 400 games each, `--prior-weight 0`):
   c = 2 55.0% ± 3.2% (2 runs), c = 8 53.2% ± 3.8%: no change from the default; poke-engine's Q values differ by only a
   few hundredths between moves, so the engine still overrides a strong network favourite.
+- **Equilibrium search** (from the simultaneous-move MCTS literature: decoupled UCB1 does not converge to
+  an equilibrium, determinization causes strategy fusion; 400 games each): the Bayesian root game over the
+  samples (`--root-game`: one mixed strategy against an opponent who knows its set) 52.9% ± 4.4% playing
+  its most likely move, **40.8% ± 4.5%** drawing from it; regret matching at every node (`--rm-gamma 0.1`)
+  53.4% ± 4.3%, with the drawn root game 41.8% ± 4.5%. Mixing costs ~13 points: Foul Play never exploits
+  our predictability, so playing a near-equilibrium mix only plays worse moves; nothing here beat the default.
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
   beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
   a replacement for the engine search 42.7%. The value is not yet sharper than poke-engine's search.
@@ -184,13 +190,12 @@ is ±4.5%; compare against the pooled 52.6% ± 2.2%.
    evidence: score it on the logged benchmarks first (`scripts/score_inference.py`; it must stay 100%
    consistent with the true teams), then a Foul Play run. Rebuild the library
    (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
-2. **The network inside the search tree**: root PUCT (`--c-puct`) is built and did not move the result
-   (see Results). Priors at interior nodes and
-   the network's value at the leaves would need its evaluations inside poke-engine's Rust MCTS (e.g. ONNX
-   through `ort` / `tract` in `patches/`, plus a Rust port of the leaf encoder in `porygon.lookahead`):
-   Python callbacks cap at ~1k evaluations/s against the engine's ~430k iterations/s, while porting the
-   per-decision Python glue (tens of ms per 1 s search) buys nothing. Worth it only once the value is
-   sharper than the engine's evaluation (see Value lookahead).
+2. **Exploit Foul Play's actual play** (next): equilibrium play lost to plain best responses (Results), since
+   Foul Play does not adapt. Its decision rule is known (sum each sample's visit shares, keep the moves within
+   75% of the best, draw one in proportion), so model it: run poke-engine from its side with what it can know
+   of our team, turn that into its move distribution, and best-respond with the root's joint matrix
+   (`monte_carlo_tree_search_joint`, `root_matrix`). Check offline first how well the model predicts its logged
+   moves. The network inside the tree (root PUCT `--c-puct` did not help) would need its evaluations in Rust.
 3. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
