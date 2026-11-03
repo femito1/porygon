@@ -793,6 +793,7 @@ async def run(args: argparse.Namespace) -> None:
     if args.log_dir:
         from porygon.decisions import LoggedSearchPlayer  # it imports this module
         player = LoggedSearchPlayer(policy, **cfg, workers=args.workers, out=args.log_dir, oracle=args.oracle,
+                                    log_oracle=args.log_oracle,
                                     oracle_dir=args.oracle_dir,
                                     account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     else:
@@ -862,6 +863,8 @@ def main():
         p.add_argument(f"--opp-{k.replace('_', '-')}", type=CONFIG_TYPES.get(k, int), default=p.get_default(k))
     p.add_argument("--concurrency", type=int, default=3, help="simultaneous battles")
     p.add_argument("--log-dir", help="record MODEL's decisions and replays here (porygon.decisions)")
+    p.add_argument("--log-oracle", action="store_true",
+                   help="also log observations and true-team positions (porygon.decisions, for network studies)")
     add_oracle_args(p)
     p.add_argument("--workers", type=int, default=None, help="engine processes (default: cores - 1)")
     p.add_argument("--format", default="gen4randombattle")

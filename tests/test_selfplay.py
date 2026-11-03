@@ -13,6 +13,7 @@ from porygon.engine_worker import search
 from porygon.selfplay import EvalConfig, initial_state, mirrored, play, winner
 
 ROOT = Path(__file__).resolve().parents[1]
+STATS = ["hp", "atk", "def", "spa", "spd", "spe"]
 
 
 @pytest.fixture(scope="module")
@@ -79,3 +80,25 @@ def test_stock_engine_is_refused_for_a_tuned_evaluation():
     from porygon.search import check_tunable_engine
     with pytest.raises(RuntimeError, match="set_eval"):
         check_tunable_engine(str(ROOT / ".venv-stock/bin/python"))
+
+
+def test_decision_log_oracle_record(pairs, tmp_path):
+    """The true-team position logged for offline network studies (porygon.decisions, --log-oracle)."""
+    from types import SimpleNamespace
+
+    from porygon.decisions import LoggedSearchPlayer
+    from tests.test_search import battle_from
+
+    jirachi = {"speciesId": "jirachi", "level": 80, "moves": ["ironhead", "uturn", "bodyslam", "firepunch"],
+               "ability": "Serene Grace", "item": "Choice Scarf", "evs": dict.fromkeys(STATS, 85),
+               "ivs": dict.fromkeys(STATS, 31)}
+    theirs = [jirachi] + [s for s in pairs[0][1] if s["speciesId"] != "jirachi"][:5]
+    (tmp_path / "battle-gen4randombattle-1.json").write_text(
+        json.dumps({"p1": "me", "p2": "you", "p1team": pairs[0][0], "p2team": theirs}))
+    battle = battle_from("|turn|1")
+    fake = SimpleNamespace(oracle_dir=str(tmp_path), username="me", weather_seen={})
+    rec = LoggedSearchPlayer.oracle_record(fake, battle)
+    assert "error" not in rec, rec
+    side = pe.State.from_string(rec["state"]).side_two
+    assert side.pokemon[0].item == "CHOICESCARF" and side.pokemon[0].moves[0].id == "IRONHEAD"
+    assert [p.id.lower() for p in side.pokemon[1:]] == [s["speciesId"] for s in theirs[1:]]  # the true bench

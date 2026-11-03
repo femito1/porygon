@@ -5,9 +5,16 @@ probabilities, the search shares, the action played, the network's value of the 
 `porygon.lookahead`), and what each determinization assumed about the opponent's team next to what was
 revealed. Every finished battle's protocol log goes to `<out>/replays/<battle tag>.log`. With the duplicate
 server (`scripts/build_eval_server.sh`) the true teams are in its log, so the samples can be scored.
+
+With log_oracle (needs the duplicate server's true teams, `oracle_dir`) each record also carries what offline
+network studies need: the network's observation ("obs", float16, base64) and the position converted with the
+opponent's whole true team ("oracle": engine state string plus the ids that map its choices to action indices),
+so an oracle search can later label which action was right without replaying the battle.
 """
 
+import base64
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +25,7 @@ from poke_env.data import GenData
 
 from porygon.encoder import embed_battle
 from porygon.lookahead import potential
-from porygon.search import SearchPlayer
+from porygon.search import History, SearchPlayer, convert
 
 
 def opponent_samples(state_str: str) -> list[dict]:
@@ -35,15 +42,18 @@ def revealed(battle: Battle) -> list[dict]:
 
 
 class LoggedSearchPlayer(SearchPlayer):
-    def __init__(self, *args, out: str | Path, **kwargs):
+    def __init__(self, *args, out: str | Path, log_oracle: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.log_oracle = log_oracle
+        assert not log_oracle or self.oracle_dir, "log_oracle needs the true teams (oracle_dir)"
         self.out = Path(out)
         (self.out / "replays").mkdir(parents=True, exist_ok=True)
         self.file = open(self.out / "decisions.jsonl", "a")
 
     def on_decision(self, battle: Battle, probs: np.ndarray, mask: np.ndarray, shares: np.ndarray) -> None:
         convs = self.last_convs.pop(battle.battle_tag, [])
-        obs = {"observation": torch.as_tensor(embed_battle(battle)).unsqueeze(0).to(self.policy.device),
+        x = embed_battle(battle)
+        obs = {"observation": torch.as_tensor(x).unsqueeze(0).to(self.policy.device),
                "action_mask": torch.as_tensor(mask).unsqueeze(0).to(self.policy.device)}
         with torch.no_grad():
             value = float(self.policy.predict_values(obs)[0, 0])
@@ -53,8 +63,22 @@ class LoggedSearchPlayer(SearchPlayer):
                "probs": np.round(probs, 4).tolist(), "shares": np.round(shares, 4).tolist(),
                "value": round(value + phi, 4), "revealed": revealed(battle),
                "samples": [opponent_samples(c.state_str) for c in convs]}
+        if self.log_oracle:
+            rec["obs"] = base64.b64encode(np.asarray(x, dtype=np.float16).tobytes()).decode()
+            rec["oracle"] = self.oracle_record(battle)
         self.file.write(json.dumps(rec) + "\n")
         self.file.flush()
+
+    def oracle_record(self, battle: Battle) -> dict | None:
+        try:
+            tag = battle.battle_tag
+            teams = json.loads((Path(self.oracle_dir) / f"{tag}.json").read_text())
+            truth = teams["p2team"] if teams["p1"] == self.username else teams["p1team"]
+            seen = self.weather_seen.get(tag)
+            conv = convert(battle, random.Random(0), seen[1] if seen else None, History(battle), truth, True)
+            return {"state": conv.state_str, "switch_ids": conv.switch_ids, "move_ids": conv.move_ids}
+        except Exception as e:  # a missing team file, a conversion failure: the record just has no oracle
+            return {"error": f"{type(e).__name__}: {e}"[:200]}
 
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         super()._battle_finished_callback(battle)
