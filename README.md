@@ -57,6 +57,18 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 - **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
   beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
   a replacement for the engine search 42.7%. The value is not yet sharper than poke-engine's search.
+- **Tuned leaf evaluation** (`--eval-config`, `patches/poke-engine-0.0.48-tunable-eval.patch`): poke-engine's
+  `evaluate()` refit on 40k engine-only self-play games (`porygon.selfplay`, Showdown's own random teams, both
+  sides searching with full information: what every determinized leaf is). 64 features (the stock score plus
+  63 corrections: alive count, HP bands, status × HP, items, hazard damage by type, boosts × attacker kind,
+  speed order, …), labels luck-adjusted (the outcome minus the later chance swings, a control variate in the
+  style of AIVAT), a fixed effect per team pair so only within-matchup differences fit the weights
+  (`scripts/fit_eval.py`). Better at predicting held-out outcomes, but at scale 1 it plays only 54% vs stock in
+  self-play: the big lever is the leaf sigmoid's scale (≈ the inverse of UCB's exploration), too soft in stock.
+  Self-play vs stock at 300k iterations/decision (≈ 1 s): ×2 58.1% ± 1.1%, ×4 56.0%, ×8 56.8% (flat); at 20k
+  iterations stock weights ×4 alone 62%, the fit ×4 65%. On Showdown, the full search with the fit ×2 beats
+  the same search with the stock evaluation **54.9% ± 1.6%** (800 battles, 400 duplicate pairs), despite
+  ~12% fewer iterations/s. Foul Play runs pending.
 - **Ladder**: 13-7 with the raw 60M network. Both accounts used (femito, porygon-agent) are now
   flagged as bots by Showdown, which matches bots only with players who opted in to bot games;
   datacenter IPs are locked too, so ladder games could only run from a home connection anyway.
@@ -88,7 +100,10 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
 | `src/porygon/decisions.py`, `scripts/analyze_benchmark.py` | benchmark decision logs; duplicate scoring, inference accuracy, swings |
 | `scripts/build_set_library.js`, `score_inference.py` | build the gen4 set library (`data/*library.json.gz`); score inference offline |
 | `scripts/build_eval_server.sh`, `patches/showdown-*` | benchmark Showdown: duplicate battles, true teams logged |
-| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48: gen4 taunt / encore / confusion durations; search options (root priors, joint root statistics, regret matching) |
+| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48: gen4 taunt / encore / confusion durations; search options (root priors, joint root statistics, regret matching); tunable leaf evaluation (`pe.set_eval`, `pe.eval_features`) |
+| `src/porygon/selfplay.py`, `scripts/gen_teams.js` | engine-only self-play: evaluation training data (with luck terms), evaluation head-to-heads |
+| `scripts/fit_eval.py`, `src/porygon/tune.py` | fit the leaf evaluation to self-play outcomes; SPSA on its scale / feature groups |
+| `scripts/slurm_selfplay.sbatch`, `slurm_h2h_arms.sbatch`, `slurm_fit.sbatch` | the same as cluster jobs |
 | `scripts/ladder_watchdog.sh` | long ladder sessions |
 
 ## Setup
@@ -185,6 +200,8 @@ changes by general strength: confirm a Foul Play gain head-to-head against our p
   network's priors), `--root-game max|sample` (Bayesian root game over the samples), `--rm-gamma` (regret
   matching at every node). They need the engine's search-options patch; on the cluster only `.venv-puct`
   has it so far, so add `--engine-python .venv-puct/bin/python`.
+- `--eval-config FILE` (`--opp-eval-config`): the engine's leaf evaluation, a `scripts/fit_eval.py` JSON
+  (weights, scale, root weight); default the stock `evaluate()`. Needs the tunable-eval patch.
 - Locally: `scripts/build_eval_server.sh`, then `PS_DIR=$PWD/.showdown-eval PORYGON_DUPLICATE=<seed>
   PORYGON_DUPLICATE_LOG=<file> PORYGON_DUPLICATE_TEAMS=<dir> scripts/start_servers.sh 1 8001`.
 
@@ -195,16 +212,12 @@ changes by general strength: confirm a Foul Play gain head-to-head against our p
    evidence: score it on the logged benchmarks first (`scripts/score_inference.py`; it must stay 100%
    consistent with the true teams), then a Foul Play run. Rebuild the library
    (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
-2. **Tune poke-engine's leaf evaluation** (next). Every MCTS iteration ends in `evaluate()`
-   (`src/genx/evaluate.rs`: a hand-set linear score of HP fractions, alive mons, status, an item held, boost
-   stages, hazards, screens, substitute / leech seed / confusion, side one minus side two), scored as
-   sigmoid(0.0125 · (eval − root eval)). Refit those weights to game outcomes (Texel tuning): collect positions
-   with their final result (self-play or the logged benchmarks), compute evaluate()'s terms in Python on
-   `pe.State`, fit a logistic regression, and put the weights (rescaled to the 0.0125 sigmoid) into the engine
-   patch, so the evaluation stays as fast. Accept only if it predicts held-out outcomes better than the current
-   weights and the search with it beats the current search head-to-head, then a Foul Play run. General
-   strength only: no modelling of one opponent's decision rule. The network inside the tree (root PUCT did
-   not help) would need its evaluations in Rust.
+2. **Leaf evaluation, what is left** (first round done, see Results): the scale is a search hyperparameter;
+   recheck it whenever the time per move changes. Train on positions like the search's leaves rather than game
+   positions (TreeStrap: targets from deeper search values), then SPSA (`porygon.tune`) on a few feature-group
+   multipliers. Engine-only self-play (`scripts/slurm_selfplay.sbatch`, `slurm_h2h_arms.sbatch`) is the cheap
+   first filter (~6k games/h), Showdown head-to-heads the real test. The engine's occasional `NonFinite` panic
+   (src/mcts.rs:178) is still unexplained.
 3. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
    runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
    no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
