@@ -64,3 +64,18 @@ def test_selfplay_game_and_luck(pairs):
     g = play(pairs[1], stock, stock, 300, random.Random(0), record=True, model=stock)
     assert g["winner"] in (1, 2) and len(g["features"]) == len(g["luck"]) == g["decisions"]
     assert all(-1 <= x <= 1 for x in g["luck"])
+
+
+
+def test_search_player_defaults_to_the_tuned_evaluation():
+    from porygon.search import DEFAULT_EVAL, check_tunable_engine
+    cfg = json.loads(Path(DEFAULT_EVAL).read_text())
+    assert len(cfg["weights"]) == len(pe.eval_feature_names())
+    check_tunable_engine(None)  # this venv's engine has the patch
+
+
+@pytest.mark.skipif(not (ROOT / ".venv-stock/bin/python").exists(), reason="no stock-engine venv")
+def test_stock_engine_is_refused_for_a_tuned_evaluation():
+    from porygon.search import check_tunable_engine
+    with pytest.raises(RuntimeError, match="set_eval"):
+        check_tunable_engine(str(ROOT / ".venv-stock/bin/python"))

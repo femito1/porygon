@@ -40,6 +40,7 @@ transferred; weather from abilities is permanent (gen4), other weather lasts 5 t
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
     python -m porygon.search runs/new.zip --opponent search --opp-model runs/old.zip   # same search, other prior
 
+The engine's leaf evaluation defaults to the tuned one (DEFAULT_EVAL, --eval-config stock for poke-engine's own).
 Defaults (1000 ms, 4 samples, prior_weight 0.25, no top-k) come from head-to-head tuning: prior 0.25 beat 0.5
 (which beat 1.0 and top-k 3), 0.1 and 8 samples were no better, 1000 ms beat 300 ms.
 """
@@ -91,6 +92,9 @@ CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razor
 ROOT_SHRINK = 20  # visits: a thin cell of a root matrix is pulled to its row's mean (`root_matrix`)
 ROOT_ITERS = 1000  # regret matching+ iterations for `bayes_root`
 ROOT_SAMPLE_MIN = 0.1  # root_game="sample" ignores actions below this share of the most likely one
+# the engine's leaf evaluation (tunable-eval patch): fitted to engine self-play and its scale doubled
+# (scripts/fit_eval.py, README Results); "stock" = poke-engine's own evaluate()
+DEFAULT_EVAL = str(Path(__file__).parent / "data/eval_r1.json")
 PUCT_EPS = 0.1  # share of the PUCT priors spread evenly over the legal actions, so none goes unexplored
 DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
                             dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets
@@ -553,6 +557,18 @@ def engine_pool(workers: int | None = None, python: str | None = None) -> Engine
     return _POOLS.setdefault((n, python), EnginePool(n, python=python))
 
 
+@cache
+def check_tunable_engine(python: str | None) -> None:
+    """Fail loudly if the engine workers' poke-engine lacks the tunable-eval patch: otherwise every search would
+    fail and the player would quietly fall back to the network."""
+    import subprocess
+    import sys
+    code = "import poke_engine; poke_engine.set_eval"
+    if subprocess.run([python or sys.executable, "-c", code], capture_output=True).returncode != 0:
+        raise RuntimeError(f"poke-engine under {python or sys.executable} has no set_eval (tunable-eval patch): "
+                           "rebuild it with scripts/build_engine.sh or pass --eval-config stock")
+
+
 class SearchPlayer(Player):
     """Network-guided determinized MCTS. prior_weight=0 and top_k=None is pure engine search; c_puct > 0: PUCT on
     the network's priors at our root options instead of UCB1 (needs the patched engine); value_weight=1
@@ -565,7 +581,7 @@ class SearchPlayer(Player):
                  prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0,
                  root_game: str | None = None, rm_gamma: float = 0.0, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
-                 engine_python: str | None = None, eval_config: str | None = None, oracle: str | None = None,
+                 engine_python: str | None = None, eval_config: str | None = DEFAULT_EVAL, oracle: str | None = None,
                  oracle_dir: str | None = None, seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
@@ -575,8 +591,11 @@ class SearchPlayer(Player):
         self.root_game, self.rm_gamma = root_game, rm_gamma
         self.last_action: dict[str, int] = {}  # battle tag -> the action of its last searched decision
         self.pool = engine_pool(workers, engine_python)
-        # the engine's leaf evaluation (a pe.set_eval config, scripts/fit_eval.py); None = stock evaluate()
-        self.eval_config = json.loads(Path(eval_config).read_text()) if eval_config else None
+        # the engine's leaf evaluation (a pe.set_eval config, scripts/fit_eval.py); None / "stock" = stock evaluate()
+        self.eval_config = None
+        if eval_config and eval_config != "stock":
+            self.eval_config = json.loads(Path(eval_config).read_text())
+            check_tunable_engine(engine_python)
         self.lookahead = None
         if value_weight > 0:
             from porygon.lookahead import Lookahead  # it imports this module
@@ -815,7 +834,8 @@ def add_value_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--value-min-prob", type=float, default=0.0, help="lookahead: drop rarer chance outcomes")
     p.add_argument("--device", default="cpu", help="for the network (cuda: the lookahead's leaf values)")
     p.add_argument("--engine-python", help="interpreter for the engine workers (default: this one)")
-    p.add_argument("--eval-config", help="leaf evaluation for the engine (scripts/fit_eval.py JSON; default stock)")
+    p.add_argument("--eval-config", default=DEFAULT_EVAL,
+                   help="leaf evaluation for the engine: a scripts/fit_eval.py JSON or 'stock' (default: the tuned one)")
 
 
 def add_oracle_args(p: argparse.ArgumentParser) -> None:

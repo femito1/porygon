@@ -201,8 +201,10 @@ changes by general strength: confirm a Foul Play gain head-to-head against our p
   network's priors), `--root-game max|sample` (Bayesian root game over the samples), `--rm-gamma` (regret
   matching at every node). They need the engine's search-options patch; on the cluster only `.venv-puct`
   has it so far, so add `--engine-python .venv-puct/bin/python`.
-- `--eval-config FILE` (`--opp-eval-config`): the engine's leaf evaluation, a `scripts/fit_eval.py` JSON
-  (weights, scale, root weight); default the stock `evaluate()`. Needs the tunable-eval patch.
+- `--eval-config FILE|stock` (`--opp-eval-config`): the engine's leaf evaluation, a `scripts/fit_eval.py` JSON
+  (weights, scale, root weight). Default: the tuned `src/porygon/data/eval_r1.json` (needs the tunable-eval
+  patch; the player refuses to start on an engine without it); `stock` = poke-engine's own `evaluate()`, e.g.
+  with `--engine-python .venv-stock/bin/python`.
 - Locally: `scripts/build_eval_server.sh`, then `PS_DIR=$PWD/.showdown-eval PORYGON_DUPLICATE=<seed>
   PORYGON_DUPLICATE_LOG=<file> PORYGON_DUPLICATE_TEAMS=<dir> scripts/start_servers.sh 1 8001`.
 
