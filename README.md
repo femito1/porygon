@@ -68,7 +68,8 @@ sets (from Showdown's random-battle data), and poke-env's slot-based 10-action s
   Self-play vs stock at 300k iterations/decision (≈ 1 s): ×2 58.1% ± 1.1%, ×4 56.0%, ×8 56.8% (flat); at 20k
   iterations stock weights ×4 alone 62%, the fit ×4 65%. On Showdown, the full search with the fit ×2 beats
   the same search with the stock evaluation **54.9% ± 1.6%** (800 battles, 400 duplicate pairs), despite
-  ~12% fewer iterations/s. Foul Play runs pending.
+  ~12% fewer iterations/s. Against Foul Play (500M, `--eval-config src/porygon/data/eval_r1.json`, 4 runs,
+  1600 games): **59.2% ± 1.1%** (single runs 55.5–60.8%), +4.7 ± 1.9 over the stock-evaluation 54.5% ± 1.5%.
 - **Ladder**: 13-7 with the raw 60M network. Both accounts used (femito, porygon-agent) are now
   flagged as bots by Showdown, which matches bots only with players who opted in to bot games;
   datacenter IPs are locked too, so ladder games could only run from a home connection anyway.
