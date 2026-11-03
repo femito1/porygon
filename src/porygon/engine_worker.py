@@ -15,11 +15,16 @@ import poke_engine as pe
 
 
 def search(state_str: str, ms: int, priors: dict[str, float] | None = None, c_puct: float = 0.0,
-           rm_gamma: float = 0.0, joint: bool = False):
+           rm_gamma: float = 0.0, joint: bool = False, eval_config: dict | None = None):
     """MCTS on one determinization -> [(our engine choice, visits, total score in [0, visits])]; with `joint` also
     the opponent's root options and the root's joint statistics [(our choice, their choice, visits, our total
     score)]. Patched engine only (scripts/build_engine.sh): c_puct > 0: our root options are chosen by PUCT on
-    `priors` (engine choice -> prior); rm_gamma > 0: regret matching instead of UCB1 at every node."""
+    `priors` (engine choice -> prior); rm_gamma > 0: regret matching instead of UCB1 at every node.
+    eval_config: the leaf evaluation, {"weights", "scale", "root_weight"} for pe.set_eval (tunable-eval patch;
+    None = the stock evaluate()). Set on every request: one pool serves players with different evaluations."""
+    if eval_config is not None or hasattr(pe, "set_eval"):
+        cfg = eval_config or {}
+        pe.set_eval(cfg.get("weights"), cfg.get("scale", 0.0125), cfg.get("root_weight", 1.0))
     state = pe.State.from_string(state_str)
     if joint or rm_gamma > 0:
         result, pairs = pe.monte_carlo_tree_search_joint(state, duration_ms=ms, priors=priors, c_puct=c_puct,
@@ -37,7 +42,7 @@ def main() -> None:
         req = json.loads(line)
         try:
             reply = {"ok": search(req["state"], req["ms"], req.get("priors"), req.get("c_puct", 0.0),
-                                  req.get("rm_gamma", 0.0), req.get("joint", False))}
+                                  req.get("rm_gamma", 0.0), req.get("joint", False), req.get("eval"))}
         except BaseException as e:  # Rust panics surface as pyo3 PanicException (a BaseException)
             reply = {"error": f"{type(e).__name__}: {e}"}
         sys.stdout.write(json.dumps(reply) + "\n")
@@ -63,7 +68,8 @@ class EnginePool:
         )
 
     async def search(self, state_str: str, ms: int, priors: dict[str, float] | None = None,
-                     c_puct: float = 0.0, rm_gamma: float = 0.0, joint: bool = False):
+                     c_puct: float = 0.0, rm_gamma: float = 0.0, joint: bool = False,
+                     eval_config: dict | None = None):
         """`search` in a worker."""
         if self.idle is None:
             self.idle = asyncio.Queue()
@@ -73,6 +79,7 @@ class EnginePool:
         try:
             req = {"state": state_str, "ms": ms} | ({"priors": priors, "c_puct": c_puct} if c_puct > 0 else {})
             req |= ({"joint": True} if joint else {}) | ({"rm_gamma": rm_gamma} if rm_gamma > 0 else {})
+            req |= {"eval": eval_config} if eval_config is not None else {}
             proc.stdin.write((json.dumps(req) + "\n").encode())
             await proc.stdin.drain()
             line = await asyncio.wait_for(proc.stdout.readline(), ms / 1000 + self.grace)

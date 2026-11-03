@@ -1,0 +1,22 @@
+#!/bin/bash
+# Engine-only self-play (python -m porygon.selfplay) on one node: training data for the leaf evaluation, or
+# evaluation head-to-heads. No Showdown server, no GPU work (the partitions require one).
+#   sbatch scripts/slurm_selfplay.sbatch MODE PAIRS [porygon.selfplay args]
+#   e.g. ... data 20000 --iterations 20000 --explore 0.1
+#        ... h2h 2000 --a runs/evalfit/r1/full.json --b stock
+#SBATCH --job-name=porygon-selfplay
+#SBATCH --partition=a16
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=48G
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/slurm-%j.out
+set -euo pipefail
+ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
+MODE=$1; PAIRS=$2; shift 2
+export PATH=$ROOT/.node/bin:$PATH
+OUT=runs/selfplay-$MODE-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
+node scripts/gen_teams.js "$PAIRS" > "$OUT/teams.jsonl"
+echo "selfplay $MODE $PAIRS $*"
+.venv/bin/python -m porygon.selfplay "$MODE" --teams "$OUT/teams.jsonl" --out "$OUT" --workers "$(nproc)" "$@" \
+  2>&1 | tee "$OUT/selfplay.log"

@@ -1,0 +1,420 @@
+diff --git a/poke-engine-py/src/lib.rs b/poke-engine-py/src/lib.rs
+index 60195f2..ceb096f 100644
+--- a/poke-engine-py/src/lib.rs
++++ b/poke-engine-py/src/lib.rs
+@@ -11,8 +11,13 @@ use poke_engine::engine::generate_instructions::{
+ use poke_engine::engine::items::Items;
+ use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
+ use poke_engine::instruction::{Instruction, StateInstructions};
++use poke_engine::engine::evaluate::{
++    eval_features as engine_eval_features, evaluate as engine_evaluate, set_eval_weights,
++    EVAL_FEATURE_NAMES, N_EVAL_FEATURES,
++};
+ use poke_engine::mcts::{
+-    perform_mcts, perform_mcts_joint, perform_mcts_with_priors, MctsResult, MctsSideResult,
++    perform_mcts, perform_mcts_joint, perform_mcts_with_priors, set_leaf_transform, MctsResult,
++    MctsSideResult,
+ };
+ use poke_engine::mcts_threaded::perform_mcts_shared_tree;
+ use poke_engine::pokemon::PokemonName;
+@@ -1190,6 +1195,58 @@ fn calculate_damage(
+     Ok((s1_py_rolls, s2_py_rolls))
+ }
+ 
++// Porygon patch: the tunable evaluation. weights None = the stock evaluation; scale / root_weight: the leaf value
++// transform sigmoid(scale * (eval(leaf) - root_weight * eval(root))). Process-wide.
++#[pyfunction]
++#[pyo3(signature = (weights=None, scale=0.0125, root_weight=1.0))]
++fn set_eval(weights: Option<Vec<f32>>, scale: f32, root_weight: f32) -> PyResult<()> {
++    if let Some(w) = &weights {
++        if w.len() != N_EVAL_FEATURES {
++            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
++                "expected {} weights, got {}",
++                N_EVAL_FEATURES,
++                w.len()
++            )));
++        }
++    }
++    set_eval_weights(weights.as_deref());
++    set_leaf_transform(scale, root_weight);
++    Ok(())
++}
++
++#[pyfunction]
++fn evaluate(py_state: PyState) -> f32 {
++    let state: State = py_state.into();
++    engine_evaluate(&state)
++}
++
++#[pyfunction]
++fn eval_features(py_state: PyState) -> Vec<f32> {
++    let state: State = py_state.into();
++    let mut f = [0.0f32; N_EVAL_FEATURES];
++    engine_eval_features(&state, &mut f);
++    f.to_vec()
++}
++
++#[pyfunction]
++fn eval_feature_names() -> Vec<String> {
++    EVAL_FEATURE_NAMES.iter().map(|s| s.to_string()).collect()
++}
++
++/// the state's eval features for many state strings at once (data generation)
++#[pyfunction]
++fn eval_features_many(states: Vec<String>) -> Vec<Vec<f32>> {
++    states
++        .iter()
++        .map(|s| {
++            let state = State::deserialize(s);
++            let mut f = [0.0f32; N_EVAL_FEATURES];
++            engine_eval_features(&state, &mut f);
++            f.to_vec()
++        })
++        .collect()
++}
++
+ #[pymodule]
+ #[pyo3(name = "poke_engine")]
+ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+@@ -1199,6 +1256,11 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add_function(wrap_pyfunction!(mcts_priors, m)?)?;
+     m.add_function(wrap_pyfunction!(mcts_joint, m)?)?;
+     m.add_function(wrap_pyfunction!(mcts, m)?)?;
++    m.add_function(wrap_pyfunction!(set_eval, m)?)?;
++    m.add_function(wrap_pyfunction!(evaluate, m)?)?;
++    m.add_function(wrap_pyfunction!(eval_features, m)?)?;
++    m.add_function(wrap_pyfunction!(eval_feature_names, m)?)?;
++    m.add_function(wrap_pyfunction!(eval_features_many, m)?)?;
+     m.add_class::<PyState>()?;
+     m.add_class::<PySide>()?;
+     m.add_class::<PySideConditions>()?;
+diff --git a/src/genx/evaluate.rs b/src/genx/evaluate.rs
+index e46f7f8..4f67e64 100644
+--- a/src/genx/evaluate.rs
++++ b/src/genx/evaluate.rs
+@@ -2,7 +2,9 @@ use super::abilities::Abilities;
+ use super::items::Items;
+ use super::state::PokemonVolatileStatus;
+ use crate::choices::MoveCategory;
+-use crate::state::{Pokemon, PokemonStatus, Side, State};
++use super::damage_calc::type_effectiveness_modifier;
++use super::generate_instructions::get_effective_speed;
++use crate::state::{Pokemon, PokemonStatus, PokemonType, Side, SideReference, State};
+ 
+ const POKEMON_ALIVE: f32 = 30.0;
+ const POKEMON_HP: f32 = 100.0;
+@@ -156,7 +158,7 @@ fn evaluate_pokemon(pokemon: &Pokemon) -> f32 {
+     score
+ }
+ 
+-pub fn evaluate(state: &State) -> f32 {
++pub fn evaluate_stock(state: &State) -> f32 {
+     let mut score = 0.0;
+ 
+     let mut iter = state.side_one.pokemon.into_iter();
+@@ -267,3 +269,255 @@ pub fn evaluate(state: &State) -> f32 {
+ 
+     score
+ }
++
++// ------------------------------------------------------------------ tunable evaluation (Porygon patch)
++//
++// evaluate() is the stock score above unless set_eval_weights() installed weights for the feature vector of
++// eval_features(): then it is  sum_i w_i * f_i(state), every f_i side one minus side two (antisymmetric).
++// Feature 0 is the stock score / 100, so weights [100, 0, 0, ...] reproduce the stock evaluation and the other
++// features are corrections to it. One weight set per process (searches here are single-threaded).
++
++pub const EVAL_FEATURE_NAMES: [&str; 64] = [
++    "stock",
++    "alive_1", "alive_2", "alive_3", "alive_4", "alive_5", "alive_6",
++    "hp_0_25", "hp_25_50", "hp_50_75", "hp_75_100", "active_hp",
++    "burn_phys", "burn_phys_hp", "freeze", "freeze_hp", "sleep", "sleep_hp", "rest", "rest_hp",
++    "paralyze", "paralyze_hp", "toxic", "toxic_hp", "poison", "poison_hp", "status_good",
++    "item", "item_choice", "item_consumable", "sash_intact",
++    "sr_damage", "spikes_damage", "tspikes",
++    "substitute", "leech_seed", "confusion", "taunt", "yawn", "perish", "curse", "ingrain_aquaring",
++    "locked_move", "must_recharge",
++    "atk_boost", "atk_boost_phys", "spa_boost", "spa_boost_spec", "def_boost", "spd_boost", "spe_boost",
++    "acc_boost", "eva_boost", "off_boost_hp",
++    "faster",
++    "reflect", "light_screen", "safeguard", "tailwind", "mist", "lucky_chant", "wish", "future_sight",
++    "toxic_count",
++];
++pub const N_EVAL_FEATURES: usize = 64;
++
++static mut EVAL_WEIGHTS: [f32; N_EVAL_FEATURES] = [0.0; N_EVAL_FEATURES];
++static mut EVAL_TUNED: bool = false;
++
++/// None restores the stock evaluation.
++pub fn set_eval_weights(weights: Option<&[f32]>) {
++    unsafe {
++        match weights {
++            Some(w) => {
++                let dst = &mut *std::ptr::addr_of_mut!(EVAL_WEIGHTS);
++                dst.copy_from_slice(&w[..N_EVAL_FEATURES]);
++                EVAL_TUNED = true;
++            }
++            None => EVAL_TUNED = false,
++        }
++    }
++}
++
++pub fn evaluate(state: &State) -> f32 {
++    unsafe {
++        if !EVAL_TUNED {
++            return evaluate_stock(state);
++        }
++        let mut f = [0.0f32; N_EVAL_FEATURES];
++        eval_features(state, &mut f);
++        let w = &*std::ptr::addr_of!(EVAL_WEIGHTS);
++        let mut score = 0.0;
++        for i in 0..N_EVAL_FEATURES {
++            score += w[i] * f[i];
++        }
++        score
++    }
++}
++
++fn boost_feature(boost: i8) -> f32 {
++    get_boost_multiplier(boost.max(-6).min(6))
++}
++
++fn damage_split(pokemon: &Pokemon) -> (f32, f32) {
++    let (mut phys, mut spec) = (0.0, 0.0);
++    for mv in pokemon.moves.into_iter() {
++        match mv.choice.category {
++            MoveCategory::Physical => phys += 1.0,
++            MoveCategory::Special => spec += 1.0,
++            _ => {}
++        }
++    }
++    let n = phys + spec;
++    if n > 0.0 {
++        (phys / n, spec / n)
++    } else {
++        (0.0, 0.0)
++    }
++}
++
++fn status_is_good(pokemon: &Pokemon) -> bool {
++    match pokemon.status {
++        PokemonStatus::BURN | PokemonStatus::POISON | PokemonStatus::TOXIC => match pokemon.ability {
++            Abilities::GUTS | Abilities::MARVELSCALE | Abilities::QUICKFEET => true,
++            Abilities::POISONHEAL | Abilities::MAGICGUARD | Abilities::TOXICBOOST => {
++                pokemon.status != PokemonStatus::BURN
++            }
++            _ => false,
++        },
++        _ => false,
++    }
++}
++
++fn side_features(state: &State, side_ref: SideReference, sign: f32, f: &mut [f32; N_EVAL_FEATURES]) {
++    let side: &Side = state.get_side_immutable(&side_ref);
++    let sc = &side.side_conditions;
++    let mut alive = 0usize;
++    let mut iter = side.pokemon.into_iter();
++    while let Some(p) = iter.next() {
++        if p.hp <= 0 {
++            continue;
++        }
++        alive += 1;
++        let hp = (p.hp as f32 / p.maxhp.max(1) as f32).min(1.0);
++        f[7] += sign * hp.min(0.25);
++        f[8] += sign * (hp - 0.25).max(0.0).min(0.25);
++        f[9] += sign * (hp - 0.5).max(0.0).min(0.25);
++        f[10] += sign * (hp - 0.75).max(0.0).min(0.25);
++        if status_is_good(p) {
++            f[26] += sign;
++        } else {
++            let k = match p.status {
++                PokemonStatus::BURN => {
++                    let mut m = 0.0;
++                    for mv in p.moves.into_iter() {
++                        if mv.choice.category == MoveCategory::Physical {
++                            m += 1.0;
++                        }
++                    }
++                    if p.special_attack > p.attack {
++                        m /= 2.0;
++                    }
++                    f[12] += sign * m;
++                    f[13] += sign * m * hp;
++                    0
++                }
++                PokemonStatus::FREEZE => 14,
++                PokemonStatus::SLEEP if p.rest_turns > 0 => 18,
++                PokemonStatus::SLEEP => 16,
++                PokemonStatus::PARALYZE => 20,
++                PokemonStatus::TOXIC => 22,
++                PokemonStatus::POISON => 24,
++                PokemonStatus::NONE => 0,
++            };
++            if k > 0 {
++                f[k] += sign;
++                f[k + 1] += sign * hp;
++            }
++        }
++        if p.item != Items::NONE {
++            f[27] += sign;
++            match p.item {
++                Items::CHOICEBAND | Items::CHOICESPECS | Items::CHOICESCARF => f[28] += sign,
++                Items::LUMBERRY | Items::SITRUSBERRY | Items::WHITEHERB | Items::POWERHERB
++                | Items::LIECHIBERRY | Items::SALACBERRY | Items::PETAYABERRY | Items::CHESTOBERRY
++                | Items::CUSTAPBERRY | Items::FOCUSSASH => f[29] += sign,
++                _ => {}
++            }
++            if p.item == Items::FOCUSSASH && p.hp == p.maxhp {
++                f[30] += sign;
++            }
++        }
++        if p.item != Items::HEAVYDUTYBOOTS && p.ability != Abilities::MAGICGUARD {
++            if sc.stealth_rock > 0 {
++                f[31] += sign * type_effectiveness_modifier(&PokemonType::ROCK, p) / 8.0;
++            }
++            if p.is_grounded() {
++                f[32] += sign * match sc.spikes {
++                    0 => 0.0,
++                    1 => 1.0 / 8.0,
++                    2 => 1.0 / 6.0,
++                    _ => 1.0 / 4.0,
++                };
++                if sc.toxic_spikes > 0
++                    && p.status == PokemonStatus::NONE
++                    && !p.has_type(&PokemonType::POISON)
++                    && !p.has_type(&PokemonType::STEEL)
++                {
++                    f[33] += sign * sc.toxic_spikes as f32;
++                }
++            }
++        }
++        if iter.pokemon_index == side.active_index {
++            f[11] += sign * hp;
++            let v = &side.volatile_statuses;
++            for (idx, vs) in [
++                (34, PokemonVolatileStatus::SUBSTITUTE),
++                (35, PokemonVolatileStatus::LEECHSEED),
++                (36, PokemonVolatileStatus::CONFUSION),
++                (37, PokemonVolatileStatus::TAUNT),
++                (38, PokemonVolatileStatus::YAWN),
++                (40, PokemonVolatileStatus::CURSE),
++                (42, PokemonVolatileStatus::LOCKEDMOVE),
++                (43, PokemonVolatileStatus::MUSTRECHARGE),
++            ] {
++                if v.contains(&vs) {
++                    f[idx] += sign;
++                }
++            }
++            if v.contains(&PokemonVolatileStatus::PERISH1)
++                || v.contains(&PokemonVolatileStatus::PERISH2)
++                || v.contains(&PokemonVolatileStatus::PERISH3)
++                || v.contains(&PokemonVolatileStatus::PERISH4)
++            {
++                f[39] += sign;
++            }
++            if v.contains(&PokemonVolatileStatus::INGRAIN) || v.contains(&PokemonVolatileStatus::AQUARING) {
++                f[41] += sign;
++            }
++            let (phys, spec) = damage_split(p);
++            let atk = boost_feature(side.attack_boost);
++            let spa = boost_feature(side.special_attack_boost);
++            let spe = boost_feature(side.speed_boost);
++            f[44] += sign * atk;
++            f[45] += sign * atk * phys;
++            f[46] += sign * spa;
++            f[47] += sign * spa * spec;
++            f[48] += sign * boost_feature(side.defense_boost);
++            f[49] += sign * boost_feature(side.special_defense_boost);
++            f[50] += sign * spe;
++            f[51] += sign * boost_feature(side.accuracy_boost);
++            f[52] += sign * boost_feature(side.evasion_boost);
++            f[53] += sign * (atk * phys + spa * spec + spe) * hp;
++            if p.status == PokemonStatus::TOXIC && !status_is_good(p) {
++                f[63] += sign * sc.toxic_count as f32;
++            }
++        }
++    }
++    if alive >= 1 && alive <= 6 {
++        f[alive] += sign; // alive_1 .. alive_6
++    }
++    f[55] += sign * (sc.reflect > 0) as i32 as f32;
++    f[56] += sign * (sc.light_screen > 0) as i32 as f32;
++    f[57] += sign * (sc.safeguard > 0) as i32 as f32;
++    f[58] += sign * (sc.tailwind > 0) as i32 as f32;
++    f[59] += sign * (sc.mist > 0) as i32 as f32;
++    f[60] += sign * (sc.lucky_chant > 0) as i32 as f32;
++    if side.wish.0 > 0 {
++        f[61] += sign * (side.wish.1 as f32 / side.get_active_immutable().maxhp.max(1) as f32).min(1.0);
++    }
++    if side.future_sight.0 > 0 {
++        f[62] += sign;
++    }
++}
++
++/// The tunable evaluation's features (side one minus side two) into `f`.
++pub fn eval_features(state: &State, f: &mut [f32; N_EVAL_FEATURES]) {
++    f[0] = evaluate_stock(state) / 100.0;
++    side_features(state, SideReference::SideOne, 1.0, f);
++    side_features(state, SideReference::SideTwo, -1.0, f);
++    let one = &state.side_one.pokemon[state.side_one.active_index];
++    let two = &state.side_two.pokemon[state.side_two.active_index];
++    if one.hp > 0 && two.hp > 0 {
++        let s1 = get_effective_speed(state, &SideReference::SideOne);
++        let s2 = get_effective_speed(state, &SideReference::SideTwo);
++        let mut faster = (s1 > s2) as i32 as f32 - (s2 > s1) as i32 as f32;
++        if state.trick_room.active {
++            faster = -faster;
++        }
++        f[54] = faster;
++    }
++}
+diff --git a/src/genx/generate_instructions.rs b/src/genx/generate_instructions.rs
+index 99e66b9..9bcb10b 100644
+--- a/src/genx/generate_instructions.rs
++++ b/src/genx/generate_instructions.rs
+@@ -2609,7 +2609,7 @@ fn combine_duplicate_instructions(list_of_instructions: &mut Vec<StateInstructio
+     }
+ }
+ 
+-fn get_effective_speed(state: &State, side_reference: &SideReference) -> i16 {
++pub fn get_effective_speed(state: &State, side_reference: &SideReference) -> i16 {
+     let side = state.get_side_immutable(side_reference);
+     let active_pkmn = side.get_active_immutable();
+ 
+diff --git a/src/mcts.rs b/src/mcts.rs
+index 92965e1..c9df34b 100644
+--- a/src/mcts.rs
++++ b/src/mcts.rs
+@@ -8,9 +8,22 @@ use rand::rng;
+ use std::collections::HashMap;
+ use std::time::Duration;
+ 
++// leaf value = sigmoid(LEAF_SCALE * (eval(leaf) - LEAF_ROOT_WEIGHT * eval(root))); stock: 0.0125 and 1 (Porygon
++// patch: set_leaf_transform). Root weight 0 scores leaves by their absolute evaluation (a win probability when
++// the evaluation is calibrated in logits and the scale is 1).
++static mut LEAF_SCALE: f32 = 0.0125;
++static mut LEAF_ROOT_WEIGHT: f32 = 1.0;
++
++pub fn set_leaf_transform(scale: f32, root_weight: f32) {
++    unsafe {
++        LEAF_SCALE = scale;
++        LEAF_ROOT_WEIGHT = root_weight;
++    }
++}
++
+ fn sigmoid(x: f32) -> f32 {
+     // Tuned so that ~200 points is very close to 1.0
+-    1.0 / (1.0 + (-0.0125 * x).exp())
++    1.0 / (1.0 + (-unsafe { LEAF_SCALE } * x).exp())
+ }
+ 
+ #[derive(Debug)]
+@@ -254,7 +267,7 @@ impl Node {
+         let battle_is_over = state.battle_is_over();
+         if battle_is_over == 0.0 {
+             let eval = evaluate(state);
+-            sigmoid(eval - root_eval)
++            sigmoid(eval - unsafe { LEAF_ROOT_WEIGHT } * root_eval)
+         } else {
+             if battle_is_over == -1.0 {
+                 0.0

@@ -565,8 +565,8 @@ class SearchPlayer(Player):
                  prior_weight: float = 0.25, top_k: int | None = None, c_puct: float = 0.0,
                  root_game: str | None = None, rm_gamma: float = 0.0, value_weight: float = 0.0,
                  value_top_k: int | None = None, value_min_prob: float = 0.0, workers: int | None = None,
-                 engine_python: str | None = None, oracle: str | None = None, oracle_dir: str | None = None,
-                 seed: int | None = None, **kwargs: Any):
+                 engine_python: str | None = None, eval_config: str | None = None, oracle: str | None = None,
+                 oracle_dir: str | None = None, seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
@@ -575,6 +575,8 @@ class SearchPlayer(Player):
         self.root_game, self.rm_gamma = root_game, rm_gamma
         self.last_action: dict[str, int] = {}  # battle tag -> the action of its last searched decision
         self.pool = engine_pool(workers, engine_python)
+        # the engine's leaf evaluation (a pe.set_eval config, scripts/fit_eval.py); None = stock evaluate()
+        self.eval_config = json.loads(Path(eval_config).read_text()) if eval_config else None
         self.lookahead = None
         if value_weight > 0:
             from porygon.lookahead import Lookahead  # it imports this module
@@ -653,6 +655,7 @@ class SearchPlayer(Player):
         """Mean MCTS visit share per action index, or with root_game the Bayesian root game's strategy."""
         priors = (lambda c: c.priors(probs, mask)) if self.c_puct > 0 else (lambda c: None)
         kw = {"rm_gamma": self.rm_gamma} if self.rm_gamma > 0 else {}
+        kw |= {"eval_config": self.eval_config} if self.eval_config is not None else {}
         if self.root_game:
             results = await asyncio.gather(*(self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, joint=True,
                                                               **kw) for c in convs), return_exceptions=True)
@@ -755,7 +758,7 @@ class SearchPlayer(Player):
 # ---------------------------------------------------------------- CLI
 
 CONFIG = ("ms", "samples", "prior_weight", "top_k", "c_puct", "root_game", "rm_gamma", "value_weight",
-          "value_top_k", "value_min_prob", "engine_python")
+          "value_top_k", "value_min_prob", "engine_python", "eval_config")
 
 
 def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
@@ -802,7 +805,7 @@ async def run(args: argparse.Namespace) -> None:
 
 
 CONFIG_TYPES = {"prior_weight": float, "c_puct": float, "root_game": str, "rm_gamma": float, "value_weight": float,
-                "value_min_prob": float, "engine_python": str}
+                "value_min_prob": float, "engine_python": str, "eval_config": str}
 
 
 def add_value_args(p: argparse.ArgumentParser) -> None:
@@ -812,6 +815,7 @@ def add_value_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--value-min-prob", type=float, default=0.0, help="lookahead: drop rarer chance outcomes")
     p.add_argument("--device", default="cpu", help="for the network (cuda: the lookahead's leaf values)")
     p.add_argument("--engine-python", help="interpreter for the engine workers (default: this one)")
+    p.add_argument("--eval-config", help="leaf evaluation for the engine (scripts/fit_eval.py JSON; default stock)")
 
 
 def add_oracle_args(p: argparse.ArgumentParser) -> None:
