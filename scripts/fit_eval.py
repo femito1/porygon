@@ -120,6 +120,10 @@ def main() -> None:
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--test-share", type=float, default=0.2, help="team pairs held out for the final report")
     p.add_argument("--max-games", type=int)
+    p.add_argument("--target", choices=["luck", "raw"], default="luck",
+                   help="fit to the luck-adjusted outcome (default) or the raw win / loss (ablation); evaluation "
+                        "always reports both")
+    p.add_argument("--scale", type=float, default=1.0, help="leaf scale written into the configs (search used 2)")
     args = p.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -128,15 +132,16 @@ def main() -> None:
     assert len(names) == N
 
     X, y, z, game, pair, swap, turn, n_games = load(args.data, args.max_games)
+    t = z if args.target == "raw" else y  # the training target; held-out scoring stays on y (less noisy, same ranking)
     print(f"{n_games} games, {len(X)} positions, {int(pair.max()) + 1} team pairs; "
           f"var(z) {z.var():.4f}, var(y) {y.var():.4f}", flush=True)
     test = folds(pair, round(1 / args.test_share), seed=1) == 0
     tr, te = ~test, test
-    report: dict = {"games": n_games, "positions": len(X), "var_z": float(z.var()), "var_y": float(y.var())}
+    report: dict = {"target": args.target, "games": n_games, "positions": len(X), "var_z": float(z.var()), "var_y": float(y.var())}
 
     stock_mask = np.eye(N)[0]
     w_engine = np.eye(N)[0] * 1.25  # sigmoid(0.0125 * eval) = sigmoid(1.25 * f0)
-    w_k = fit(X[tr], y[tr], 0.0, w_engine, mask=stock_mask)
+    w_k = fit(X[tr], t[tr], 0.0, w_engine, mask=stock_mask)
     print(f"stock K: {w_k[0] / 100:.5f} per eval point (engine leaf uses 0.0125)", flush=True)
 
     # cross-validated L2 for the full model, on the training pairs
@@ -146,13 +151,13 @@ def main() -> None:
         losses = []
         for k in range(args.folds):
             a, b = fid != k, fid == k
-            w = fit(X[tr][a], y[tr][a], l2, w_k)
+            w = fit(X[tr][a], t[tr][a], l2, w_k)
             losses.append(metrics(X[tr][b], y[tr][b], z[tr][b], w)["mse_y"])
         cv[l2] = float(np.mean(losses))
         print(f"l2 {l2:g}: cv mse_y {cv[l2]:.6f}", flush=True)
     best = min(cv, key=cv.get)
-    w_full = fit(X[tr], y[tr], best, w_k)
-    w_fe = fit(X[tr], y[tr], best, w_k, pair=pair[tr], swap=swap[tr])
+    w_full = fit(X[tr], t[tr], best, w_k)
+    w_fe = fit(X[tr], t[tr], best, w_k, pair=pair[tr], swap=swap[tr])
     report |= {"stock_k": float(w_k[0] / 100), "cv": {str(k): v for k, v in cv.items()}, "l2": best}
 
     models = {"stock_engine": w_engine, "stock_k": w_k, "full": w_full, "full_fe": w_fe}
@@ -168,7 +173,7 @@ def main() -> None:
     report["weight_x_sd"] = {m: {n: round(float(v * s), 4) for n, v, s in zip(names, w, sd)}
                              for m, w in models.items() if m in ("full", "full_fe")}
     for m, w in models.items():
-        (out / f"{m}.json").write_text(json.dumps({"weights": [float(v) for v in w], "scale": 1.0,
+        (out / f"{m}.json").write_text(json.dumps({"weights": [float(v) for v in w], "scale": args.scale,
                                                    "root_weight": 1.0}))
     (out / "report.json").write_text(json.dumps(report, indent=1))
     print("feature  full  full_fe  (logit weight; stock feature = eval/100)")
