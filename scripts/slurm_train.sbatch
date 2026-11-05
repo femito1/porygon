@@ -100,6 +100,15 @@ trap 'exit 143' TERM
 # arms do not push: the results repo holds one force-pushed snapshot, which parallel arms would overwrite
 [ -n "$ARM" ] || scripts/sync_results.sh "$LOCAL/run" "$SYNC_REMOTE" >> "$RUN/sync.log" 2>&1 &
 
+# Watchdog: training can deadlock with every process idle (seen 2026-11-05: an arm froze for 8.7 h). If the log is
+# silent for 45 min (an eval takes ~10), requeue: the job restarts from its newest checkpoint.
+( while sleep 300; do
+    f=$LOCAL/run/train.log; [ -f "$f" ] || continue
+    if [ $(( $(date +%s) - $(stat -c %Y "$f") )) -gt 2700 ]; then
+      echo "$(date -u +%T) train.log silent for 45 min: requeueing" >&2
+      scontrol requeue "$SLURM_JOB_ID" || pkill -u "$USER" -f "porygon.train"; break
+    fi
+  done ) &
 .venv/bin/python -m porygon.train --ports "$BASE-$((BASE + N_SERVERS - 1))" --n-battles "$SELFPLAY" \
   --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
   ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "${TOTAL:-400000000}" --max-hours 70.5 --checkpoint-every 5000000 \
