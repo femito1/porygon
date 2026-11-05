@@ -27,6 +27,7 @@ Writes <out>/<model>.json (pe.set_eval configs: root-relative, scale 1, weights 
 
 import argparse
 import json
+import zlib
 import math
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def load(dirs: list[str], max_games: int | None = None):
                 y.append(zz - after[t])
                 z.append(zz)
                 game.append(g)
-                pair.append(hash((d, rec["pair"])) & 0x7FFFFFFF)
+                pair.append(zlib.crc32(f"{d}:{rec['pair']}".encode()))  # stable: hash() is salted per process
                 swap.append(rec["swap"])
                 turn.append(t)
             g += 1

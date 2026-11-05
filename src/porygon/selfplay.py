@@ -46,7 +46,12 @@ import poke_engine as pe
 from porygon.inference import GEN, norm, stats as calc_stats  # light: no torch (workers restart often)
 
 MAX_DECISIONS = 500  # a battle longer than this is dropped (engine loops, endless stall)
-GAME_TIMEOUT = 900  # seconds; SIGALRM's default action kills a worker stuck inside the engine
+GAME_TIMEOUT = 900  # seconds at small budgets; SIGALRM's default action kills a worker stuck inside the engine
+
+
+def game_timeout(iterations: int) -> int:
+    """A stuck-engine guard that a long battle at a big budget on a slow CPU (~50k iterations/s) stays inside."""
+    return int(GAME_TIMEOUT + 0.02 * iterations)
 STOCK = {"weights": None, "scale": 0.0125, "root_weight": 1.0}
 
 
@@ -202,7 +207,7 @@ def worker(args: argparse.Namespace) -> None:
                     continue
                 log.write(key + "\n")
                 log.flush()
-                signal.alarm(GAME_TIMEOUT)
+                signal.alarm(game_timeout(args.iterations))
                 t0 = time.time()
                 try:
                     # swap 0: A plays teams[0] as side one; swap 1: A plays teams[1], still as side one

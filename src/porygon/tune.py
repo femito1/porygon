@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import poke_engine as pe
 
-from porygon.selfplay import GAME_TIMEOUT, EvalConfig, play
+from porygon.selfplay import EvalConfig, game_timeout, play
 
 GROUPS = {
     "stock": ["stock"],
@@ -70,7 +70,7 @@ def configure(base: EvalConfig, knobs: list[str], theta: np.ndarray, masks: dict
 
 def _pair(task):
     plus, minus, teams, iterations, seed = task
-    signal.alarm(2 * GAME_TIMEOUT)  # default action: the worker dies, the pool replaces it, the task is lost
+    signal.alarm(2 * game_timeout(iterations))  # default action: the worker dies, the pool replaces it, the task is lost
     rng = random.Random(seed)
     score = 0.0
     try:
@@ -143,7 +143,7 @@ def main() -> None:
                         rec = {"done": done, "lost": lost, "theta": dict(zip(args.knobs, map(float, theta)))}
                         log.write(json.dumps(rec) + "\n")
                         log.flush()
-                elif time.time() - t0 > 2 * GAME_TIMEOUT + 60:  # its worker died
+                elif time.time() - t0 > 2 * game_timeout(args.iterations) + 60:  # its worker died
                     del pending[k]
                     lost += 1
     final = configure(base, args.knobs, theta, masks)
