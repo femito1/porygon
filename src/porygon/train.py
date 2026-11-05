@@ -22,6 +22,34 @@ from porygon.model import MaskedPolicy, load_policy
 from porygon.pool import make_pool_vec_env, save_snapshot
 
 
+EMBEDDINGS = ("species", "items", "abilities", "moves")
+
+
+def boost_embedding_steps(policy, mult: float) -> None:
+    """Multiply every Adam update of the token embeddings by `mult` (and nothing else: no change to gradients,
+    clipping or other layers, no extra param group, so checkpoints load as before).
+
+    The embeddings start at N(0, 1), the linear layers at ~0.03, and Adam moves each weight by ~lr per step, so in
+    500M steps the embeddings moved ~0.4% and stayed random codes (scripts/rescale_embeddings.py has the
+    evidence); `mult` gives them a learning rate that is not 30x too small relative to their scale."""
+    if mult == 1.0:
+        return
+    fe = policy.features_extractor
+    emb = [getattr(fe, n).weight for n in EMBEDDINGS]
+    before: list[torch.Tensor] = []
+
+    def pre(opt, args, kwargs):
+        before[:] = [p.detach().clone() for p in emb]
+
+    def post(opt, args, kwargs):
+        with torch.no_grad():
+            for p, old in zip(emb, before):
+                p.add_((p - old) * (mult - 1.0))
+
+    policy.optimizer.register_step_pre_hook(pre)
+    policy.optimizer.register_step_post_hook(post)
+
+
 def thesis_lr(progress_remaining: float) -> float:
     """l(x) = 10^-4.23 / (8x + 1)^1.5, x = fraction of training done. Annealing was the
     single largest win-rate factor in the thesis (55% -> 80% vs SimpleHeuristicsPlayer)."""
@@ -148,6 +176,8 @@ def main():
     p.add_argument("--run-dir", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
     p.add_argument("--resume", type=Path, help="checkpoint .zip to continue from")
     p.add_argument("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
+    p.add_argument("--embedding-lr-mult", type=float, default=1.0,
+                   help="multiply the token embeddings' Adam updates (they barely train at 1: boost_embedding_steps)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 
@@ -202,6 +232,7 @@ def main():
             device=args.device,
             verbose=1,
         )
+    boost_embedding_steps(model.policy, args.embedding_lr_mult)
     if args.overlap_update:
         assert args.async_envs, "--overlap-update needs --async-envs"
         model.overlap_update = True

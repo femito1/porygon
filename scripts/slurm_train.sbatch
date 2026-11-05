@@ -11,6 +11,10 @@
 # Each job resumes from the newest checkpoint under runs/ (so a requeue after a node failure, or
 # the next job in a chain, continues where the last one stopped) and, while CHAIN > 0, submits
 # its own continuation when it finishes.
+# Experiment arms run side by side without touching each other or the main lineage:
+#   sbatch -c 16 scripts/slurm_train.sbatch --arm NAME START_ZIP TOTAL [porygon.train args]
+# runs in runs/arm-NAME-<date>-<job>/, resumes only from its own checkpoints (else START_ZIP), and uses its own
+# opponent pool runs/arms/NAME/pool, seeded with hard links to POOL's snapshots (instant, read-only sharing).
 #SBATCH --job-name=porygon
 #SBATCH --partition=a30
 #SBATCH --gres=gpu:1
@@ -22,6 +26,13 @@
 set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 [ -f slurm.env ] && source slurm.env
+ARM=""
+if [ "${1:-}" = "--arm" ]; then
+  ARM=$2; ARM_START=$3; TOTAL=$4; shift 4; CHAIN=0
+  ARM_POOL=runs/arms/$ARM/pool
+  if ! [ -d "$ARM_POOL" ]; then mkdir -p "$ARM_POOL" && cp -al "$POOL"/. "$ARM_POOL"/; fi
+  POOL=$ARM_POOL; RESUME=$ARM_START; ANCHOR=${ANCHOR:-$ARM_START}
+fi
 NODE=v22.22.0
 export PATH=$ROOT/.node/bin:$PATH
 
@@ -50,8 +61,14 @@ rm -f pokemon-showdown/config/config.js  # start_servers.sh writes the no-disk-w
 scripts/start_servers.sh "$N_SERVERS" "$BASE"
 trap 'pkill -u "$USER" -f "pokemon-showdown start --skip-build --no-security" || true' EXIT
 
-LATEST=$(ls -t runs/2*/checkpoints/*.zip runs/2*/final_model.zip "${RESUME:-/nonexistent}" 2>/dev/null | head -1 || true)
-RUN=runs/$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$RUN"
+if [ -n "$ARM" ]; then
+  LATEST=$(ls -t runs/arm-"$ARM"-*/checkpoints/*.zip runs/arm-"$ARM"-*/final_model.zip 2>/dev/null | head -1 || true)
+  LATEST=${LATEST:-$RESUME}
+  RUN=runs/arm-$ARM-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$RUN"
+else
+  LATEST=$(ls -t runs/2*/checkpoints/*.zip runs/2*/final_model.zip "${RESUME:-/nonexistent}" 2>/dev/null | head -1 || true)
+  RUN=runs/$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$RUN"
+fi
 echo "resuming from ${LATEST:-scratch}"
 SYNC_REMOTE=${SYNC_REMOTE:-git@github.com:femito1/porygon-runs.git}
 export SYNC_KEY=${SYNC_KEY:-$HOME/.ssh/porygon_runs_deploy}
@@ -80,13 +97,14 @@ cleanup() {  # also on scancel (SIGTERM): Slurm allows ~30 s before SIGKILL, eno
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
-scripts/sync_results.sh "$LOCAL/run" "$SYNC_REMOTE" >> "$RUN/sync.log" 2>&1 &
+# arms do not push: the results repo holds one force-pushed snapshot, which parallel arms would overwrite
+[ -n "$ARM" ] || scripts/sync_results.sh "$LOCAL/run" "$SYNC_REMOTE" >> "$RUN/sync.log" 2>&1 &
 
 .venv/bin/python -m porygon.train --ports "$BASE-$((BASE + N_SERVERS - 1))" --n-battles "$SELFPLAY" \
   --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
   ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "${TOTAL:-400000000}" --max-hours 70.5 --checkpoint-every 5000000 \
   "$@" 2>&1 | tee "$LOCAL/run/train.log" || true
-scripts/sync_results.sh "$LOCAL/run" "$SYNC_REMOTE" once >> "$RUN/sync.log" 2>&1
+[ -n "$ARM" ] || scripts/sync_results.sh "$LOCAL/run" "$SYNC_REMOTE" once >> "$RUN/sync.log" 2>&1
 kill $MIRROR 2>/dev/null || true; mirror || true
 
 # --- continue in a new job (walltime is 72 h) unless the chain is used up or training is done ---
