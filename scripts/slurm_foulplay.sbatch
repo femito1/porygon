@@ -3,7 +3,9 @@
 # instances (1 core each, 1 s per move) and scripts/vs_foulplay.py. Results: runs/foulplay-<job>/.
 # Foul Play is GPL-3.0 and NOT vendored: the first run clones it into FP_DIR (default: next to the
 # repo) with its own venv, and patches its login for the local --no-security server.
-#   sbatch scripts/slurm_foulplay.sbatch MODEL [N_PER_OPPONENT=50] [K_OPPONENTS=4] [vs_foulplay args]
+#   sbatch scripts/slurm_foulplay.sbatch MODEL [N_PER_OPPONENT=50] [K_OPPONENTS=4] [--fp-parallelism P] [vs_foulplay args]
+# --fp-parallelism P: Foul Play searches 2P states per move, P at a time (default 1: 2 states x 1 s on one core,
+# 2 core-seconds per move; our default search is 4 x 1 s = 4 core-seconds). Each instance gets P cores.
 #SBATCH --job-name=porygon-foulplay
 #SBATCH --partition=a16
 #SBATCH --gres=gpu:1
@@ -14,6 +16,8 @@
 set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 MODEL=$1; N=${2:-50}; K=${3:-4}; shift $(( $# < 3 ? $# : 3 ))
+FP_PAR=1
+if [ "${1:-}" = "--fp-parallelism" ]; then FP_PAR=$2; shift 2; fi
 export PATH=$ROOT/.node/bin:$ROOT/.cargo/bin:$PATH CARGO_HOME=$ROOT/.cargo RUSTUP_HOME=$ROOT/.rustup
 FP=${FP_DIR:-$(dirname "$ROOT")/foul-play}
 
@@ -66,7 +70,7 @@ for ((i = 0; i < K; i++)); do
   # restarted if it exits (e.g. "timed out during handshake" while the server is still slow to start)
   (cd "$FP" && while true; do .venv/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
      --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format gen4randombattle \
-     --search-time-ms 1000 --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) \
+     --search-time-ms 1000 --search-parallelism "$FP_PAR" --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) \
      < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
   LOOPS+=($!)
 done
@@ -76,8 +80,9 @@ for ((i = 0; i < K; i++)); do  # importing on a slow shared disk can take minute
 done
 echo "$K Foul Play instances up on port $PORT"
 
-# our search: ~4 engine workers per simultaneous battle; leave a core per Foul Play instance + overhead
-WORKERS=$(( $(nproc) - K - 3 ))
+# our search: ~4 engine workers per simultaneous battle; leave FP_PAR cores per Foul Play instance + overhead
+WORKERS=$(( $(nproc) - K * FP_PAR - 3 ))
+echo "nproc $(nproc), $K Foul Play instances x $FP_PAR cores, $WORKERS engine workers for our search"
 .venv/bin/python scripts/vs_foulplay.py "$MODEL" --player search --port "$PORT" --opponents "${NAMES[@]}" \
   --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" "$@" 2>&1 | tee "$OUT/vs.log" || true
 .venv/bin/python scripts/analyze_benchmark.py "$OUT" 2>&1 | tee "$OUT/analysis.txt" || true
