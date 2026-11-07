@@ -1,0 +1,184 @@
+% Draft. Compile with the IEEEtran class (IEEE Conference on Games); pdflatex paper.tex
+% \todo{}: result not in yet.  \verify{}: number quoted from project notes, re-derive from the logs before submission.
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,booktabs,xcolor,siunitx}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\verify}[1]{\textcolor{orange}{#1\textsuperscript{?}}}
+
+\begin{document}
+\title{Fitting the Leaf Evaluation of a Determinized-MCTS Agent\\for Pok\'emon Random Battles}
+\author{\IEEEauthorblockN{Fernando Rimoli}}
+\maketitle
+
+\begin{abstract}
+Determinized Monte Carlo tree search on a fast simulator is the strongest known approach to Pok\'emon Showdown
+random battles; Foul Play, built on the poke-engine simulator, won the NeurIPS 2025 Pok\'emon battling challenge.
+Its search scores leaves with a hand-written material evaluation. We fit that evaluation, 64 features in a
+logistic model, to the outcomes of 40{,}000 engine self-play games, fitting within team pairs so that only the
+variation a search compares identifies the weights. With nothing else changed, our search goes from
+54.5\%~$\pm$~1.5\% to 59.2\%~$\pm$~2.2\% against Foul Play in Generation~4 random battles (95\% intervals,
+1{,}600--3{,}200 games per arm), and still wins 57.8--58.4\% with compute matched in either direction. Rescaling
+the stock evaluation alone gives no gain (54.5\%~$\pm$~2.3\%). \todo{Generation 9 replication.} With the same
+statistical power we also report what did \emph{not} help: network priors, PUCT, regret matching, Bayesian root
+solving, a value-network lookahead, more determinizations and longer self-play training.
+\end{abstract}
+
+\section{Introduction}
+Pok\'emon battles are two-player, simultaneous-move, stochastic games with imperfect information: in random
+battles each side's six Pok\'emon, their moves, items and abilities are drawn by a generator and hidden until
+revealed. The strongest agents combine \emph{determinization} (sample the hidden information, search each sample as
+a perfect-information game) with Monte Carlo tree search on a fast simulator~\cite{foulplay,pokeengine}.
+Learned agents trained by reinforcement learning~\cite{wang2024} or offline from human replays~\cite{metamon}
+are competitive in some formats but have not displaced search in random battles.
+
+In such a search the leaf evaluation does most of the work: poke-engine does no rollouts, and every MCTS iteration
+is scored by a hand-written function of material (alive Pok\'emon, HP, status, boosts, hazards, items) passed
+through a sigmoid. We ask how much is gained by \emph{fitting} that function, as chess engines have long done
+(``Texel tuning''), in a setting with simultaneous moves, chance and determinization.
+
+\textbf{Contributions.}
+(1) A fitted leaf evaluation that raises a determinized-MCTS agent from 54.5\% to 59.2\% against Foul Play at the
+same compute, and an ablation showing the gain is in the weights, not the rescaling.
+(2) A compute-matched comparison in both directions.
+(3) A decomposition of where strength lies: the value of perfect information, the accuracy of set inference, and a
+set of standard search and learning techniques that do not help, each measured with enough games to detect a
+3--5 point effect.
+(4) Benchmark methodology: why the 100--500-game evaluations common in this literature cannot resolve these
+effects, and how little duplicate pairing helps.
+(5) Open-source code, including fixes to the simulator's Generation~4 status durations.
+
+\section{Background and related work}
+\textbf{poke-engine and Foul Play.} poke-engine~\cite{pokeengine} implements battle mechanics, a decoupled-UCB1
+simultaneous-move MCTS and a stock evaluation; MCTS scores a leaf $s$ as
+$\sigma(0.0125\,(e(s)-e(s_{\text{root}})))$ with $e$ the material score. Foul Play~\cite{foulplay} samples opponent
+sets from a set library, searches 2 determinizations for 1\,s each (4 for 0.5\,s early), sums visit counts and
+plays among the moves within 75\% of the best. We use it only as an opponent.
+\textbf{Evaluation tuning.} Logistic regression of game outcomes on evaluation features (Texel tuning), TD-Leaf and
+TreeStrap~\cite{treestrap} fit evaluations in perfect-information games; we fit to outcomes of engine self-play.
+\textbf{Learning agents.} Wang~\cite{wang2024} trains PPO by self-play for Generation~4 random battles (1693 Elo on
+the public ladder) and adds MCTS at test time; Metamon~\cite{metamon} trains offline RL agents on millions of human
+replays for OU formats.
+\textbf{Imperfect information.} Determinization (perfect-information Monte Carlo) suffers strategy
+fusion~\cite{frank1998}; information-set MCTS~\cite{ismcts} addresses it at a cost in sample efficiency.
+
+\section{System}
+\textbf{Search.} At each decision we draw $N{=}4$ determinizations, run poke-engine's MCTS on each for 1\,s in
+parallel, average the root visit shares and play the argmax, optionally after adding $w\cdot\pi(a)$ for a policy
+network $\pi$ (Section~\ref{sec:where}).
+\textbf{Set inference.} Opponent sets are drawn from a library sampled from Showdown's own generator (2M teams),
+in proportion to generator frequency, among the sets consistent with the battle so far: revealed moves, ability and
+item; the lead slot; item evidence (no choice item after two different moves, no Leftovers after a turn damaged
+without healing, no Life Orb after a hit without recoil); the speed order of each turn; and the damage of each hit
+against the simulator's damage range for that set. Offline on true teams it identifies the whole set
+\verify{59\%} of the time (item \verify{86--89\%}, moves \verify{79\%}, ability \verify{97\%}).
+\textbf{Simulator corrections.} poke-engine~0.0.48 compiles out all Generation~4 taunt and encore durations and
+never ends confusion; we branch on their random durations. This is a correctness fix and neutral for strength
+(\verify{49.1\%~$\pm$~4.1\%} against the uncorrected engine).
+
+\section{Fitting the leaf evaluation}\label{sec:fit}
+\textbf{Features.} $f(s)\in\mathbb{R}^{64}$, each side one minus side two: $f_0$ is the stock score$/100$, the
+others are corrections (alive counts, HP in quarter bins, active HP, each status and its HP interaction, items by
+kind, Focus Sash intact, hazard damage per Pok\'emon, substitute, leech seed, confusion, taunt, yawn, locked moves,
+recharge, each boost and its interaction with the Pok\'emon's attacking category, speed advantage, screens,
+tailwind, wish, future sight, toxic counter).
+\textbf{Data.} 39{,}823 games of engine self-play (Generation~4, 1{,}680{,}721 positions), both players searching
+the full state with the stock evaluation for 20{,}000 iterations per move, a decision drawn from the visit shares
+10\% of the time, every team pair played twice with sides swapped.
+\textbf{Model.} $P(\text{win}\mid s)=\sigma(w^\top f(s))$, squared-probability loss, L2 on the corrections towards
+the stock score (strength by cross-validation), splits by team pair. Because every leaf in one search shares the
+teams, we also fit with a fixed effect per team pair, so that only within-pair variation identifies $w$.
+The search uses $\sigma(k\,w^\top(f(s)-f(s_{\text{root}})))$.
+
+\begin{table}[t]\centering\caption{Held-out log loss of the game outcome (lower is better).}\label{tab:fit}
+\begin{tabular}{lcc}\toprule
+Model & Gen.~4 & Gen.~9 \\\midrule
+stock, engine scale & 0.526 & 0.536\\
+stock, fitted scale & 0.522 & 0.527\\
+all features & 0.511 & 0.514\\
+all features, within team pair & 0.517 & 0.518\\\bottomrule
+\end{tabular}\end{table}
+
+\textbf{What the fit changes.} \todo{figure: fitted corrections by feature family, Gen.~4 vs Gen.~9.} The largest
+Generation~4 corrections say the stock score overvalues stat boosts (attack, special attack, speed), undervalues
+the cost of entry hazards and of being locked into a move, and undervalues a pending Wish; most corrections have
+the same sign in Generation~9. \todo{interpret with feature scales.}
+\textbf{Leaf scale.} The stock scale is too soft: with the fitted (within-pair) weights, doubling the scale
+($k{=}2$) was chosen; at 300k iterations $k\in\{2,4,8\}$ score \verify{58/56/57\%} against the stock evaluation in
+engine self-play, so the choice is not sensitive.
+
+\section{Results}
+\textbf{Protocol.} Local Showdown server, Generation~4 random battles, Foul Play at its default settings (one core
+per instance), duplicate pairing (each pair of games uses the same seed with the teams swapped). We report 95\%
+intervals from the variance of pair means; they are 5--10\% tighter than the binomial ones
+(Section~\ref{sec:method}).
+
+\begin{table}[t]\centering\caption{Win rate against Foul Play (Generation~4). Core-seconds per decision in
+brackets.}\label{tab:fp}
+\begin{tabular}{llrc}\toprule
+Ours & Foul Play & Games & Win rate\\\midrule
+stock eval, $4{\times}1$\,s [4] & default [2] & 3198 & 54.5\%~$\pm$~1.5\\
+stock weights, scale $\times2$ [4] & default [2] & 1594 & 54.5\%~$\pm$~2.3\\
+fitted eval [4] & default [2] & 1599 & \textbf{59.2\%~$\pm$~2.2}\\
+fitted eval, $2{\times}1$\,s [2] & default [2] & 1597 & 57.8\%~$\pm$~2.2\\
+fitted eval [4] & $4{\times}1$\,s [4] & 1605 & 58.4\%~$\pm$~2.2\\\bottomrule
+\end{tabular}\end{table}
+
+Table~\ref{tab:fp}: the fitted evaluation adds $+4.7\pm2.7$ points; rescaling the stock evaluation alone adds
+nothing, so the gain is in the fitted weights. Halving our compute to Foul Play's costs about a point, and doubling
+Foul Play's does not close the gap. In a direct comparison without Foul Play, the fitted search beats the stock
+search \verify{54.9\%~$\pm$~1.6\%} on Showdown, so the gain is not specific to the opponent. Fitting to
+luck-adjusted outcomes (a control-variate correction of chance) instead of raw outcomes did not help
+(\verify{52.1\%~$\pm$~1.1\%} for raw in self-play), so the method is plain outcome regression.
+All rows in Table~\ref{tab:fp} add a PPO policy prior with weight 0.25 to the visit shares (Section~\ref{sec:where}):
+the 500M-step network in the first three rows, the 600M-step one in the compute-matched rows (the two do not differ
+measurably). The Generation~9 search uses no network (prior weight 0): our network has no tera actions.
+
+\textbf{Generation 9.} \todo{Foul Play benchmark, 3 arms $\times$ 1600 games, running.} The same recipe on 39{,}970
+Generation~9 self-play games gives a larger held-out improvement (Table~\ref{tab:fit}); in engine self-play the
+fitted evaluation at $k{=}2$ scores 60.2\%~$\pm$~1.4\% against the stock one and the rescaled stock evaluation
+58.4\%~$\pm$~1.4\% (4000 games each).
+
+\section{Where the strength is}\label{sec:where}
+\textbf{Information.} Given the true sets of the opponent's revealed Pok\'emon, the same search scores
+\verify{61.3\%} against Foul Play, given the whole true team \verify{65.4\%} (stock evaluation; baseline 54.5\%).
+Most of the remaining gap is generator randomness that the battle cannot reveal. In Generation~9, where tera types
+multiply the sets, inference identifies only \verify{43.7\%} of whole sets.
+
+\textbf{Techniques that did not help} (stock evaluation, 400 games each unless noted, 95\% $\pm$4.9 points per
+run; \verify{all}): 8 determinizations instead of 4 53.6\%; root PUCT on the network prior, $c{=}2$ 55.0\% (800
+games), $c{=}8$ 53.2\%; network prior weight 0.5 54.2\%, 1.0 49.6\%; one-turn value-network lookahead 49.7\%;
+regret matching in the tree 53.4\%; Bayesian root game, playing its most likely action 52.9\%, sampling from it
+40.8\% (harmful: Foul Play does not exploit predictability, so mixing only plays worse moves); more PPO training
+(500M and 600M steps against 400M) no gain; 40M further steps with boosted embedding learning ($\times30$,
+$\times300$) 50.6\% and 48.5\% against the 600M network, unboosted 50.0\% (4000 raw-network games each,
+$\pm$1.55).
+
+\textbf{A methodological trap.} Labelling positions with a stronger search of the same engine (given the true
+teams) cannot judge a learned component: such an oracle sided with the search in 82\% of the decisions where the
+network and the search disagreed, yet in games a 0.25 network prior beat none by \verify{53.8\% to 46.2\%}.
+
+\section{Benchmark methodology}\label{sec:method}
+Single 400-game runs of one configuration ranged from 50.7\% to 57.8\%; a 3-point difference needs about 2000
+games per arm. Duplicate pairing removes the variance due to the team draw, but in random battles most variance is
+in play: it was worth only 1.1--1.4 times the games. Compute should be stated per decision in core-seconds;
+Foul Play's default is 2 (two sequential 1\,s searches), ours 4 (four parallel ones).
+
+\section{Limitations}
+One strong opponent; no public rating (the official ladder flags bot accounts, the PokeAgent ladder has no random
+battles). The self-play data were generated with the stock evaluation and fitted once; iterating, or targets from
+deeper search (TreeStrap), may add more. Determinization's strategy fusion is untouched.
+
+\section{Conclusion}
+\todo{after the Generation 9 results.}
+
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{9}
+\bibitem{foulplay} P.~Mariglia, ``Foul Play: a Pok\'emon Showdown battle bot,'' \url{https://github.com/pmariglia/foul-play}.
+\bibitem{pokeengine} P.~Mariglia, ``poke-engine,'' \url{https://github.com/pmariglia/poke-engine}, v0.0.48.
+\bibitem{wang2024} J.~Wang, ``Winning at Pok\'emon random battles using reinforcement learning,'' MEng thesis, MIT, 2024.
+\bibitem{metamon} \todo{Metamon / PokeAgent paper, arXiv 2603.15563: authors, title.}
+\bibitem{treestrap} J.~Veness, D.~Silver, A.~Blair, W.~Uther, ``Bootstrapping from game tree search,'' NeurIPS 2009.
+\bibitem{frank1998} I.~Frank, D.~Basin, ``Search in games with incomplete information: a case study using Bridge card play,'' Artificial Intelligence, 1998.
+\bibitem{ismcts} P.~Cowling, E.~Powley, D.~Whitehouse, ``Information set Monte Carlo tree search,'' IEEE TCIAIG, 2012.
+\end{thebibliography}
+\end{document}

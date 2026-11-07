@@ -1,5 +1,11 @@
 # Paper outline (draft)
 
+**Status 2026-11-08:** draft in `paper.tex` (IEEEtran; \todo / \verify macros mark pending and unverified numbers).
+Intervals are 95% from duplicate pairs throughout (the earlier "59.2% ± 1.1%" was one standard error: it is
+± 2.2%; the stock ×2 ablation is 54.5% ± 2.3%, not 54.3% ± 1.2%). Compute-matched: done (57.8% / 58.4%).
+Gen9: engine port, fit and self-play h2h done (fitted 60.2%, stock ×2 58.4% vs stock); Foul Play benchmark
+running (jobs 515841–515852).
+
 Status markers: **[have]** result exists, with job IDs / commits · **[running]** · **[need]** not done yet ·
 **[verify]** number quoted from notes, re-derive from the logs before it goes in the paper.
 
