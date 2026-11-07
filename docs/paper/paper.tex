@@ -69,11 +69,12 @@ network $\pi$ (Section~\ref{sec:where}).
 in proportion to generator frequency, among the sets consistent with the battle so far: revealed moves, ability and
 item; the lead slot; item evidence (no choice item after two different moves, no Leftovers after a turn damaged
 without healing, no Life Orb after a hit without recoil); the speed order of each turn; and the damage of each hit
-against the simulator's damage range for that set. Offline on true teams it identifies the whole set
-\verify{59\%} of the time (item \verify{86--89\%}, moves \verify{79\%}, ability \verify{97\%}).
+against the simulator's damage range for that set. Scored against the true teams during the benchmark games, a
+sampled set is exactly right 56--58\% of the time (hidden item 82--88\%, hidden moves 79--80\%, hidden ability
+96--97\%; four runs, about 200k scored samples each).
 \textbf{Simulator corrections.} poke-engine~0.0.48 compiles out all Generation~4 taunt and encore durations and
 never ends confusion; we branch on their random durations. This is a correctness fix and neutral for strength
-(\verify{49.1\%~$\pm$~4.1\%} against the uncorrected engine).
+(49.1\%~$\pm$~4.1\% against the uncorrected engine, 400 games).
 
 \section{Fitting the leaf evaluation}\label{sec:fit}
 \textbf{Features.} $f(s)\in\mathbb{R}^{64}$, each side one minus side two: $f_0$ is the stock score$/100$, the
@@ -103,8 +104,8 @@ Generation~4 corrections say the stock score overvalues stat boosts (attack, spe
 the cost of entry hazards and of being locked into a move, and undervalues a pending Wish; most corrections have
 the same sign in Generation~9. \todo{interpret with feature scales.}
 \textbf{Leaf scale.} The stock scale is too soft: with the fitted (within-pair) weights, doubling the scale
-($k{=}2$) was chosen; at 300k iterations $k\in\{2,4,8\}$ score \verify{58/56/57\%} against the stock evaluation in
-engine self-play, so the choice is not sensitive.
+($k{=}2$) was chosen; at 300k iterations $k=2,4,8$ score 58.1\%, 56.0\% and 56.8\% ($\pm$2.2, about 1850
+games each) against the stock evaluation in engine self-play, so the choice is not sensitive.
 
 \section{Results}
 \textbf{Protocol.} Local Showdown server, Generation~4 random battles, Foul Play at its default settings (one core
@@ -126,12 +127,13 @@ fitted eval [4] & $4{\times}1$\,s [4] & 1605 & 58.4\%~$\pm$~2.2\\\bottomrule
 Table~\ref{tab:fp}: the fitted evaluation adds $+4.7\pm2.7$ points; rescaling the stock evaluation alone adds
 nothing, so the gain is in the fitted weights. Halving our compute to Foul Play's costs about a point, and doubling
 Foul Play's does not close the gap. In a direct comparison without Foul Play, the fitted search beats the stock
-search \verify{54.9\%~$\pm$~1.6\%} on Showdown, so the gain is not specific to the opponent. Fitting to
-luck-adjusted outcomes (a control-variate correction of chance) instead of raw outcomes did not help
-(\verify{52.1\%~$\pm$~1.1\%} for raw in self-play), so the method is plain outcome regression.
+search 54.9\%~$\pm$~3.4\% on Showdown (800 games), so the gain is not specific to the opponent. Fitting to
+luck-adjusted outcomes (a control-variate correction of chance) instead of raw outcomes brought no gain: the
+raw-outcome fit scored 52.1\%~$\pm$~2.2\% against it at the same scale (1834 self-play games at 300k
+iterations), so the method is plain outcome regression.
 All rows in Table~\ref{tab:fp} add a PPO policy prior with weight 0.25 to the visit shares (Section~\ref{sec:where}):
-the 500M-step network in the first three rows, the 600M-step one in the compute-matched rows (the two do not differ
-measurably). The Generation~9 search uses no network (prior weight 0): our network has no tera actions.
+the 500M-step network in the second and third rows (\verify{and the first}, per our notes: runs do not log the
+network), the 600M-step one in the compute-matched rows; we have not compared the two networks directly. The Generation~9 search uses no network (prior weight 0): our network has no tera actions.
 
 \textbf{Generation 9.} \todo{Foul Play benchmark, 3 arms $\times$ 1600 games, running.} The same recipe on 39{,}970
 Generation~9 self-play games gives a larger held-out improvement (Table~\ref{tab:fit}); in engine self-play the
@@ -139,23 +141,25 @@ fitted evaluation at $k{=}2$ scores 60.2\%~$\pm$~1.4\% against the stock one and
 58.4\%~$\pm$~1.4\% (4000 games each).
 
 \section{Where the strength is}\label{sec:where}
-\textbf{Information.} Given the true sets of the opponent's revealed Pok\'emon, the same search scores
-\verify{61.3\%} against Foul Play, given the whole true team \verify{65.4\%} (stock evaluation; baseline 54.5\%).
-Most of the remaining gap is generator randomness that the battle cannot reveal. In Generation~9, where tera types
-multiply the sets, inference identifies only \verify{43.7\%} of whole sets.
+\textbf{Information.} Given the true sets of the opponent's revealed Pok\'emon, the search scored 61.3\% against
+Foul Play, given the whole true team 65.4\% (400 games each, $\pm$4.8; stock evaluation, an earlier version of our
+set inference whose own result was 52.5\%~$\pm$~3.5\% over 796 games). \todo{rerun both oracles with the current
+inference and the fitted evaluation.} Most of the remaining gap is generator randomness that the battle cannot
+reveal. Generation~9 inference is about as accurate: 53--56\% of sampled sets exactly right.
 
-\textbf{Techniques that did not help} (stock evaluation, 400 games each unless noted, 95\% $\pm$4.9 points per
-run; \verify{all}): 8 determinizations instead of 4 53.6\%; root PUCT on the network prior, $c{=}2$ 55.0\% (800
-games), $c{=}8$ 53.2\%; network prior weight 0.5 54.2\%, 1.0 49.6\%; one-turn value-network lookahead 49.7\%;
-regret matching in the tree 53.4\%; Bayesian root game, playing its most likely action 52.9\%, sampling from it
-40.8\% (harmful: Foul Play does not exploit predictability, so mixing only plays worse moves); more PPO training
-(500M and 600M steps against 400M) no gain; 40M further steps with boosted embedding learning ($\times30$,
-$\times300$) 50.6\% and 48.5\% against the 600M network, unboosted 50.0\% (4000 raw-network games each,
-$\pm$1.55).
+\textbf{Techniques that did not help} against Foul Play (stock evaluation, 400 games each unless noted, $\pm$4.9
+per run; baseline 54.5\%~$\pm$~1.5): 8 determinizations instead of 4, 53.6\%; PUCT at the root on the network
+prior (instead of adding it), $c{=}2$ 55.0\% (800 games), $c{=}8$ 53.2\%; regret matching in the tree 53.4\%;
+Bayesian root game, playing its most likely action 52.9\%, sampling from it 40.8\% (with regret matching 41.8\%;
+harmful: Foul Play does not exploit predictability, so mixing only plays worse moves). With the earlier inference
+(baseline 52.5\%): network prior weight 0.5 54.2\%, 1.0 49.6\%; one-turn value-network lookahead 49.7\%.
+Network training: 40M further PPO steps from the 600M-step network gave raw networks scoring 50.0\% against it,
+and 50.6\% and 48.5\% with embedding learning boosted $\times30$ and $\times300$ (4000 games each, $\pm$1.55).
 
 \textbf{A methodological trap.} Labelling positions with a stronger search of the same engine (given the true
 teams) cannot judge a learned component: such an oracle sided with the search in 82\% of the decisions where the
-network and the search disagreed, yet in games a 0.25 network prior beat none by \verify{53.8\% to 46.2\%}.
+network and the search disagreed, yet in games the search with a 0.25 network prior beat the same search without
+it 53.8\%~$\pm$~3.5\% (800 games, fitted evaluation).
 
 \section{Benchmark methodology}\label{sec:method}
 Single 400-game runs of one configuration ranged from 50.7\% to 57.8\%; a 3-point difference needs about 2000
