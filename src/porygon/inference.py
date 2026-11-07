@@ -19,6 +19,7 @@ Unrevealed mons get a set drawn from the same library unconditioned.
 
 import gzip
 import json
+import os
 import random
 import re
 from dataclasses import dataclass, field
@@ -28,8 +29,12 @@ from pathlib import Path
 from poke_env.battle import AbstractBattle, Pokemon
 from poke_env.data import GenData
 
-GEN = GenData.from_gen(4)
-LIBRARY_PATH = Path(__file__).parent / "data/gen4randombattle_library.json.gz"
+# The generation is process-wide, like poke-engine's (a compile-time feature): PORYGON_GEN=9 with a gen9 engine
+# build (scripts/build_engine.sh GEN=9) in front of the gen4 one on the path. Workers inherit it.
+GEN_NUM = int(os.environ.get("PORYGON_GEN", "4"))
+FORMAT = f"gen{GEN_NUM}randombattle"
+GEN = GenData.from_gen(GEN_NUM)
+LIBRARY_PATH = Path(__file__).parent / f"data/{FORMAT}_library.json.gz"
 STATS = ("hp", "atk", "def", "spa", "spd", "spe")
 LEFTOVERS = {"leftovers", "blacksludge"}
 LEAD_SMOOTHING = 0.01  # a set never seen as a lead in the library is not impossible as one
@@ -54,6 +59,7 @@ class Set:
     ivs: dict[str, int]
     n: int  # times the generator made it
     n_lead: int  # ... as the team's lead
+    tera: str = ""  # tera type id (gen9)
 
 
 def _spread(s: str, default: int) -> dict[str, int]:
@@ -64,9 +70,12 @@ def _spread(s: str, default: int) -> dict[str, int]:
 def library() -> dict[str, tuple[int, list[Set]]]:
     """species -> (level, its sets, most frequent first)."""
     raw = json.loads(gzip.open(LIBRARY_PATH).read())["species"]
-    return {sp: (v["level"], [Set(tuple(moves.split(",")), ability, item, role, _spread(evs, 85), _spread(ivs, 31),
-                                  n, n_lead) for moves, ability, item, role, evs, ivs, n, n_lead in v["sets"]])
-            for sp, v in raw.items()}
+
+    def make(e: list) -> Set:  # [moves, ability, item, role, evs, ivs, (tera,) n, n_lead]; older files: no tera
+        moves, ability, item, role, evs, ivs, *tera, n, n_lead = e
+        return Set(tuple(moves.split(",")), ability, item, role, _spread(evs, 85), _spread(ivs, 31), n, n_lead,
+                   tera[0] if tera else "")
+    return {sp: (v["level"], [make(e) for e in v["sets"]]) for sp, v in raw.items()}
 
 
 def set_species(species: str) -> str:

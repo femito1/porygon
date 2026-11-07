@@ -1,9 +1,11 @@
-"""Engine-only self-play: whole gen4 random battles played inside poke-engine, for tuning its leaf evaluation.
+"""Engine-only self-play: whole random battles played inside poke-engine, for tuning its leaf evaluation.
+gen4 by default; PORYGON_GEN=9 with a gen9 engine build (teams from `gen_teams.js N gen9randombattle`, tera types
+included; the engine offers `<move>-tera` choices itself).
 
 Both players see the full state (perfect information) and search it with poke-engine's MCTS for a fixed number
 of iterations, each from its own side (the state is mirrored for side two, so both search as side one, like
 `porygon.search` does). Chance is sampled from the engine's own branch probabilities (generate_instructions).
-Teams come from Showdown's gen4 random-battle generator (scripts/gen_teams.js); every team pair is played twice
+Teams come from Showdown's random-battle generator (scripts/gen_teams.js); every team pair is played twice
 with the teams swapped between the players (duplicate pairing), so a team pair's strength cancels in comparisons.
 
 Why the engine's own world: during a search every leaf is a determinized, perfect-information engine state, so
@@ -90,6 +92,13 @@ def engine_move(move: str) -> str:
     return move + "70" if move.startswith("hiddenpower") and move != "hiddenpower" else move
 
 
+def max_pp(move: str) -> int:
+    """Full PP (random-battle sets have all PP Ups: base x 8/5). The engine only decrements PP below 10, so the
+    old constant 16 made PP infinite: recovery moves (8 PP) never ran out and stall loops never ended (4 in 20
+    gen9 games hit MAX_DECISIONS; gen4 data before 2026-11-06 was generated that way)."""
+    return min(GEN.moves.get(norm(move), {}).get("pp", 10) * 8 // 5, 64)
+
+
 def engine_mon(s: dict[str, Any]) -> pe.Pokemon:
     """A Showdown PokemonSet at full health (as `porygon.search.make_mon` builds mons)."""
     species, level = s["speciesId"], s["level"]
@@ -99,11 +108,12 @@ def engine_mon(s: dict[str, Any]) -> pe.Pokemon:
     dex = GEN.pokedex[species]
     types = tuple((t.lower() for t in dex["types"] + ["typeless"]))[:2]
     ability, item = norm(s["ability"]) or "none", norm(s["item"]) or "none"
-    return pe.Pokemon(
+    tera = {"tera_type": s["teraType"].lower()} if s.get("teraType") else {}  # gen9; the engine default: typeless
+    return pe.Pokemon(**tera,
         id=species, level=level, types=types, base_types=types, hp=st["hp"], maxhp=st["hp"], ability=ability,
         base_ability=ability, item=item, attack=st["atk"], defense=st["def"], special_attack=st["spa"],
         special_defense=st["spd"], speed=st["spe"], weight_kg=float(dex.get("weightkg", 50.0)),
-        moves=[pe.Move(id=engine_move(m), pp=16, disabled=False) for m in s["moves"][:4]],
+        moves=[pe.Move(id=engine_move(m), pp=max_pp(m), disabled=False) for m in s["moves"][:4]],
     )
 
 

@@ -1,9 +1,11 @@
-// Library of gen4 random-battle sets, sampled from Showdown's own team generator (data/random-battles/gen4/teams.ts),
+// Library of random-battle sets, sampled from Showdown's own team generator (data/random-battles/genN/teams.ts),
 // the prior `porygon.inference` samples opponent sets from.
-// Usage: node scripts/build_set_library.js [TEAMS=400000] [WORKERS=4]  (after `node build` in pokemon-showdown/)
+// Usage: node scripts/build_set_library.js [TEAMS=400000] [WORKERS=4] [FORMAT=gen4randombattle]
+//        (after `node build` in pokemon-showdown/)
 //
-// Output src/porygon/data/gen4randombattle_library.json.gz:
-//   {teams, species: {id: {level, sets: [[moves, ability, item, role, evs, ivs, n, n_lead], ...]}}}
+// Output src/porygon/data/FORMAT_library.json.gz:
+//   {teams, species: {id: {level, sets: [[moves, ability, item, role, evs, ivs, tera, n, n_lead], ...]}}}
+// tera: the set's tera type id (gen9), "" before gen9.
 // moves sorted and comma-joined, evs / ivs "hp,atk,def,spa,spd,spe" or "" for the defaults (85s / 31s),
 // n the times the generator made this set, n_lead how many of those were the team's lead (slot 0, which the
 // generator builds with isLead: Focus Sash).
@@ -15,13 +17,16 @@ const {Worker, isMainThread, parentPort, workerData} = require('worker_threads')
 const STATS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
 const spread = (o, d) => STATS.every(s => o[s] === d) ? '' : STATS.map(s => o[s]).join(',');
 
+// worker threads do not see the parent's extra argv: the format travels in workerData
+const FORMAT = isMainThread ? (process.argv[4] || 'gen4randombattle') : workerData.format;
+
 function count(n) {
   const {Teams, toID} = require('../pokemon-showdown/dist/sim');
   const out = {};
   for (let t = 0; t < n; t++) {
-    Teams.generate('gen4randombattle').forEach((set, i) => {
+    Teams.generate(FORMAT).forEach((set, i) => {
       const key = [[...set.moves].map(toID).sort().join(','), toID(set.ability), toID(set.item), set.role,
-        spread(set.evs, 85), spread(set.ivs, 31)].join('|');
+        spread(set.evs, 85), spread(set.ivs, 31), toID(set.teraType || '')].join('|');
       const sp = (out[set.speciesId] ??= {level: set.level, sets: {}});
       const c = (sp.sets[key] ??= [0, 0]);
       c[0]++;
@@ -32,11 +37,11 @@ function count(n) {
 }
 
 if (!isMainThread) {
-  parentPort.postMessage(count(workerData));
+  parentPort.postMessage(count(workerData.n));
 } else {
   const total = Number(process.argv[2] || 400000), workers = Number(process.argv[3] || 4);
   const jobs = [...Array(workers)].map((_, i) => new Promise((resolve, reject) => {
-    const w = new Worker(__filename, {workerData: Math.floor(total / workers) + (i < total % workers)});
+    const w = new Worker(__filename, {workerData: {n: Math.floor(total / workers) + (i < total % workers), format: FORMAT}});
     w.on('message', resolve);
     w.on('error', reject);
   }));
@@ -57,7 +62,7 @@ if (!isMainThread) {
       const sets = Object.entries(merged[id].sets).sort((a, b) => b[1][0] - a[1][0]);
       species[id] = {level: merged[id].level, sets: sets.map(([key, [n, lead]]) => [...key.split('|'), n, lead])};
     }
-    const file = path.join(__dirname, '..', 'src', 'porygon', 'data', 'gen4randombattle_library.json.gz');
+    const file = path.join(__dirname, '..', 'src', 'porygon', 'data', `${FORMAT}_library.json.gz`);
     fs.writeFileSync(file, zlib.gzipSync(JSON.stringify({teams: total, species})));
     const nsets = Object.values(species).reduce((a, s) => a + s.sets.length, 0);
     console.log(`${total} teams: ${Object.keys(species).length} species, ${nsets} distinct sets -> ${file}`);
