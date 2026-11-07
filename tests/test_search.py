@@ -60,6 +60,24 @@ def test_wish_future_sight_rest():
     assert st.side_one.pokemon[0].status == "SLEEP" and st.side_one.pokemon[0].rest_turns == 2
 
 
+def test_sleep_talk_turns_count_once():
+    """poke-env's counter adds 3 for a Sleep Talk turn; past the engine's maximum its wake chance is infinite."""
+    log = """|turn|1
+|move|p2a: Jirachi|Hypnosis|p1a: Blissey
+|-status|p1a: Blissey|slp
+|turn|2"""
+    for t in range(2, 6):  # four Sleep Talk turns: 'cant slp', Sleep Talk, the called move
+        log += f"""
+|cant|p1a: Blissey|slp
+|move|p1a: Blissey|Sleep Talk|p1a: Blissey
+|move|p1a: Blissey|Seismic Toss|p2a: Jirachi|[from]Sleep Talk
+|turn|{t + 1}"""
+        battle = battle_from(log)
+        assert History(battle).slept["p1: Blissey"] == t - 1
+        assert state_of(battle).side_one.pokemon[0].sleep_turns == min(t - 1, 4)  # gen4: MAX_SLEEP_TURNS 4
+    assert battle.active_pokemon.status_counter > 4  # what poke-env reports
+
+
 def test_opponent_choice_lock_and_toxic():
     log = """|turn|1
 |move|p2a: Jirachi|Iron Head|p1a: Blissey

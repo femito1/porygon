@@ -202,9 +202,14 @@ def sample_species(known: list[str], n: int, rng: random.Random) -> list[str]:
 
 class History:
     """What poke-env does not track, read from the battle log: per side ('p1' / 'p2') the turn Wish and Future
-    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, the hits (attacker, move) each
-    standing substitute took, how many moves each confused mon has tried while confused, and the evidence
-    about the opponent's sets."""
+    Sight / Doom Desire were last used (and by whom), mons asleep from Rest, how many turns each sleeping mon
+    has tried to act while asleep, the hits (attacker, move) each standing substitute took, how many moves each
+    confused mon has tried while confused, and the evidence about the opponent's sets.
+
+    Turns asleep are counted here, once per turn, not taken from poke-env: its status_counter also counts every
+    move used while asleep, so a Sleep Talk turn ('cant slp', Sleep Talk, the called move) adds 3. Past the
+    engine's MAX_SLEEP_TURNS its wake-up chance 1 / (1 + MAX - turns) is infinite or negative, and the MCTS
+    panics (rand's NonFinite) on that determinization; in the first gen9 benchmark runs this hit 1-2% of games."""
 
     def __init__(self, battle: AbstractBattle):
         self.wish: dict[str, int] = {}
@@ -212,6 +217,8 @@ class History:
         self.rest: set[str] = set()
         self.sub_hits: dict[str, list[tuple[str, str]]] = {}
         self.confused: dict[str, int] = {}
+        self.slept: dict[str, int] = {}  # sleeping mon -> turns it tried to act while asleep
+        slept_turns: set[tuple[str, int]] = set()
         self.evidence = inference.battle_evidence(battle)
         turn, last = 0, ("", "")
         for ev in battle._replay_data:
@@ -226,14 +233,22 @@ class History:
             elif kind == "move" and len(ev) > 3:
                 move = norm(ev[3])
                 last = (key, move)
+                if key in self.slept and (key, turn) not in slept_turns:  # acting while asleep (Sleep Talk)
+                    slept_turns.add((key, turn))
+                    self.slept[key] += 1
                 if move == "wish":
                     self.wish[key[:2]] = turn
             elif kind == "-start" and len(ev) > 3 and norm(ev[3]).endswith(("futuresight", "doomdesire")):
                 self.future[key[:2]] = (turn, key)
             elif kind == "-status" and len(ev) > 3 and ev[3] == "slp":
                 (self.rest.add if ev[-1].endswith("move: Rest") else self.rest.discard)(key)
+                self.slept[key] = 0
+            elif kind == "cant" and len(ev) > 3 and ev[3] == "slp" and (key, turn) not in slept_turns:
+                slept_turns.add((key, turn))
+                self.slept[key] = self.slept.get(key, 0) + 1
             elif kind in ("-curestatus", "faint"):
                 self.rest.discard(key)
+                self.slept.pop(key, None)
                 if kind == "faint":
                     self.sub_hits.pop(key, None)
                     self.confused.pop(key, None)
@@ -297,12 +312,18 @@ def make_mon(species: str, level: int, types: tuple[str, str], hp: int, maxhp: i
     )
 
 
-def status_of(mon: Pokemon, rest: bool) -> tuple[str, int, int]:
-    """(status, sleep turns so far, rest turns left: Rest sleeps exactly 2 turns, the engine counts down from 3)."""
+MAX_SLEEP_TURNS = 4 if GEN_NUM <= 4 else 3  # poke-engine's (gen5+: sleep lasts 1-3 turns)
+
+
+def status_of(mon: Pokemon, rest: bool, slept: int | None = None) -> tuple[str, int, int]:
+    """(status, sleep turns so far, rest turns left: Rest sleeps exactly 2 turns, the engine counts down from 3).
+    `slept`: the turns asleep counted by `History` (default: poke-env's counter, which overcounts Sleep Talk);
+    clamped to the engine's maximum, where it wakes for sure."""
     status = STATUS.get(mon.status, "none") if mon.status is not None else "none"
     if status != "sleep":
         return status, 0, 0
-    return status, mon.status_counter, max(1, 3 - mon.status_counter) if rest else 0
+    turns = min(max(mon.status_counter if slept is None else slept, 0), MAX_SLEEP_TURNS)
+    return status, turns, max(1, 3 - turns) if rest else 0
 
 
 def last_used(mon: Pokemon | None, moves: list[str]) -> int | None:
@@ -317,7 +338,8 @@ def request_tera(battle: Battle) -> dict[str, str]:
     return {p["ident"]: norm(p["teraType"]) for p in side.get("pokemon", []) if p.get("teraType") and "ident" in p}
 
 
-def own_mon(mon: Pokemon, disabled: set[str], rest: bool, tera: str = "") -> tuple[pe.Pokemon, list[str]]:
+def own_mon(mon: Pokemon, disabled: set[str], rest: bool, tera: str = "", slept: int | None = None
+            ) -> tuple[pe.Pokemon, list[str]]:
     """Our mon exactly as the request describes it (`tera`: its tera type from the request); also returns its
     engine move ids (action order)."""
     moves = list(mon.moves.items())[:4]  # keys, not Move.id: they differ for hidden power
@@ -327,7 +349,7 @@ def own_mon(mon: Pokemon, disabled: set[str], rest: bool, tera: str = "") -> tup
     stats = {k: mon.stats.get(k) or 100 for k in ("atk", "def", "spa", "spd", "spe")}
     mv = [(i, m.current_pp, k in disabled) for i, (k, m) in zip(ids, moves)]
     return make_mon(mon.species, mon.level, engine_types(mon), hp, mon.max_hp or 1, stats, mon.ability or "none",
-                    item, mv, *status_of(mon, rest), mon.weight, *tera_of(mon, tera)), ids
+                    item, mv, *status_of(mon, rest, slept), mon.weight, *tera_of(mon, tera)), ids
 
 
 def true_set(truth: dict[str, Any]) -> inference.Set:
@@ -358,7 +380,8 @@ def opp_mon(mon: Pokemon | None, species: str, rng: random.Random, hist: History
     lock = last_used(mon, moves) if mon and mon.active and item.startswith("choice") else None
     mv = [(norm(engine_move(m)), pp.get("hiddenpower" if m.startswith("hiddenpower") else m, 16),
            lock is not None and i != lock) for i, m in enumerate(moves)]
-    status, sleep, rest = status_of(mon, key in hist.rest if hist else False) if mon else ("none", 0, 0)
+    status, sleep, rest = (status_of(mon, key in hist.rest if hist else False, hist.slept.get(key) if hist else None)
+                           if mon else ("none", 0, 0))
     frac = 0.0 if mon and mon.fainted else mon.current_hp_fraction if mon else 1.0
     hp = 0 if frac <= 0 else max(1, round(frac * stats["hp"]))
     types = engine_types(mon) if mon else dex_types(species)
@@ -496,7 +519,8 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     ours, move_ids = [], []
     our_tera = request_tera(battle) if GEN_NUM >= 9 else {}
     for i, (key, mon) in enumerate(zip(keys, team)):
-        m, ids = own_mon(mon, disabled if i == active_idx else set(), key in hist.rest, our_tera.get(key, ""))
+        m, ids = own_mon(mon, disabled if i == active_idx else set(), key in hist.rest, our_tera.get(key, ""),
+                         hist.slept.get(key))
         ours.append(m)
         if i == active_idx:
             move_ids = ids
