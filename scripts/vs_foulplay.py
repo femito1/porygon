@@ -36,9 +36,10 @@ from poke_env import AccountConfiguration
 from poke_env.concurrency import handle_threaded_coroutines
 
 from porygon.env import PolicyPlayer, local_server
-from porygon.model import load_policy
+from porygon import inference
+from porygon.model import load_policy  # noqa: F401 (kept for importers)
 from porygon.decisions import LoggedSearchPlayer
-from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args
+from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args, load_model
 
 log = logging.getLogger("vs_foulplay")
 
@@ -134,11 +135,11 @@ async def main():
     p.add_argument("--battle-timeout", type=float, default=1800)
     p.add_argument("--results", default="foulplay_results.jsonl", help="per-battle JSONL (appended)")
     p.add_argument("--log-dir", help="search: record decisions and replays here (porygon.decisions)")
-    p.add_argument("--format", default="gen4randombattle")
+    p.add_argument("--format", default=inference.FORMAT)
     a = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
 
-    policy = load_policy(a.model, a.device)
+    policy = load_model(a.model, a.device)  # "none": pure engine search (gen9)
     tag = random.randint(0, 10**5)
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)

@@ -34,7 +34,15 @@ of every hit it took (`substitute_left`).
 
 Approximations / ignored (documented, not bugs): opponent PP = what poke-env tracks; hidden power is always
 70 BP and its type for the opponent comes from the sampled set; partial-trap / disable timers are not
-transferred; weather from abilities is permanent (gen4), other weather lasts 5 turns from when we first saw it.
+transferred; weather from abilities is permanent in gen4 (5 turns from gen6), other weather and terrain last
+5 turns from when we first saw them (no Damp Rock / Terrain Extender).
+
+gen9 (PORYGON_GEN=9, a gen9 engine build): terastallization (`<move>-tera` engine choices are poke-env actions
+22-25; a terastallized mon keeps its original types and the engine applies the tera type; an opponent's tera type
+is the revealed one, else its sampled set's), snow / primal weather, terrains, Aurora Veil and Sticky Web. The
+gen4 network does not apply (its action space has no tera): run with policy=None (MODEL "none"), i.e. pure
+engine search, prior weight 0. sample_species uses gen9's type list without gen4's banned pairs; gen9's extra
+Fire / Freeze-Dry weakness caps are not modelled.
 
     python -m porygon.search runs/<run>/best_model.zip --opponent heuristic --n-battles 100
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
@@ -75,20 +83,30 @@ from porygon.evaluate import BASELINES
 from porygon.model import load_policy
 
 log = logging.getLogger("porygon.search")
-GEN = GenData.from_gen(4)
+GEN = inference.GEN  # PORYGON_GEN (default 4)
+GEN_NUM = inference.GEN_NUM
+N_ACTIONS = SinglesEnv.get_action_space_size(GEN_NUM)  # 10 in gen4; 26 in gen9 (22-25: move + terastallize)
+TERA_OFFSET = 22
 
 STATUS = {Status.BRN: "burn", Status.SLP: "sleep", Status.FRZ: "freeze", Status.PAR: "paralyze",
           Status.PSN: "poison", Status.TOX: "toxic"}
-WEATHER = {Weather.SUNNYDAY: "sun", Weather.RAINDANCE: "rain", Weather.SANDSTORM: "sand", Weather.HAIL: "hail"}
-WEATHER_ABILITY = {Weather.SUNNYDAY: "drought", Weather.RAINDANCE: "drizzle",
-                   Weather.SANDSTORM: "sandstream", Weather.HAIL: "snowwarning"}
+WEATHER = {Weather.SUNNYDAY: "sun", Weather.RAINDANCE: "rain", Weather.SANDSTORM: "sand", Weather.HAIL: "hail",
+           Weather.SNOW: "snow", Weather.DESOLATELAND: "harshsun", Weather.PRIMORDIALSEA: "heavyrain"}
+PRIMAL_WEATHER = {Weather.DESOLATELAND, Weather.PRIMORDIALSEA}  # last while their user is out: never decremented
+WEATHER_ABILITY = {Weather.SUNNYDAY: "drought", Weather.RAINDANCE: "drizzle", Weather.SANDSTORM: "sandstream",
+                   Weather.HAIL: "snowwarning", Weather.SNOW: "snowwarning"}
+TERRAIN = {Field.ELECTRIC_TERRAIN: "electricterrain", Field.GRASSY_TERRAIN: "grassyterrain",
+           Field.MISTY_TERRAIN: "mistyterrain", Field.PSYCHIC_TERRAIN: "psychicterrain"}
 SCREEN_TURNS = {SideCondition.REFLECT: ("reflect", 5), SideCondition.LIGHT_SCREEN: ("light_screen", 5),
+                SideCondition.AURORA_VEIL: ("aurora_veil", 5),
                 SideCondition.SAFEGUARD: ("safeguard", 5), SideCondition.MIST: ("mist", 5),
                 SideCondition.LUCKY_CHANT: ("lucky_chant", 5), SideCondition.TAILWIND: ("tailwind", 3)}
 SKIP_EFFECTS = {Effect.FLINCH, Effect.PROTECT, Effect.ENDURE}  # per-turn effects poke-env may still hold
 TIMED_EFFECTS = {"taunt": Effect.TAUNT, "encore": Effect.ENCORE, "confusion": Effect.CONFUSION}
 # two-turn moves; the engine marks the charging turn with a volatile of the same name
-CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce"}
+CHARGE_MOVES = {"solarbeam", "fly", "dig", "dive", "bounce", "skyattack", "razorwind", "skullbash", "shadowforce",
+                "solarblade", "phantomforce", "meteorbeam", "electroshot", "geomancy", "skydrop", "freezeshock",
+                "iceburn"}
 ROOT_SHRINK = 20  # visits: a thin cell of a root matrix is pulled to its row's mean (`root_matrix`)
 ROOT_ITERS = 1000  # regret matching+ iterations for `bayes_root`
 ROOT_SAMPLE_MIN = 0.1  # root_game="sample" ignores actions below this share of the most likely one
@@ -111,10 +129,10 @@ def levels() -> dict[str, int]:
 
 
 TYPES = ["BUG", "DARK", "DRAGON", "ELECTRIC", "FIGHTING", "FIRE", "FLYING", "GHOST", "GRASS", "GROUND", "ICE",
-         "NORMAL", "POISON", "PSYCHIC", "ROCK", "STEEL", "WATER"]
+         "NORMAL", "POISON", "PSYCHIC", "ROCK", "STEEL", "WATER"] + (["FAIRY"] if GEN_NUM >= 6 else [])
 INCOMPATIBLE = [({"blissey"}, {"chansey"}), ({"illumise"}, {"volbeat"}),
                 ({"parasect", "jynx", "toxicroak"}, {"ninetales", "groudon"}),
-                ({"shedinja"}, {"tyranitar", "hippowdon", "abomasnow"})]
+                ({"shedinja"}, {"tyranitar", "hippowdon", "abomasnow"})] if GEN_NUM == 4 else []
 
 
 @cache
@@ -136,7 +154,8 @@ def base_species_pool() -> dict[str, list[str]]:
 
 
 def sample_species(known: list[str], n: int, rng: random.Random) -> list[str]:
-    """`n` more team members drawn like gen4 randomTeam() (gen5/teams.ts): uniform base species, then forme;
+    """`n` more team members drawn like randomTeam() (gen5/teams.ts for gen4, gen9/teams.ts): uniform base species,
+    then forme;
     species clause; at most 2 per type, 3 weak / 1 doubly weak to any type, one level 100; a few banned pairs.
     The revealed mons count towards the limits (an approximation of the posterior)."""
     team, types, weak, dweak = [], {}, [0] * len(TYPES), [0] * len(TYPES)
@@ -242,9 +261,27 @@ def engine_move(move_id: str, hp_type: PokemonType | None = None) -> str:
 
 
 def engine_types(mon: Pokemon) -> tuple[str, str]:
+    """The mon's current types; a terastallized mon's original ones (poke-env reports its tera type, the engine
+    applies the tera type itself)."""
+    if mon.is_terastallized:
+        return dex_types(mon.species)
     ts = [t.name.lower() for t in mon.types if t not in (None, PokemonType.THREE_QUESTION_MARKS)]
     ts = (ts + ["typeless", "typeless"])[:2]
     return ts[0], ts[1]
+
+
+def dex_types(species: str) -> tuple[str, str]:
+    t = tuple(x.lower() for x in GEN.pokedex[species]["types"] + ["typeless"])[:2]
+    return t[0], t[1]
+
+
+def tera_of(mon: Pokemon | None, sampled: str = "") -> tuple[str, bool]:
+    """(tera type id or "" before gen9, terastallized): the revealed tera type, else the sampled set's."""
+    if GEN_NUM < 9:
+        return "", False
+    if mon is not None and mon.tera_type is not None and (mon.is_terastallized or not sampled):
+        return mon.tera_type.name.lower(), mon.is_terastallized
+    return (sampled or "typeless"), False
 
 
 calc_stats = inference.stats
@@ -252,8 +289,9 @@ calc_stats = inference.stats
 
 def make_mon(species: str, level: int, types: tuple[str, str], hp: int, maxhp: int, stats: dict[str, int],
              ability: str, item: str, moves: list[tuple[str, int, bool]], status: str, sleep_turns: int,
-             rest_turns: int, weight: float) -> pe.Pokemon:
-    return pe.Pokemon(
+             rest_turns: int, weight: float, tera_type: str = "", terastallized: bool = False) -> pe.Pokemon:
+    tera = {"tera_type": tera_type, "terastallized": terastallized} if tera_type else {}
+    return pe.Pokemon(**tera,
         id=species, level=level, types=types, base_types=types, hp=hp, maxhp=maxhp,
         ability=ability or "none", base_ability=ability or "none", item=item or "none",
         attack=stats["atk"], defense=stats["def"], special_attack=stats["spa"],
@@ -277,8 +315,15 @@ def last_used(mon: Pokemon | None, moves: list[str]) -> int | None:
     return next((i for i, m in enumerate(moves) if last and matches(last, m)), None)
 
 
-def own_mon(mon: Pokemon, disabled: set[str], rest: bool) -> tuple[pe.Pokemon, list[str]]:
-    """Our mon exactly as the request describes it; also returns its engine move ids (action order)."""
+def request_tera(battle: Battle) -> dict[str, str]:
+    """Our mons' tera types by ident ('p1: Garchomp'), from the request: poke-env only knows them once used."""
+    side = (battle.last_request or {}).get("side") or {}
+    return {p["ident"]: norm(p["teraType"]) for p in side.get("pokemon", []) if p.get("teraType") and "ident" in p}
+
+
+def own_mon(mon: Pokemon, disabled: set[str], rest: bool, tera: str = "") -> tuple[pe.Pokemon, list[str]]:
+    """Our mon exactly as the request describes it (`tera`: its tera type from the request); also returns its
+    engine move ids (action order)."""
     moves = list(mon.moves.items())[:4]  # keys, not Move.id: they differ for hidden power
     ids = [norm(engine_move(k, m.type)) for k, m in moves]
     hp = 0 if mon.fainted else mon.current_hp
@@ -286,13 +331,13 @@ def own_mon(mon: Pokemon, disabled: set[str], rest: bool) -> tuple[pe.Pokemon, l
     stats = {k: mon.stats.get(k) or 100 for k in ("atk", "def", "spa", "spd", "spe")}
     mv = [(i, m.current_pp, k in disabled) for i, (k, m) in zip(ids, moves)]
     return make_mon(mon.species, mon.level, engine_types(mon), hp, mon.max_hp or 1, stats, mon.ability or "none",
-                    item, mv, *status_of(mon, rest), mon.weight), ids
+                    item, mv, *status_of(mon, rest), mon.weight, *tera_of(mon, tera)), ids
 
 
 def true_set(truth: dict[str, Any]) -> inference.Set:
     """A true set (Showdown's PokemonSet, oracle runs) as a library set."""
     return inference.Set(tuple(norm(m) for m in truth["moves"]), norm(truth["ability"]), norm(truth["item"]),
-                         truth.get("role", ""), truth["evs"], truth["ivs"], 1, 0)
+                         truth.get("role", ""), truth["evs"], truth["ivs"], 1, 0, norm(truth.get("teraType") or ""))
 
 
 def opp_mon(mon: Pokemon | None, species: str, rng: random.Random, hist: History | None = None,
@@ -320,10 +365,10 @@ def opp_mon(mon: Pokemon | None, species: str, rng: random.Random, hist: History
     status, sleep, rest = status_of(mon, key in hist.rest if hist else False) if mon else ("none", 0, 0)
     frac = 0.0 if mon and mon.fainted else mon.current_hp_fraction if mon else 1.0
     hp = 0 if frac <= 0 else max(1, round(frac * stats["hp"]))
-    types = engine_types(mon) if mon else tuple((t.lower() for t in GEN.pokedex[species]["types"] + ["typeless"]))[:2]
+    types = engine_types(mon) if mon else dex_types(species)
     weight = mon.weight if mon else GEN.pokedex[species].get("weightkg", 50.0)
     return make_mon(species, level, types, hp, stats["hp"], stats, ability, item, mv, status, sleep, rest,
-                    weight), moves
+                    weight, *tera_of(mon, s.tera)), moves
 
 
 def side_conditions(conds: dict[SideCondition, int], turn: int, active: Pokemon | None) -> pe.SideConditions:
@@ -332,6 +377,7 @@ def side_conditions(conds: dict[SideCondition, int], turn: int, active: Pokemon 
     kw["spikes"] = conds.get(SideCondition.SPIKES, 0)
     kw["toxic_spikes"] = conds.get(SideCondition.TOXIC_SPIKES, 0)
     kw["stealth_rock"] = int(SideCondition.STEALTH_ROCK in conds)
+    kw["sticky_web"] = int(SideCondition.STICKY_WEB in conds)
     for cond, (name, length) in SCREEN_TURNS.items():
         if cond in conds:
             kw[name] = max(1, length - (turn - conds[cond]))
@@ -401,10 +447,13 @@ def substitute_left(state: pe.State, ours: bool, hits: list[tuple[str, str]], fa
 
 
 def weather_turns(battle: AbstractBattle, weather: Weather, first_seen: int) -> int:
-    """Turns left; -1 (never decremented by the engine) for gen4's permanent ability weather."""
+    """Turns left; -1 (never decremented by the engine) for gen4's permanent ability weather and primal weather."""
+    if weather in PRIMAL_WEATHER:
+        return -1
     mons = list(battle.team.values()) + list(battle.opponent_team.values())
     ability = WEATHER_ABILITY.get(weather)
-    if any(m.ability == ability or (m.ability is None and ability in m.possible_abilities) for m in mons):
+    if GEN_NUM <= 5 and any(m.ability == ability or (m.ability is None and ability in m.possible_abilities)
+                            for m in mons):
         return -1
     return max(1, 5 - (battle.turn - first_seen))
 
@@ -418,7 +467,8 @@ class Converted:
 
     def priors(self, probs: np.ndarray, mask: np.ndarray) -> dict[str, float]:
         """The network's probabilities (floored, `PUCT_EPS`) by engine choice, for the root PUCT."""
-        names = dict(enumerate(f"switch {s}" for s in self.switch_ids)) | {6 + i: m for i, m in enumerate(self.move_ids)}
+        names = (dict(enumerate(f"switch {s}" for s in self.switch_ids)) | {6 + i: m for i, m in enumerate(self.move_ids)}
+                 | {TERA_OFFSET + i: f"{m}-tera" for i, m in enumerate(self.move_ids)})
         legal = [a for a in np.flatnonzero(mask > 0) if a in names]
         return {names[a]: float((1 - PUCT_EPS) * probs[a] + PUCT_EPS / len(legal)) for a in legal}
 
@@ -426,6 +476,9 @@ class Converted:
         if choice.startswith("switch "):
             name = choice[len("switch "):]
             return self.switch_ids.index(name) if name in self.switch_ids else None
+        if choice.endswith("-tera"):
+            move = choice[:-len("-tera")]
+            return TERA_OFFSET + self.move_ids.index(move) if move in self.move_ids and N_ACTIONS > TERA_OFFSET else None
         return 6 + self.move_ids.index(choice) if choice in self.move_ids else None
 
 
@@ -445,8 +498,9 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
         avail = {id(m) for m in battle.available_moves}  # Move objects: ids and keys differ for hidden power
         disabled = {k for k, m in battle.active_pokemon.moves.items() if id(m) not in avail}
     ours, move_ids = [], []
+    our_tera = request_tera(battle) if GEN_NUM >= 9 else {}
     for i, (key, mon) in enumerate(zip(keys, team)):
-        m, ids = own_mon(mon, disabled if i == active_idx else set(), key in hist.rest)
+        m, ids = own_mon(mon, disabled if i == active_idx else set(), key in hist.rest, our_tera.get(key, ""))
         ours.append(m)
         if i == active_idx:
             move_ids = ids
@@ -479,6 +533,10 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
             weather, turns = WEATHER[w], weather_turns(battle, w, battle.turn if weather_seen is None else weather_seen)
     tr = Field.TRICK_ROOM in battle.fields
     tr_turns = max(1, 5 - (battle.turn - battle.fields[Field.TRICK_ROOM])) if tr else 0
+    terrain, terrain_turns = "none", 0
+    for f, start in battle.fields.items():
+        if f in TERRAIN:
+            terrain, terrain_turns = TERRAIN[f], max(1, 5 - (battle.turn - start))
 
     def build(sub_one: int | None = None, sub_two: int | None = None) -> pe.State:
         side_one = make_side(ours, active, active_idx, side_conditions(battle.side_conditions, battle.turn, active),
@@ -488,6 +546,7 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
                              side_conditions(battle.opponent_side_conditions, battle.turn, opp_active),
                              opp_last, battle, hist, opp_role, opp_keys, sub_two)
         return pe.State(side_one=side_one, side_two=side_two, weather=weather, weather_turns_remaining=turns,
+                        terrain=terrain, terrain_turns_remaining=terrain_turns,
                         trick_room=tr, trick_room_turns_remaining=tr_turns)
 
     state = build()
@@ -584,6 +643,9 @@ class SearchPlayer(Player):
                  engine_python: str | None = None, eval_config: str | None = DEFAULT_EVAL, oracle: str | None = None,
                  oracle_dir: str | None = None, seed: int | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
+        assert policy is not None or (prior_weight == 0 and c_puct == 0 and value_weight == 0 and not top_k), \
+            "without a network (policy=None): prior_weight 0, no c_puct / top_k / value lookahead"
+        assert policy is None or GEN_NUM == 4, "the network is gen4-only (no tera actions): use policy=None"
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.c_puct = c_puct
@@ -611,6 +673,8 @@ class SearchPlayer(Player):
 
     def network_probs(self, battle: Battle) -> tuple[np.ndarray, np.ndarray]:
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.float32)
+        if self.policy is None:  # pure engine search: uniform "probabilities" (the fallback = the first legal action)
+            return mask / max(mask.sum(), 1), mask
         obs = {"observation": torch.as_tensor(embed_battle(battle)).unsqueeze(0),
                "action_mask": torch.as_tensor(mask).unsqueeze(0)}
         obs = {k: v.to(self.policy.device) for k, v in obs.items()}
@@ -688,7 +752,7 @@ class SearchPlayer(Player):
             searches = [self.pool.search(c.state_str, self.ms, priors(c), self.c_puct, **kw) if self.c_puct > 0 or kw
                         else self.pool.search(c.state_str, self.ms) for c in convs]
             results = await asyncio.gather(*searches, return_exceptions=True)
-        shares, ok, errors = np.zeros(10), 0, []
+        shares, ok, errors = np.zeros(N_ACTIONS), 0, []
         for conv, options in zip(convs, results):  # a failed sample (engine panic) is just skipped
             try:
                 shares += self._sample_shares(conv, options)
@@ -708,7 +772,7 @@ class SearchPlayer(Player):
         if "No Move" in ours or any([o for o, _, _ in r[0]] != ours for r in results):
             raise ValueError(f"root options differ between samples or cannot act: {ours}")
         x = bayes_root([root_matrix(ours, theirs, joint) for _, theirs, joint in results], [1.0] * len(results))
-        shares = np.zeros(10)
+        shares = np.zeros(N_ACTIONS)
         for choice, share in zip(ours, x):
             a = convs[0].action(choice)
             if a is None:
@@ -720,7 +784,7 @@ class SearchPlayer(Player):
     def _sample_shares(conv: Converted, options: list | BaseException) -> np.ndarray:
         if isinstance(options, BaseException):
             raise options
-        shares, total = np.zeros(10), sum(v for _, v, _ in options) or 1
+        shares, total = np.zeros(N_ACTIONS), sum(v for _, v, _ in options) or 1
         for choice, visits, _ in options:
             if choice == "No Move":  # the engine thinks we cannot act (truant, recharge): no information
                 continue
@@ -784,8 +848,13 @@ def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
     return {k: getattr(args, prefix + k) for k in CONFIG}
 
 
+def load_model(path: str | None, device: str = "cpu") -> ActorCriticPolicy | None:
+    """A checkpoint, or None for "none" (pure engine search)."""
+    return None if path in (None, "none") else load_policy(path, device)
+
+
 async def run(args: argparse.Namespace) -> None:
-    policy = load_policy(args.model, args.device)
+    policy = load_model(args.model, args.device)
     tag = random.randint(0, 10**6)
     common = dict(battle_format=args.format, server_configuration=local_server(args.port),
                   max_concurrent_battles=args.concurrency, log_level=40)
@@ -800,7 +869,7 @@ async def run(args: argparse.Namespace) -> None:
         player = SearchPlayer(policy, **cfg, workers=args.workers, oracle=args.oracle, oracle_dir=args.oracle_dir,
                               account_configuration=AccountConfiguration(f"search{tag}", None), **common)
     opp_conf = AccountConfiguration(f"opp{args.opponent[:8]}{tag}", None)
-    opp_policy = load_policy(args.opp_model, args.device) if args.opp_model else policy
+    opp_policy = load_model(args.opp_model, args.device) if args.opp_model else policy
     if args.opponent == "search":
         opp_cfg = config(args, "opp_")
         opponent = SearchPlayer(opp_policy, **opp_cfg, workers=args.workers, account_configuration=opp_conf, **common)
@@ -847,7 +916,7 @@ def add_oracle_args(p: argparse.ArgumentParser) -> None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("model")
+    p.add_argument("model", help='checkpoint, or "none": pure engine search (needed for gen9, with --prior-weight 0)')
     p.add_argument("--opponent", default="policy", choices=["policy", "search", *BASELINES])
     p.add_argument("--opp-model", help="network for the policy/search opponent (default: MODEL)")
     p.add_argument("--n-battles", type=int, default=50)
@@ -867,7 +936,7 @@ def main():
                    help="also log observations and true-team positions (porygon.decisions, for network studies)")
     add_oracle_args(p)
     p.add_argument("--workers", type=int, default=None, help="engine processes (default: cores - 1)")
-    p.add_argument("--format", default="gen4randombattle")
+    p.add_argument("--format", default=inference.FORMAT)
     p.add_argument("--port", type=int, default=8000)
     args = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")

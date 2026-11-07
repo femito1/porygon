@@ -52,18 +52,20 @@ class LoggedSearchPlayer(SearchPlayer):
 
     def on_decision(self, battle: Battle, probs: np.ndarray, mask: np.ndarray, shares: np.ndarray) -> None:
         convs = self.last_convs.pop(battle.battle_tag, [])
-        x = embed_battle(battle)
-        obs = {"observation": torch.as_tensor(x).unsqueeze(0).to(self.policy.device),
-               "action_mask": torch.as_tensor(mask).unsqueeze(0).to(self.policy.device)}
-        with torch.no_grad():
-            value = float(self.policy.predict_values(obs)[0, 0])
-        phi = potential(pe.State.from_string(convs[0].state_str))[0] if convs else 0.0
+        x, value, phi = None, None, 0.0
+        if self.policy is not None:  # pure engine search (gen9): no network value
+            x = embed_battle(battle)
+            obs = {"observation": torch.as_tensor(x).unsqueeze(0).to(self.policy.device),
+                   "action_mask": torch.as_tensor(mask).unsqueeze(0).to(self.policy.device)}
+            with torch.no_grad():
+                value = float(self.policy.predict_values(obs)[0, 0])
+            phi = potential(pe.State.from_string(convs[0].state_str))[0] if convs else 0.0
         rec = {"battle": battle.battle_tag, "turn": battle.turn, "player": self.username,
                "action": self.last_action[battle.battle_tag], "mask": mask.astype(int).tolist(),
                "probs": np.round(probs, 4).tolist(), "shares": np.round(shares, 4).tolist(),
-               "value": round(value + phi, 4), "revealed": revealed(battle),
+               "value": None if value is None else round(value + phi, 4), "revealed": revealed(battle),
                "samples": [opponent_samples(c.state_str) for c in convs]}
-        if self.log_oracle:
+        if self.log_oracle and x is not None:
             rec["obs"] = base64.b64encode(np.asarray(x, dtype=np.float16).tobytes()).decode()
             rec["oracle"] = self.oracle_record(battle)
         self.file.write(json.dumps(rec) + "\n")
