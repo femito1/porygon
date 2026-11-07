@@ -1,7 +1,7 @@
 % Draft. Compile with the IEEEtran class (IEEE Conference on Games); pdflatex paper.tex
 % \todo{}: result not in yet.  \verify{}: number quoted from project notes, re-derive from the logs before submission.
 \documentclass[conference]{IEEEtran}
-\usepackage{amsmath,booktabs,xcolor,siunitx}
+\usepackage{amsmath,booktabs,xcolor,siunitx,graphicx}
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 \newcommand{\verify}[1]{\textcolor{orange}{#1\textsuperscript{?}}}
 
@@ -99,10 +99,22 @@ all features & 0.511 & 0.514\\
 all features, within team pair & 0.517 & 0.518\\\bottomrule
 \end{tabular}\end{table}
 
-\textbf{What the fit changes.} \todo{figure: fitted corrections by feature family, Gen.~4 vs Gen.~9.} The largest
-Generation~4 corrections say the stock score overvalues stat boosts (attack, special attack, speed), undervalues
-the cost of entry hazards and of being locked into a move, and undervalues a pending Wish; most corrections have
-the same sign in Generation~9. \todo{interpret with feature scales.}
+\begin{figure}[t]\centering
+\includegraphics[width=\columnwidth]{fig_weights.pdf}
+\caption{The fitted corrections to the stock score: each weight times its feature's standard deviation over the
+self-play positions of that generation, i.e.\ the change in predicted win logit for a typical change in the
+feature. Features are our side minus the opponent's; a negative bar means the fit values the feature less than
+the stock score does. The 20 largest in either generation are shown.}\label{fig:weights}
+\end{figure}
+
+\textbf{What the fit changes} (Fig.~\ref{fig:weights}). In both generations the stock score overvalues stat boosts
+on the active Pok\'emon (attack, special attack, speed), but an attack boost on a physical attacker is worth
+relatively more than on others, most clearly in Generation~9: the stock score's error is to value every boost
+alike. Entry hazards cost more than it says (Spikes and Toxic Spikes in both generations, Stealth Rock in
+Generation~9). Generation~9 values numbers non-linearly, being down to one Pok\'emon much worse and having four to
+six alive better than the stock score's flat per-Pok\'emon bonus, and values mid-range HP more; Generation~4 values
+the top quarter of a healthy Pok\'emon's HP less. These are marginal effects of correlated, interacting features;
+we read them qualitatively.
 \textbf{Leaf scale.} The stock scale is too soft: with the fitted (within-pair) weights, doubling the scale
 ($k{=}2$) was chosen; at 300k iterations $k=2,4,8$ score 58.1\%, 56.0\% and 56.8\% ($\pm$2.2, about 1850
 games each) against the stock evaluation in engine self-play, so the choice is not sensitive.
