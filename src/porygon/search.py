@@ -112,7 +112,8 @@ ROOT_ITERS = 1000  # regret matching+ iterations for `bayes_root`
 ROOT_SAMPLE_MIN = 0.1  # root_game="sample" ignores actions below this share of the most likely one
 # the engine's leaf evaluation (tunable-eval patch): fitted to engine self-play and its scale doubled
 # (scripts/fit_eval.py, README Results); "stock" = poke-engine's own evaluate()
-DEFAULT_EVAL = str(Path(__file__).parent / "data/eval_r1.json")
+# gen9: its own fit (data/eval_gen9_r1.json, same recipe) is not the default until it is confirmed on Showdown
+DEFAULT_EVAL = str(Path(__file__).parent / "data/eval_r1.json") if GEN_NUM == 4 else "stock"
 PUCT_EPS = 0.1  # share of the PUCT priors spread evenly over the legal actions, so none goes unexplored
 DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
                             dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets

@@ -3,7 +3,11 @@
 # instances (1 core each, 1 s per move) and scripts/vs_foulplay.py. Results: runs/foulplay-<job>/.
 # Foul Play is GPL-3.0 and NOT vendored: the first run clones it into FP_DIR (default: next to the
 # repo) with its own venv, and patches its login for the local --no-security server.
-#   sbatch scripts/slurm_foulplay.sbatch MODEL [N_PER_OPPONENT=50] [K_OPPONENTS=4] [--fp-parallelism P] [vs_foulplay args]
+#   sbatch scripts/slurm_foulplay.sbatch MODEL [N_PER_OPPONENT=50] [K_OPPONENTS=4] [--gen 9] [--fp-parallelism P] [vs_foulplay args]
+# --gen 9: gen9randombattle. Foul Play uses its default (gen9, terastallization) engine in FP_DIR/.venv-gen9; we use
+# the gen9 engine in .engine-gen9 (pip install --target of a GEN=9 scripts/build_engine.sh wheel) ahead of .venv's.
+# MODEL must be "none" (pure engine search: the network is gen4-only), with --prior-weight 0 and an --eval-config
+# (default for gen9: stock; the fitted one is src/porygon/data/eval_gen9_r1.json).
 # --fp-parallelism P: Foul Play searches 2P states per move, P at a time (default 1: 2 states x 1 s on one core,
 # 2 core-seconds per move; our default search is 4 x 1 s = 4 core-seconds). Each instance gets P cores.
 #SBATCH --job-name=porygon-foulplay
@@ -16,17 +20,29 @@
 set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 MODEL=$1; N=${2:-50}; K=${3:-4}; shift $(( $# < 3 ? $# : 3 ))
-FP_PAR=1
-if [ "${1:-}" = "--fp-parallelism" ]; then FP_PAR=$2; shift 2; fi
+FP_PAR=1; GEN=4
+while [ "${1:-}" = "--fp-parallelism" ] || [ "${1:-}" = "--gen" ]; do
+  case "$1" in --fp-parallelism) FP_PAR=$2 ;; --gen) GEN=$2 ;; esac; shift 2
+done
+FORMAT=gen${GEN}randombattle
+FP_VENV=.venv; FP_FEATURES=poke-engine/gen4
+if [ "$GEN" = 9 ]; then
+  FP_VENV=.venv-gen9; FP_FEATURES=poke-engine/terastallization
+  [ "$MODEL" = none ] || { echo "--gen 9 needs MODEL none (the network is gen4-only)" >&2; exit 1; }
+  [ -f "$ROOT/.engine-gen9/poke_engine/__init__.py" ] || { echo "no gen9 engine in .engine-gen9" >&2; exit 1; }
+  export PORYGON_GEN=9 PYTHONPATH=$ROOT/.engine-gen9:$ROOT/src${PYTHONPATH:+:$PYTHONPATH}
+fi
 export PATH=$ROOT/.node/bin:$ROOT/.cargo/bin:$PATH CARGO_HOME=$ROOT/.cargo RUSTUP_HOME=$ROOT/.rustup
 FP=${FP_DIR:-$(dirname "$ROOT")/foul-play}
 
-if ! [ -x "$FP/.venv/bin/python" ]; then
+if ! [ -x "$FP/$FP_VENV/bin/python" ]; then
   [ -d "$FP" ] || git clone -q https://github.com/pmariglia/foul-play.git "$FP"
-  python3 -m venv "$FP/.venv"
-  "$FP/.venv/bin/pip" install -q requests websockets==14.1 python-dateutil==2.8.0
-  "$FP/.venv/bin/pip" install -q --no-cache-dir poke-engine==0.0.48 \
-    --config-settings="build-args=--features poke-engine/gen4 --no-default-features"
+  # the standalone CPython 3.12 the other venvs use (node images moved /usr/bin/python3 to 3.14)
+  PY312=${PY312:-/vol/bitbucket/fr1226/python/cpython-3.12.16/bin/python3}; [ -x "$PY312" ] || PY312=python3
+  "$PY312" -m venv "$FP/$FP_VENV"
+  "$FP/$FP_VENV/bin/pip" install -q requests websockets==14.1 python-dateutil==2.8.0
+  "$FP/$FP_VENV/bin/pip" install -q --no-cache-dir poke-engine==0.0.48 \
+    --config-settings="build-args=--features $FP_FEATURES --no-default-features"
 fi
 python3 - "$FP/fp/websocket_client.py" <<'EOF'
 import sys
@@ -63,13 +79,13 @@ trap 'kill "${LOOPS[@]}" 2>/dev/null || true
 
 # Pull the Python environments into the page cache first: on a slow shared disk, modules imported lazily
 # during a websocket handshake can take longer than the 10 s handshake timeout.
-find "$FP/.venv" "$FP/fp" .venv/lib/python3.12/site-packages/{websockets,poke_env} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
+find "$FP/$FP_VENV" "$FP/fp" .venv/lib/python3.12/site-packages/{websockets,poke_env} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
 NAMES=()
 for ((i = 0; i < K; i++)); do
   NAMES+=("fp${SLURM_JOB_ID}x$i")
   # restarted if it exits (e.g. "timed out during handshake" while the server is still slow to start)
-  (cd "$FP" && while true; do .venv/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
-     --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format gen4randombattle \
+  (cd "$FP" && while true; do "$FP_VENV"/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
+     --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format "$FORMAT" \
      --search-time-ms 1000 --search-parallelism "$FP_PAR" --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) \
      < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
   LOOPS+=($!)
@@ -84,7 +100,7 @@ echo "$K Foul Play instances up on port $PORT"
 WORKERS=$(( $(nproc) - K * FP_PAR - 3 ))
 echo "nproc $(nproc), $K Foul Play instances x $FP_PAR cores, $WORKERS engine workers for our search"
 .venv/bin/python scripts/vs_foulplay.py "$MODEL" --player search --port "$PORT" --opponents "${NAMES[@]}" \
-  --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" "$@" 2>&1 | tee "$OUT/vs.log" || true
+  --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" --format "$FORMAT" "$@" 2>&1 | tee "$OUT/vs.log" || true
 .venv/bin/python scripts/analyze_benchmark.py "$OUT" 2>&1 | tee "$OUT/analysis.txt" || true
 python3 - "$OUT/results.jsonl" <<'EOF'
 import json, math, sys
