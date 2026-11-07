@@ -68,6 +68,7 @@ def test_selfplay_game_and_luck(pairs):
 
 
 
+@pytest.mark.skipif(__import__("porygon.inference").inference.GEN_NUM != 4, reason="gen9 has no tuned default yet")
 def test_search_player_defaults_to_the_tuned_evaluation():
     from porygon.search import DEFAULT_EVAL, check_tunable_engine
     cfg = json.loads(Path(DEFAULT_EVAL).read_text())

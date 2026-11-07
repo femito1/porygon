@@ -1,5 +1,7 @@
 """Opponent set inference: the library posterior and the evidence read from synthetic battle logs."""
 
+import pytest
+
 from porygon import inference
 
 START = """|player|p1|me|
@@ -8,6 +10,8 @@ START = """|player|p1|me|
 |switch|p2a: Heracross|Heracross, L79, M|100/100
 |turn|1
 |"""
+
+GEN4_ONLY = pytest.mark.skipif(inference.GEN_NUM != 4, reason="gen4 sets and battle logs")
 
 
 def log_of(text: str) -> list[list[str]]:
@@ -27,6 +31,7 @@ def items(ev: inference.Evidence, revealed: tuple[str, ...] = ()) -> set[str]:
     return {s.item for s in inference.posterior("heracross", Mon(), ev, "p2: Heracross")[1]}
 
 
+@GEN4_ONLY
 def test_library_covers_gen4_and_counts_leads():
     lib = inference.library()
     assert len(lib) == 295 and lib["heracross"][0] == 79
@@ -34,6 +39,7 @@ def test_library_covers_gen4_and_counts_leads():
     assert {s.item for s in lib["heracross"][1]} == {"toxicorb", "lifeorb", "choicescarf", "choiceband"}
 
 
+@GEN4_ONLY
 def test_revealed_moves_and_unlocked():
     assert items(ev_of("|turn|2"), ("facade",)) == {"toxicorb"}
     two_moves = """|move|p2a: Heracross|Close Combat|p1a: Blissey
@@ -54,6 +60,7 @@ def test_revealed_moves_and_unlocked():
     assert items(ev) == {"lifeorb"}
 
 
+@GEN4_ONLY
 def test_no_lifeorb_after_a_hit_without_recoil():
     hit = """|move|p2a: Heracross|Close Combat|p1a: Blissey
 |-damage|p1a: Blissey|200/300
@@ -69,6 +76,7 @@ def test_no_lifeorb_after_a_hit_without_recoil():
     assert "p2: Heracross" not in ev_of(hit.replace("Close Combat", "U-turn")).no_lifeorb
 
 
+@GEN4_ONLY
 def test_no_leftovers_unless_healed_or_full():
     hurt = """|move|p1a: Blissey|Seismic Toss|p2a: Heracross
 |-damage|p2a: Heracross|70/100
@@ -80,6 +88,7 @@ def test_no_leftovers_unless_healed_or_full():
     assert "p2: Heracross" not in ev_of(wish).no_leftovers
 
 
+@GEN4_ONLY
 def test_trick_reveals_the_original_item():
     for order in ((0, 1), (1, 0)):  # Showdown sends the two -item messages in either order
         msgs = ["|-item|p2a: Heracross|Leftovers|[from] move: Trick", "|-item|p1a: Blissey|Choice Scarf|[from] move: Trick"]
@@ -87,6 +96,7 @@ def test_trick_reveals_the_original_item():
         assert ev.item["p2: Heracross"] == "choicescarf" and "p2: Heracross" in ev.changed
 
 
+@GEN4_ONLY
 def test_speed_order_finds_a_choice_scarf():
     race = """|move|p2a: Heracross|Close Combat|p1a: Blissey
 |-damage|p1a: Blissey|200/300
@@ -108,6 +118,7 @@ def test_speed_order_finds_a_choice_scarf():
     assert items(paralyzed) == {"toxicorb", "choicescarf", "choiceband"}  # no recoil: no life orb
 
 
+@GEN4_ONLY
 def test_damage_tells_a_choice_band_apart():
     blissey = inference.Ours("blissey", 84, ("normal", "typeless"), 300, (50, 400, 150, 250, 100), "naturalcure",
                              "leftovers", 46.8)
@@ -128,3 +139,14 @@ def test_damage_tells_a_choice_band_apart():
     assert items(ev) == {"choiceband"}  # life orb (x1.3) cannot reach band's (x1.5) top roll, no item even less
     crit = ev_of(hit.replace("|-supereffective|", "|-crit|p1a: Blissey\n|-supereffective|"), {"p1: Blissey": blissey})
     assert not crit.hits  # crits are not modelled
+
+
+def test_revealed_tera_type_is_a_hard_constraint():
+    from porygon.inference import STATS, Set, consistent
+    spread = dict.fromkeys(STATS, 85), dict.fromkeys(STATS, 31)
+    fire = Set(("earthquake", "firefang"), "roughskin", "lifeorb", "", *spread, 5, 0, "fire")
+    steel = Set(("earthquake", "ironhead"), "roughskin", "lifeorb", "", *spread, 9, 0, "steel")
+    assert consistent("garchomp", 74, [fire, steel], ["earthquake"], None, None, "k", None, "fire") == [fire]
+    assert consistent("garchomp", 74, [fire, steel], ["earthquake"], None, None, "k", None) == [fire, steel]
+    # an impossible tera type is relaxed like any other evidence, never leaving no candidates
+    assert consistent("garchomp", 74, [fire, steel], ["earthquake"], None, None, "k", None, "water") == [fire, steel]

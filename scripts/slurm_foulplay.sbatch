@@ -19,7 +19,9 @@
 #SBATCH --output=logs/slurm-%j.out
 set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
-MODEL=$1; N=${2:-50}; K=${3:-4}; shift $(( $# < 3 ? $# : 3 ))
+MODEL=$1; N=${2:-50}; K=${3:-4}
+case "$N$K" in *-*) echo "N_PER_OPPONENT and K_OPPONENTS come before any option (got N=$N K=$K)" >&2; exit 1 ;; esac
+shift $(( $# < 3 ? $# : 3 ))
 FP_PAR=1; GEN=4
 while [ "${1:-}" = "--fp-parallelism" ] || [ "${1:-}" = "--gen" ]; do
   case "$1" in --fp-parallelism) FP_PAR=$2 ;; --gen) GEN=$2 ;; esac; shift 2

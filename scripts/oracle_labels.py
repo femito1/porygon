@@ -65,7 +65,8 @@ def label(rec: dict, iterations: int, cfg: dict) -> dict | None:
 
 def worker(args) -> None:
     from porygon.search import DEFAULT_EVAL
-    cfg = json.loads(Path(args.eval_config or DEFAULT_EVAL).read_text()) if args.eval_config != "stock" else {}
+    spec = args.eval_config or DEFAULT_EVAL  # DEFAULT_EVAL is "stock" outside gen4
+    cfg = json.loads(Path(spec).read_text()) if spec != "stock" else {}
     out = Path(args.out) / f"labels-{args.worker}.jsonl"
     done = set()
     if out.exists():

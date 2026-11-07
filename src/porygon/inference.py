@@ -521,7 +521,7 @@ def _engine_damage(species: str, level: int, move: str, s: Set, hit: Hit) -> tup
     dex = GEN.pokedex[species]
     stat = stats(species, level, s.evs, s.ivs)
     maxhp = stat["hp"]
-    types = tuple((t.lower() for t in dex["types"] + ["typeless"]))[:2]
+    types = dex_types(species)
     statuses = {"brn": "burn", "par": "paralyze", "psn": "poison", "tox": "toxic", "slp": "sleep", "frz": "freeze"}
     status = statuses.get(hit.their_status, "none")
     o = hit.ours
@@ -563,16 +563,27 @@ def damage_fits(species: str, level: int, s: Set, hit: Hit) -> bool | None:
 
 # ---------------------------------------------------------------- sampling
 
+def dex_types(species: str) -> tuple[str, str]:
+    """A species' types as poke-engine ids, 'typeless' for a missing second type."""
+    t = tuple(x.lower() for x in GEN.pokedex[species]["types"] + ["typeless"])[:2]
+    return t[0], t[1]
+
+
 def consistent(species: str, level: int, sets: list[Set], revealed: list[str], ability: str | None,
-               item: str | None, key: str, ev: Evidence | None) -> list[Set]:
+               item: str | None, key: str, ev: Evidence | None, tera: str | None = None) -> list[Set]:
     """The sets consistent with what was revealed, relaxing the damage evidence, then the speed order, then the
-    item evidence, then the ability, then moves."""
+    item evidence, then the ability, then moves. `tera`: its revealed tera type (gen9), a hard constraint like the
+    revealed moves; a terastallized mon's damage evidence is ignored (its hits may predate the tera, and
+    `_engine_damage` does not model tera)."""
+    def tera_ok(s: Set) -> bool:
+        return tera is None or s.tera == tera
     def speed_ok(s: Set) -> bool:
         spe = speed(species, level, s)
         return all(outran(s, spe, r) in (None, r.first) for r in (ev.races.get(key, []) if ev else []))
 
     def damage_ok(s: Set) -> bool:
-        return all(damage_fits(species, level, s, h) is not False for h in (ev.hits.get(key, []) if ev else []))
+        hits = ev.hits.get(key, []) if ev and tera is None else []
+        return all(damage_fits(species, level, s, h) is not False for h in hits)
 
     def item_ok(s: Set) -> bool:
         if item is not None:
@@ -589,10 +600,12 @@ def consistent(species: str, level: int, sets: list[Set], revealed: list[str], a
     def ability_ok(s: Set) -> bool:
         return ability is None or s.ability == ability
 
-    for ok in (lambda s: moves_ok(s, revealed) and ability_ok(s) and item_ok(s) and speed_ok(s) and damage_ok(s),
-               lambda s: moves_ok(s, revealed) and ability_ok(s) and item_ok(s) and speed_ok(s),
-               lambda s: moves_ok(s, revealed) and ability_ok(s) and item_ok(s),
-               lambda s: moves_ok(s, revealed) and ability_ok(s),
+    for ok in (lambda s: moves_ok(s, revealed) and tera_ok(s) and ability_ok(s) and item_ok(s) and speed_ok(s)
+               and damage_ok(s),
+               lambda s: moves_ok(s, revealed) and tera_ok(s) and ability_ok(s) and item_ok(s) and speed_ok(s),
+               lambda s: moves_ok(s, revealed) and tera_ok(s) and ability_ok(s) and item_ok(s),
+               lambda s: moves_ok(s, revealed) and tera_ok(s) and ability_ok(s),
+               lambda s: moves_ok(s, revealed) and tera_ok(s),
                lambda s: moves_ok(s, revealed)):
         found = [s for s in sets if ok(s)]
         if found:
@@ -616,7 +629,9 @@ def posterior(species: str, mon: Pokemon | None, ev: Evidence | None = None,
             ev is None or key not in ev.changed):
         item = mon.item
     level = mon.level if mon else level
-    cands = consistent(species, level, sets, revealed, ability, item, key, ev)
+    tera = (mon.tera_type.name.lower() if GEN_NUM >= 9 and getattr(mon, "is_terastallized", False)
+            and getattr(mon, "tera_type", None) is not None else None)
+    cands = consistent(species, level, sets, revealed, ability, item, key, ev, tera)
     lead = ev is not None and mon is not None and ev.lead == key
     weights = [s.n_lead + LEAD_SMOOTHING * s.n if lead else s.n - s.n_lead + LEAD_SMOOTHING * s.n for s in cands]
     return level, cands, weights

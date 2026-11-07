@@ -37,7 +37,6 @@ from poke_env.concurrency import handle_threaded_coroutines
 
 from porygon.env import PolicyPlayer, local_server
 from porygon import inference
-from porygon.model import load_policy  # noqa: F401 (kept for importers)
 from porygon.decisions import LoggedSearchPlayer
 from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args, load_model
 
@@ -121,7 +120,7 @@ async def main():
     p.add_argument("--n", type=int, default=1, help="battles per opponent")
     p.add_argument("--ms", type=int, default=1000, help="SearchPlayer: MCTS ms per determinization")
     p.add_argument("--samples", type=int, default=4, help="SearchPlayer: determinizations per decision")
-    p.add_argument("--prior-weight", type=float, default=0.25)
+    p.add_argument("--prior-weight", type=float, default=None, help="default 0.25; 0 with MODEL none")
     p.add_argument("--c-puct", type=float, default=0.0, help="SearchPlayer: PUCT on the network's priors at the root")
     p.add_argument("--root-game", choices=["max", "sample"], help="SearchPlayer: solve the Bayesian root game")
     p.add_argument("--rm-gamma", type=float, default=0.0, help="SearchPlayer: regret matching in the engine's MCTS")
@@ -140,6 +139,8 @@ async def main():
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
 
     policy = load_model(a.model, a.device)  # "none": pure engine search (gen9)
+    if a.prior_weight is None:
+        a.prior_weight = 0.0 if policy is None else 0.25
     tag = random.randint(0, 10**5)
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)

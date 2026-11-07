@@ -118,7 +118,7 @@ PUCT_EPS = 0.1  # share of the PUCT priors spread evenly over the legal actions,
 DEFAULT_SET = inference.Set(("tackle",), "none", "none", "", dict.fromkeys(inference.STATS, 85),
                             dict.fromkeys(inference.STATS, 31), 1, 0)  # a species with no random-battle sets
 
-norm, matches = inference.norm, inference.matches
+norm, matches, dex_types = inference.norm, inference.matches, inference.dex_types
 
 
 # ---------------------------------------------------------------- random teams
@@ -269,11 +269,6 @@ def engine_types(mon: Pokemon) -> tuple[str, str]:
     ts = [t.name.lower() for t in mon.types if t not in (None, PokemonType.THREE_QUESTION_MARKS)]
     ts = (ts + ["typeless", "typeless"])[:2]
     return ts[0], ts[1]
-
-
-def dex_types(species: str) -> tuple[str, str]:
-    t = tuple(x.lower() for x in GEN.pokedex[species]["types"] + ["typeless"])[:2]
-    return t[0], t[1]
 
 
 def tera_of(mon: Pokemon | None, sampled: str = "") -> tuple[str, bool]:
@@ -647,6 +642,9 @@ class SearchPlayer(Player):
         assert policy is not None or (prior_weight == 0 and c_puct == 0 and value_weight == 0 and not top_k), \
             "without a network (policy=None): prior_weight 0, no c_puct / top_k / value lookahead"
         assert policy is None or GEN_NUM == 4, "the network is gen4-only (no tera actions): use policy=None"
+        fmt = kwargs.get("battle_format", inference.FORMAT)
+        assert fmt == inference.FORMAT, (f"battle format {fmt} but PORYGON_GEN={GEN_NUM} (conversion, action space and "
+                                         f"engine build are {inference.FORMAT}'s): set PORYGON_GEN to match")
         self.policy, self.ms, self.samples = policy, ms, samples
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.c_puct = c_puct
@@ -811,6 +809,8 @@ class SearchPlayer(Player):
         assert isinstance(battle, Battle)
         probs, mask = self.network_probs(battle)
         net_action = int(np.argmax(np.where(mask > 0, probs, -1)))
+        if self.policy is None and mask[6:10].any():  # no network: fall back to the first legal move, not a switch
+            net_action = 6 + int(np.argmax(mask[6:10] > 0))
         action = net_action
         self.stats["decisions"] += 1
         if mask.sum() > 1:
@@ -856,6 +856,13 @@ def load_model(path: str | None, device: str = "cpu") -> ActorCriticPolicy | Non
 
 async def run(args: argparse.Namespace) -> None:
     policy = load_model(args.model, args.device)
+    if policy is None:
+        assert args.opponent != "policy" or args.opp_model, "MODEL none: pick --opponent (or --opp-model)"
+        args.prior_weight = 0.0 if args.prior_weight is None else args.prior_weight
+    elif args.prior_weight is None:
+        args.prior_weight = 0.25
+    if args.opp_prior_weight is None:  # the --opponent search's default follows its network's presence
+        args.opp_prior_weight = 0.0 if (args.opp_model or args.model) in (None, "none") else 0.25
     tag = random.randint(0, 10**6)
     common = dict(battle_format=args.format, server_configuration=local_server(args.port),
                   max_concurrent_battles=args.concurrency, log_level=40)
@@ -923,7 +930,7 @@ def main():
     p.add_argument("--n-battles", type=int, default=50)
     p.add_argument("--ms", type=int, default=1000, help="MCTS time per determinization per decision")
     p.add_argument("--samples", type=int, default=4, help="determinizations per decision")
-    p.add_argument("--prior-weight", type=float, default=0.25, help="0 = pure engine search")
+    p.add_argument("--prior-weight", type=float, default=None, help="0 = pure engine search (default 0.25; 0 with MODEL none)")
     p.add_argument("--top-k", type=int, default=None, help="only consider the network's top-k actions")
     p.add_argument("--c-puct", type=float, default=0.0, help="PUCT on the network's priors at our root (0 = UCB1)")
     p.add_argument("--root-game", choices=["max", "sample"], help="solve the Bayesian root game over the samples")

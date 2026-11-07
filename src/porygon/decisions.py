@@ -65,8 +65,9 @@ class LoggedSearchPlayer(SearchPlayer):
                "probs": np.round(probs, 4).tolist(), "shares": np.round(shares, 4).tolist(),
                "value": None if value is None else round(value + phi, 4), "revealed": revealed(battle),
                "samples": [opponent_samples(c.state_str) for c in convs]}
-        if self.log_oracle and x is not None:
-            rec["obs"] = base64.b64encode(np.asarray(x, dtype=np.float16).tobytes()).decode()
+        if self.log_oracle:
+            if x is not None:  # the network's observation (none without a network)
+                rec["obs"] = base64.b64encode(np.asarray(x, dtype=np.float16).tobytes()).decode()
             rec["oracle"] = self.oracle_record(battle)
         self.file.write(json.dumps(rec) + "\n")
         self.file.flush()

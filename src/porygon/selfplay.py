@@ -45,7 +45,7 @@ from typing import Any
 import numpy as np
 import poke_engine as pe
 
-from porygon.inference import GEN, norm, stats as calc_stats  # light: no torch (workers restart often)
+from porygon.inference import GEN, dex_types, norm, stats as calc_stats  # light: no torch (workers restart often)
 
 MAX_DECISIONS = 500  # a battle longer than this is dropped (engine loops, endless stall)
 GAME_TIMEOUT = 900  # seconds at small budgets; SIGALRM's default action kills a worker stuck inside the engine
@@ -106,7 +106,7 @@ def engine_mon(s: dict[str, Any]) -> pe.Pokemon:
     if species == "shedinja":
         st["hp"] = 1
     dex = GEN.pokedex[species]
-    types = tuple((t.lower() for t in dex["types"] + ["typeless"]))[:2]
+    types = dex_types(species)
     ability, item = norm(s["ability"]) or "none", norm(s["item"]) or "none"
     tera = {"tera_type": s["teraType"].lower()} if s.get("teraType") else {}  # gen9; the engine default: typeless
     return pe.Pokemon(**tera,
