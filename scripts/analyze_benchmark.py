@@ -18,6 +18,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from porygon import inference
+
 
 def norm(s: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
@@ -34,7 +36,7 @@ def same_move(a: str, b: str) -> bool:
     return a == b or ("hiddenpower" in (a, b) and a.startswith("hiddenpower") and b.startswith("hiddenpower"))
 
 
-POOL = 295  # gen4 random-battle species (pokemon-showdown data/random-battles/gen4/sets.json)
+POOL = len(inference.library())  # random-battle species of the generation (PORYGON_GEN): 295 in gen4, 509 in gen9
 
 
 def load(path: Path) -> list[dict]:
@@ -127,7 +129,8 @@ def swing_report(decisions: list[dict], lost: set[str], out: Path, top: int) -> 
     for tag, ds in by_battle.items():
         ds.sort(key=lambda d: d["turn"])
         for a, b in zip(ds, ds[1:]):
-            drops.append((a["value"] - b["value"], tag, a))
+            if a.get("value") is not None and b.get("value") is not None:  # None: pure engine search, no network
+                drops.append((a["value"] - b["value"], tag, a))
     drops.sort(key=lambda x: -x[0])
     lines = []
     for drop, tag, d in drops[:top]:
