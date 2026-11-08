@@ -2,7 +2,9 @@
 // records per side the exact message stream (logs, request JSON, errors) plus, at every decision point, the JS
 // encode() (sparse), actionMask(), actionToChoice() for every action and stateValue(), for scripts/fastenv/parity_v1.py.
 //
-//   node scripts/fastenv/record_battles.js N FORMAT OUT.jsonl [SEED=1] [--bench]     (OUT '-' = stdout)
+//   node scripts/fastenv/record_battles.js N FORMAT OUT.jsonl [SEED=1] [--bench] [--v2]     (OUT '-' = stdout)
+//   --v2: decisions carry encoder_v2 fields (o2) and aux targets (a2, vs the other side's tracker) as sparse
+//   [indices, values in the field dtype], and k = the other side's event count at the decision (for aux)
 //
 // Player policy (deterministic given SEED): uniform over legal actions, except 15% "switch if any switch is
 // legal" and 30% "terastallize if tera is legal".  One JSON line per battle:
@@ -17,6 +19,16 @@ const JS = path.join(__dirname, '../../fastenv/js');
 const {SimBattle, Teams} = require(path.join(JS, 'battle.js'));
 const {SideTracker, PokeEnvError} = require(path.join(JS, 'tracker.js'));
 const E = require(path.join(JS, 'encoder_v1.js'));
+const E2 = require(path.join(JS, 'encoder_v2.js'));
+let V2 = false;  // --v2: record encoder_v2 fields + aux (sparse per field) instead of v1 obs / choices
+
+function sparseTyped(a) {  // [b64 uint16 indices, b64 values in the array's own dtype]
+  let n = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== 0) n++;
+  const ix = new Uint16Array(n), vs = new a.constructor(n);
+  for (let i = 0, k = 0; i < a.length; i++) if (a[i] !== 0) { ix[k] = i; vs[k++] = a[i]; }
+  return [Buffer.from(ix.buffer).toString('base64'), Buffer.from(vs.buffer, vs.byteOffset, vs.byteLength).toString('base64')];
+}
 
 const SHAPING = {fainted: 0.05, hp: 0.05, status: 0, victory: 1};
 
@@ -37,7 +49,7 @@ function sparse(obs) {
   return [Buffer.from(ix.buffer).toString('base64'), Buffer.from(vs.buffer).toString('base64')];
 }
 
-const timing = {trackNs: 0n, trackCalls: 0, encNs: 0n, encCalls: 0, turns: 0, decisions: 0, errors: 0};
+const timing = {trackNs: 0n, trackCalls: 0, encNs: 0n, encCalls: 0, auxNs: 0n, turns: 0, decisions: 0, errors: 0};
 
 function pickAction(rng, mask, gen) {
   const legal = [];
@@ -56,7 +68,8 @@ function playBattle(format, id, seed, record) {
   const teams = [Teams.generate(format, {seed: s4()}), Teams.generate(format, {seed: s4()})];
   const gen = parseInt(format[3], 10), nA = E.nActions(gen);
   const sides = [0, 1].map(s => ({t: new SideTracker({format, side: s}), ev: [], dec: [], final: null, crash: null,
-    obs: new Float32Array(E.OBS_DIM), mask: new Uint8Array(nA)}));
+    obs: new Float32Array(E.OBS_DIM), mask: new Uint8Array(nA),
+    o2: V2 ? E2.allocate(E2.fields(gen), 1) : null, a2: V2 ? E2.allocate(E2.auxFields(gen), 1) : null}));
   const queue = [];
   const b = new SimBattle(format, s4(), teams, {
     onLog: (s, text) => queue.push([s, 'L', text, null]),
@@ -64,18 +77,33 @@ function playBattle(format, id, seed, record) {
     onError: (s, text) => { timing.errors++; queue.push([s, 'E', text, null]); },
   });
   let crashed = false;
-  const decide = (S) => {
-    const t = S.t;
-    let t0 = process.hrtime.bigint();
-    E.encode(t, S.obs, 0);
-    timing.encNs += process.hrtime.bigint() - t0; timing.encCalls++;
+  // computed after the whole update is drained (both players' requests in), as the host does
+  const decide = (s, e) => {
+    const S = sides[s], O = sides[1 - s], t = S.t;
     E.actionMask(t, S.mask, 0);
-    const d = {e: S.ev.length - 1, mask: Array.from(S.mask), v: E.stateValue(t, SHAPING), a: null, done: false};
-    if (record) { d.obs = sparse(S.obs); d.ch = []; for (let a = 0; a < nA; a++) d.ch.push(E.actionToChoice(t, a)); }
+    const d = {e, k: O.ev.length, mask: Array.from(S.mask), v: E.stateValue(t, SHAPING), a: null, done: false};
+    let t0 = process.hrtime.bigint();
+    if (V2) {
+      E2.encodeFields(t, S.o2, 0);
+      const t1 = process.hrtime.bigint();
+      timing.encNs += t1 - t0; timing.encCalls++;
+      E2.encodeAux(t, O.crash ? null : O.t, null, S.a2, 0);
+      timing.auxNs += process.hrtime.bigint() - t1;
+      if (record) {
+        d.o2 = {}; d.a2 = {};
+        for (const k in S.o2) d.o2[k] = sparseTyped(S.o2[k]);
+        for (const k in S.a2) d.a2[k] = sparseTyped(S.a2[k]);
+      }
+    } else {
+      E.encode(t, S.obs, 0);
+      timing.encNs += process.hrtime.bigint() - t0; timing.encCalls++;
+      if (record) { d.obs = sparse(S.obs); d.ch = []; for (let a = 0; a < nA; a++) d.ch.push(E.actionToChoice(t, a)); }
+    }
     S.dec.push(d);
     timing.decisions++;
   };
   const drain = () => {
+    const due = [];
     while (queue.length) {
       const [s, kind, text, req] = queue.shift();
       const S = sides[s];
@@ -94,7 +122,12 @@ function playBattle(format, id, seed, record) {
       } finally {
         timing.trackNs += process.hrtime.bigint() - t0; timing.trackCalls++;
       }
-      if (S.t.decisionPending && kind !== 'L') decide(S);
+      if (S.t.decisionPending && kind !== 'L') due.push([s, S.ev.length - 1]);
+    }
+    for (const [s, e] of due) {
+      if (sides[s].crash || !sides[s].t.decisionPending) continue;
+      if (sides[s].ev.length - 1 !== e) throw new Error('events after a decision within one update');
+      decide(s, e);
     }
   };
   b.start();
@@ -131,6 +164,7 @@ function playBattle(format, id, seed, record) {
 function main() {
   const args = process.argv.slice(2);
   const bench = args.includes('--bench');
+  V2 = args.includes('--v2');
   const pos = args.filter(a => !a.startsWith('--'));
   const n = parseInt(pos[0] || '10', 10), format = pos[1] || 'gen9randombattle';
   const out = bench ? null : pos[2], seed = parseInt(pos[3] || '1', 10);
@@ -147,7 +181,7 @@ function main() {
   const us = (ns, c) => (Number(ns) / 1e3 / Math.max(c, 1)).toFixed(2);
   console.error(`${format}: ${n} battles in ${((Date.now() - t0) / 1e3).toFixed(1)}s, ${timing.decisions} decisions, ` +
     `${crashes} battles with a PokeEnvError, ${defaults} 'default' fallbacks, ${timing.errors} Showdown choice errors`);
-  console.error(`tracker: ${us(timing.trackNs, timing.trackCalls)} us/message-chunk, ` +
+  console.error(`tracker: ${us(timing.trackNs, timing.trackCalls)} us/message-chunk, ` + (V2 ? `aux ${us(timing.auxNs, timing.encCalls)} us/call, ` : '') +
     `${us(timing.trackNs, timing.turns * 2)} us per side-turn; encode: ${us(timing.encNs, timing.encCalls)} us/call`);
 }
 

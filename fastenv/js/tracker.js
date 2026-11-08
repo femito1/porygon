@@ -259,6 +259,8 @@ class Mon {
     this.status = null; this.statusCounter = 0;
     this.tempBaseStats = null; this.tempTypes = [];
     this.dancing = false;
+    this.v2key = ''; this.v2view = null;  // encoder_v2 cache (opponent set posterior view)
+    this.bsFor = null; this.bsVal = null;  // baseSpecies cache
     if (request) this.updateFromRequest(request);
     else if (details) this.updateFromDetails(details);
     else if (species) this.updateFromPokedex(species);
@@ -275,8 +277,10 @@ class Mon {
     if (this.ability_ === null) this.ability_ = toId(a); else this.tempAbility = toId(a);
   }
   get baseSpecies() {
+    if (this.bsFor === this.species) return this.bsVal;
     const e = this.G.dex.get(this.species);
     if (!e) fail(`KeyError pokedex ${this.species}`);
+    this.bsFor = this.species; this.bsVal = e.baseSpecies;
     return e.baseSpecies;
   }
   get fainted() { return this.status === 'FNT'; }
