@@ -16,7 +16,9 @@ Input (the data stream's supervised format): DATA is a directory `encoded/<forma
 The older expert-iteration shards (porygon.expert: obs, mask, prior, target, ret) load too: ret -> z, source
 "search", no rating; they carry no game id, so games are recovered as runs of non-decreasing turn (one player's
 side of one battle; the two sides of a battle can still land on different sides of the split).
-Source codes default to human=0, search=1, selfplay=2 unless meta.json says otherwise.
+Source ids follow scripts/convert_replays.py (showdown-replays 1, holidayougi 2, pokechamp 3, searchlabels 10,
+benchmark 11; legacy shards are searchlabels); --sources / --mix take names from meta.json, numeric ids, or the
+groups human (0-3) and search (10).
 
 Model: a normal SB3 PPO checkpoint (`porygon.model.load_policy`, `PolicyPlayer`, `porygon.search`,
 `porygon.train --resume` all take the output). Built from scratch for any obs_dim / n_actions (gen4 10, gen9 26
@@ -74,7 +76,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-DEFAULT_SOURCES = {"human": 0, "search": 1, "selfplay": 2}
+# shard `source` ids: scripts/convert_replays.py SOURCE_IDS (meta.json "source_ids" / "sources" override them)
+DEFAULT_SOURCES = {"other": 0, "showdown-replays": 1, "holidayougi": 2, "pokechamp": 3, "searchlabels": 10,
+                   "benchmark": 11}
+SOURCE_GROUPS = {"human": ("other", "showdown-replays", "holidayougi", "pokechamp"), "search": ("searchlabels",)}
 SMALL_KEYS = ("game", "rating", "source", "z")  # what the counting pass reads
 MASK_FILL = -1e9
 
@@ -163,7 +168,7 @@ def load_shard(path: Path, shard_id: int, keys: tuple[str, ...] | None = None,
             if need(k):
                 out[k] = np.full(n, -1, np.int16)
         if need("source"):
-            out["source"] = np.full(n, sources.get("search", 1), np.uint8)
+            out["source"] = np.full(n, sources.get("searchlabels", 10), np.uint8)
         if need("forced"):
             out["forced"] = np.zeros(n, np.uint8)
         if need("turn"):
@@ -298,7 +303,7 @@ class ShardSet:
         self.shards = list_shards(paths)[:max_shards]
         self.filt, self.val_frac, self.val_max, self.seed, self.workers = filt, val_frac, val_max, seed, workers
         meta = read_meta(paths)
-        self.sources = meta["datasets"][0].get("sources", DEFAULT_SOURCES)
+        self.sources = source_table(meta)
         with ThreadPoolExecutor(workers) as ex:
             small = list(ex.map(lambda a: load_shard(a[1], a[0], SMALL_KEYS, self.sources),
                                 enumerate(self.shards)))
@@ -630,16 +635,30 @@ def code_commit() -> str:
         return "unknown"
 
 
-def make_filters(args, sources: dict[str, int]) -> Filters:
-    def code(name: str) -> int:
-        return int(name) if name.isdigit() else sources[name]
+def source_table(meta: dict) -> dict[str, int]:
+    """name -> id: the converter's static table, then meta.json's ids, then its per-run names ("run:<dir>")."""
+    m = meta["datasets"][0] if "datasets" in meta else meta
+    return DEFAULT_SOURCES | m.get("source_ids", {}) | m.get("sources", {})
 
+
+def source_codes(name: str, table: dict[str, int]) -> set[int]:
+    if name.isdigit():
+        return {int(name)}
+    if name in table:
+        return {table[name]}
+    if name in SOURCE_GROUPS:
+        return {table[n] for n in SOURCE_GROUPS[name] if n in table}
+    raise SystemExit(f"unknown source {name!r}: names {sorted(table)}, groups {sorted(SOURCE_GROUPS)}, or ids")
+
+
+def make_filters(args, sources: dict[str, int]) -> Filters:
     mix = {}
     for item in filter(None, (args.mix or "").split(",")):
         k, v = item.split("=")
-        mix[code(k)] = float(v)
+        mix |= {c: float(v) for c in source_codes(k, sources)}
+    codes = set().union(*(source_codes(x, sources) for x in args.sources.split(","))) if args.sources else None
     return Filters(min_rating=args.min_rating, max_rating=args.max_rating, drop_unrated=args.drop_unrated,
-                   sources={code(s) for s in args.sources.split(",")} if args.sources else None, mix=mix,
+                   sources=codes, mix=mix,
                    rating_weight_scale=args.rating_weight_scale, rating_ref=args.rating_ref,
                    skip_forced=args.skip_forced, min_legal=args.min_legal, label_smoothing=args.label_smoothing,
                    target_temperature=args.target_temperature, value_target=args.value_target,
@@ -668,8 +687,7 @@ def train(args) -> dict:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     meta = read_meta(args.data)
-    sources = meta["datasets"][0].get("sources", DEFAULT_SOURCES)
-    filt = make_filters(args, sources)
+    filt = make_filters(args, source_table(meta))
     t0 = time.time()
     data = ShardSet(args.data, filt, args.val_frac, args.val_max, args.seed, args.load_workers, args.max_shards)
     print(f"{len(data.shards)} shards, {data.n_total:,} decisions: {data.n_train:,} train / {data.n_val:,} val "
@@ -827,7 +845,7 @@ def train(args) -> dict:
 def eval_cmd(args) -> None:
     device = torch.device(args.device)
     meta = read_meta(args.data)
-    filt = make_filters(args, meta["datasets"][0].get("sources", DEFAULT_SOURCES))
+    filt = make_filters(args, source_table(meta))
     data = ShardSet(args.data, filt, 1.0 if args.all else args.val_frac, args.val_max, args.seed,
                     args.load_workers, args.max_shards)
     model = load_model(args.model, args.device)
@@ -869,7 +887,7 @@ def synth_shard(n: int, n_actions: int = 26, n_games: int = 20, seed: int = 0) -
     rating = rng.integers(1000, 2000, n_games)[game].astype(np.int16)
     return {"obs": obs.astype(np.float16), "mask": mask, "action": action, "target": target, "z": z,
             "rating": rating, "opp_rating": rating, "game": game, "turn": rng.integers(1, 40, n).astype(np.int16),
-            "source": (rng.random(n) < 0.3).astype(np.uint8), "forced": forced.astype(np.uint8),
+            "source": np.where(rng.random(n) < 0.3, 10, 1).astype(np.uint8), "forced": forced.astype(np.uint8),
             "n_legal": mask.sum(1).astype(np.uint8),
             "root_value": np.clip((z + 1) / 2 * 0.6 + 0.2 + rng.normal(0, 0.05, n), 0, 1).astype(np.float32),
             "visits": rng.integers(100, 5000, n).astype(np.int32)}
@@ -887,7 +905,8 @@ def synth_cmd(args) -> None:
     fmt = "gen9randombattle" if args.n_actions == 26 else "gen4randombattle"
     (out / "meta.json").write_text(json.dumps({
         "encoder": "porygon.encoder:embed_battle", "obs_dim": E.OBS_DIM, "n_actions": args.n_actions,
-        "format": fmt, "sources": DEFAULT_SOURCES, "counts": {"decisions": per * args.shards}, "synthetic": True}))
+        "format": fmt, "sources": {"showdown-replays": 1, "searchlabels": 10}, "source_ids": DEFAULT_SOURCES,
+        "counts": {"decisions": per * args.shards}, "synthetic": True}))
     print(f"wrote {args.shards} synthetic shard(s), {per * args.shards} decisions, to {out}")
 
 
@@ -930,7 +949,7 @@ def add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--min-rating", type=int)
     p.add_argument("--max-rating", type=int)
     p.add_argument("--drop-unrated", action="store_true", help="drop decisions with unknown rating (-1)")
-    p.add_argument("--sources", help="keep only these sources, e.g. human,search (names from meta.json or codes)")
+    p.add_argument("--sources", help="keep only these sources: groups human / search, meta.json names, or ids")
     p.add_argument("--mix", help="per-source loss weights, e.g. human=1,search=0.5 (0 drops a source)")
     p.add_argument("--rating-weight-scale", type=float, default=0.0,
                    help="> 0: weight decisions by clip(exp((rating - ref) / scale), 0.1, 10)")

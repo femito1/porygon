@@ -40,10 +40,13 @@ def test_synthetic_shard_contract(gen9_data):
 def test_filters_and_mix():
     d = bc.synth_shard(500, 10, 20, seed=1)
     d["n"] = np.int64(500)
-    f = bc.Filters(min_rating=1500, sources={0}, mix={0: 0.5})
+    f = bc.Filters(min_rating=1500, sources={1}, mix={1: 0.5})
     w = f.row_weight(d)
-    assert (w[(d["rating"] < 1500) | (d["source"] != 0)] == 0).all()
-    assert np.allclose(w[(d["rating"] >= 1500) & (d["source"] == 0)], 0.5)
+    assert (w[(d["rating"] < 1500) | (d["source"] != 1)] == 0).all()
+    assert np.allclose(w[(d["rating"] >= 1500) & (d["source"] == 1)], 0.5)
+    table = bc.source_table({"sources": {"run:searchlabels-x": 10}})
+    assert bc.source_codes("human", table) == {0, 1, 2, 3} and bc.source_codes("search", table) == {10}
+    assert bc.source_codes("run:searchlabels-x", table) == {10} and bc.source_codes("11", table) == {11}
     d["rating"][:10] = -1
     assert (bc.Filters(min_rating=1500).row_weight(d)[:10] == 1).all()  # unknown ratings pass ...
     assert (bc.Filters(drop_unrated=True).row_weight(d)[:10] == 0).all()  # ... unless dropped
@@ -105,7 +108,7 @@ def test_legacy_expert_shards(tmp_path):
     assert meta["n_actions"] == 10 and meta["datasets"][0]["legacy"]
     d = bc.load_shard(bc.list_shards([tmp_path])[0], 0)
     assert len(np.unique(d["game"][:3])) == 1 and len(np.unique(d["game"])) == 2  # games recovered from turns
-    assert d["z"].tolist() == [1.0] * 3 + [-1.0] * 5 and (d["source"] == bc.DEFAULT_SOURCES["search"]).all()
+    assert d["z"].tolist() == [1.0] * 3 + [-1.0] * 5 and (d["source"] == bc.DEFAULT_SOURCES["searchlabels"]).all()
 
 
 @pytest.mark.parametrize("n_actions", [10, 26])
