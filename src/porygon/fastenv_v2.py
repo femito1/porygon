@@ -1,0 +1,177 @@
+"""porygon.fastenv as a drop-in for netv2's rollout collection (`porygon.v2.workers.Collector`, branch ws/netv2):
+same transitions (packed spec-v2 blobs + action, log-prob, value, id-dropout seed, summed rewards, opponent-action
+soft target, bootstrap value, done), same `step` / `take` / `run` / counters, so `porygon.v2.train` can switch with
+a few lines:
+
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    env = FastEnv(args.format, n_workers, per_worker, seed=args.seed, encoder="v2", shaping=tuple(args.shaping))
+    self.workers = FastWorkers(env)                      # instead of BattleWorkers(specs)
+    self.collector = FastCollector(env, self.packer, self._act, id_dropout=..., seed=args.seed)
+
+Needs the v2 JS encoder (`fastenv/js/encoder_v2.js`: obs/<field> and aux/<field> columns named as
+`porygon.v2.spec.fields` / `aux_fields`). Self-play only (both sides are the learner); pool opponents (snapshots,
+baseline bots) are not wired yet. Transitions close as in Collector: at the side's next decision (bootstrap = its
+value) or at the end of the battle (done, bootstrap 0); open transitions carry over between rollouts.
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+import time
+import traceback
+from collections import defaultdict
+from typing import Callable
+
+import numpy as np
+
+from porygon.fastenv import Batch, FastEnv
+from porygon.v2.spec import N_OPP_CLASSES, fields
+from porygon.v2.workers import ACT, DONE, NEXT_V, OBS, OPP_C, OPP_T, REW, Packer  # noqa: F401  (layout)
+
+
+class FastWorkers:
+    """Stands in for BattleWorkers where the trainer only reads counters and closes it."""
+
+    def __init__(self, env: FastEnv):
+        self.env, self.restarts = env, 0
+
+    def close(self) -> None:
+        self.env.close()
+
+
+class FastCollector:
+    def __init__(self, env: FastEnv, packer: Packer, act_fn: Callable, opp_fn: Callable | None = None, *,
+                 id_dropout: bool = True, seed: int | None = None, **_ignored):
+        self.env, self.packer, self.act_fn = env, packer, act_fn
+        self.id_dropout = id_dropout
+        self.rng = np.random.default_rng(seed)
+        self.model_keys = list(fields(packer.gen)) + ["aux_opp_class"]
+        self.ready: dict[int, Batch] = dict(env.poll_all())
+        self.in_flight: set[int] = set()
+        self.open: dict[int, list] = {}
+        self.segments: dict[int, list] = defaultdict(list)
+        self.n_closed = 0
+        self.episodes: list[dict] = []
+        self.forward_batches = 0
+        self.opp_decisions = 0
+        self.decisions: dict[int, int] = defaultdict(int)  # per slot, current battle
+        b0 = next(iter(self.ready.values()))
+        self.col = {k: (f"obs/{k}" if f"obs/{k}" in b0.cols else f"aux/{k}") for k in packer.layout}
+        missing = [k for k, c in self.col.items() if c not in b0.cols]
+        assert not missing, f"fastenv encoder lacks spec fields {missing}"
+
+    # -- packing: one bytes blob per row in Packer layout
+    def _pack(self, b: Batch, rows: np.ndarray) -> np.ndarray:
+        raw = np.empty((len(rows), self.packer.size), np.uint8)
+        for k, (off, nb, shape, dtype) in self.packer.layout.items():
+            a = np.ascontiguousarray(b.cols[self.col[k]][rows], dtype=dtype)
+            raw[:, off:off + nb] = a.reshape(len(rows), -1).view(np.uint8)
+        return raw
+
+    def _close(self, key: int, tr: list, next_value: float, done: bool) -> None:
+        tr[NEXT_V], tr[DONE] = next_value, done
+        self.segments[key].append(tr)
+        self.n_closed += 1
+
+    def _receive(self, b: Batch) -> None:
+        pending_result: dict[int, list] = {}
+        for i in range(len(b)):
+            s = int(b.slot[i])
+            tr = self.open.get(s)
+            if tr is not None:
+                tr[REW] += float(b.reward[i])
+            if b.flags[i] & 2:  # terminal row
+                tr = self.open.pop(s, None)
+                if tr is not None:
+                    self._close(s, tr, 0.0, True)
+                r = pending_result.setdefault(s // 2, [None, None, 0])
+                r[s % 2] = int(b.win[i])
+                r[2] = int(b.turn[i])
+                if None not in r[:2]:
+                    base = (s // 2) * 2
+                    self.episodes.append({"kind": "selfplay", "opp": "self", "turns": r[2],
+                                          "decisions": [self.decisions.pop(base, 0), self.decisions.pop(base + 1, 0)],
+                                          "result": r[:2]})
+
+    def _act(self) -> None:
+        ws = list(self.ready)
+        batches = [self.ready.pop(w) for w in ws]
+        rows = [np.flatnonzero(b.needs_action) for b in batches]
+        n = sum(map(len, rows))
+        if n:
+            raws = [self._pack(b, r) for b, r in zip(batches, rows)]
+            raw = np.concatenate(raws)
+            batch = {k: raw[:, off:off + nb].copy().view(dtype).reshape(n, *shape)
+                     for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.model_keys}
+            seeds = (self.rng.integers(1, 2 ** 62, n, dtype=np.int64) if self.id_dropout
+                     else np.zeros(n, np.int64))
+            batch["drop_seed"] = seeds
+            actions, logps, values, probs = self.act_fn(batch)
+            self.forward_batches += 1
+            slots = np.concatenate([b.slot[r] for b, r in zip(batches, rows)])
+            pos = {}
+            for i, s in enumerate(map(int, slots)):
+                prev = self.open.get(s)
+                if prev is not None:
+                    self._close(s, prev, float(values[i]), False)
+                self.open[s] = [raw[i].tobytes(), int(actions[i]), float(logps[i]), float(values[i]), int(seeds[i]),
+                                0.0, None, -1, 0.0, False]
+                self.decisions[s] += 1
+                pos[s] = i
+            cls = batch["aux_opp_class"]
+            for s, i in pos.items():  # both sides decided in this forward: opponent-action target from its policy
+                j = pos.get(s ^ 1)
+                if j is None:
+                    continue
+                c, p = cls[i], probs[j]
+                ok = c >= 0
+                if not ok.any():
+                    continue
+                target = np.zeros(N_OPP_CLASSES, np.float32)
+                np.add.at(target, c[ok], p[ok])
+                mass = target.sum()
+                tr = self.open[s]
+                tr[OPP_C] = int(c[int(actions[j])])
+                if mass >= 0.5:
+                    tr[OPP_T] = target / mass
+            k = 0
+            for w, b, r in zip(ws, batches, rows):
+                self.env.send_to(w, b, np.asarray(actions[k:k + len(r)]))
+                self.in_flight.add(w)
+                k += len(r)
+        else:
+            for w, b in zip(ws, batches):
+                self.env.send_to(w, b, np.zeros(0, np.int64))
+                self.in_flight.add(w)
+
+    # -- Collector interface
+    def step(self, timeout: float = 1.0) -> None:
+        if self.ready:
+            self._act()
+        for w, b in self.env.poll(timeout):
+            self.in_flight.discard(w)
+            self._receive(b)
+            self.ready[w] = b
+
+    def take(self) -> tuple[dict, list[dict]]:
+        segs, eps = self.segments, self.episodes
+        self.segments, self.episodes, self.n_closed = defaultdict(list), [], 0
+        return segs, eps
+
+    def run(self, rollout: int, requests: threading.Semaphore, out: queue.Queue, stop: threading.Event) -> None:
+        try:
+            while not stop.is_set():
+                if not requests.acquire(timeout=1.0):
+                    continue
+                start = time.time()
+                while self.n_closed < rollout and not stop.is_set():
+                    self.step()
+                if stop.is_set():
+                    break
+                segs, eps = self.take()
+                out.put((segs, eps, time.time() - start))
+        except BaseException as e:
+            traceback.print_exc()
+            out.put(e)
