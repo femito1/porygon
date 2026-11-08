@@ -10,8 +10,9 @@ a few lines:
     self.collector = FastCollector(env, self.packer, self._act, id_dropout=..., seed=args.seed)
 
 Needs the v2 JS encoder (`fastenv/js/encoder_v2.js`: obs/<field> and aux/<field> columns named as
-`porygon.v2.spec.fields` / `aux_fields`). Self-play only (both sides are the learner); pool opponents (snapshots,
-baseline bots) are not wired yet. Transitions close as in Collector: at the side's next decision (bootstrap = its
+`porygon.v2.spec.fields` / `aux_fields`). Self-play, plus snapshot pool battles (`pool_per_worker`, `pool_dir`,
+opp_fn as in Collector); baseline-bot opponents (SimpleHeuristics / MaxBasePower are poke-env Python) are not
+available. Transitions close as in Collector: at the side's next decision (bootstrap = its
 value) or at the end of the battle (done, bootstrap 0); open transitions carry over between rollouts.
 """
 
@@ -43,8 +44,15 @@ class FastWorkers:
 
 class FastCollector:
     def __init__(self, env: FastEnv, packer: Packer, act_fn: Callable, opp_fn: Callable | None = None, *,
-                 id_dropout: bool = True, seed: int | None = None, **_ignored):
-        self.env, self.packer, self.act_fn = env, packer, act_fn
+                 id_dropout: bool = True, seed: int | None = None, pool_per_worker: int = 0,
+                 pool_dir=None, recent: int = 4, **_ignored):
+        """pool_per_worker: in every worker, battles 0..k-1 are pool battles: side two is a frozen snapshot from
+        pool_dir (`*.pt`, picked per battle like PoolOpponent: half the time one of the `recent` newest, else
+        uniform), played through opp_fn(name, batch); no snapshot yet -> that battle is self-play."""
+        self.env, self.packer, self.act_fn, self.opp_fn = env, packer, act_fn, opp_fn
+        self.pool_per_worker, self.pool_dir, self.recent = pool_per_worker, pool_dir, recent
+        self.snapshot: dict[int, str | None] = {}  # battle id -> snapshot name of the current pool battle
+        self.opp_packer = Packer(packer.gen, aux=False)
         self.id_dropout = id_dropout
         self.rng = np.random.default_rng(seed)
         self.model_keys = list(fields(packer.gen)) + ["aux_opp_class"]
@@ -61,6 +69,25 @@ class FastCollector:
         self.col = {k: (f"obs/{k}" if f"obs/{k}" in b0.cols else f"aux/{k}") for k in packer.layout}
         missing = [k for k, c in self.col.items() if c not in b0.cols]
         assert not missing, f"fastenv encoder lacks spec fields {missing}"
+        for b in self.ready.values():
+            self._receive(b)  # first decisions: picks the pool battles' opponents
+
+    def _is_pool(self, battle: int) -> bool:
+        return battle % self.env.battles_per_worker < self.pool_per_worker
+
+    def _pick_snapshot(self) -> str | None:
+        if self.pool_dir is None or self.opp_fn is None:
+            return None
+        from pathlib import Path
+        snaps = sorted(Path(self.pool_dir).glob("*.pt"), key=lambda p: p.stat().st_mtime)
+        if not snaps:
+            return None
+        pick = snaps[-self.recent:] if self.rng.random() < 0.5 else snaps
+        return pick[self.rng.integers(len(pick))].name
+
+    def _opponent(self, s: int) -> str | None:
+        """Snapshot playing slot s (side two of a pool battle), else None (the learner plays it)."""
+        return self.snapshot.get(s // 2) if s % 2 == 1 else None
 
     # -- packing: one bytes blob per row in Packer layout
     def _pack(self, b: Batch, rows: np.ndarray) -> np.ndarray:
@@ -91,16 +118,47 @@ class FastCollector:
                 r[2] = int(b.turn[i])
                 if None not in r[:2]:
                     base = (s // 2) * 2
-                    self.episodes.append({"kind": "selfplay", "opp": "self", "turns": r[2],
-                                          "decisions": [self.decisions.pop(base, 0), self.decisions.pop(base + 1, 0)],
-                                          "result": r[:2]})
+                    snap = self.snapshot.pop(s // 2, None)
+                    dec = [self.decisions.pop(base, 0), self.decisions.pop(base + 1, 0)]
+                    if snap is None:
+                        self.episodes.append({"kind": "selfplay", "opp": "self", "turns": r[2], "decisions": dec,
+                                              "result": r[:2]})
+                    else:
+                        self.episodes.append({"kind": "pool", "opp": "snapshot", "snapshot": snap, "turns": r[2],
+                                              "decisions": dec[:1], "result": r[:1]})
+            elif b.flags[i] & 4 and s % 2 == 0 and self._is_pool(s // 2):  # a new pool battle: pick its opponent
+                self.snapshot[s // 2] = self._pick_snapshot()
 
     def _act(self) -> None:
         ws = list(self.ready)
         batches = [self.ready.pop(w) for w in ws]
-        rows = [np.flatnonzero(b.needs_action) for b in batches]
+        all_rows = [np.flatnonzero(b.needs_action) for b in batches]
+        acts_out = [np.zeros(len(r), np.int64) for r in all_rows]
+        # snapshot opponents: one forward per snapshot name, no transitions
+        by_name: dict[str, list] = defaultdict(list)
+        rows = []
+        for bi, (b, r) in enumerate(zip(batches, all_rows)):
+            mine = []
+            for k, i in enumerate(r):
+                name = self._opponent(int(b.slot[i]))
+                if name is None:
+                    mine.append(k)
+                else:
+                    by_name[name].append((bi, k))
+            rows.append(np.asarray(mine, np.int64))
+        for name, items in by_name.items():
+            raw = np.concatenate([self._pack(batches[bi], all_rows[bi][[k]]) for bi, k in items])
+            ob = {k: raw[:, off:off + nb].copy().view(dtype).reshape(len(items), *shape)
+                  for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.opp_packer.layout}
+            ob["drop_seed"] = np.zeros(len(items), np.int64)
+            acts = self.opp_fn(name, ob)
+            self.opp_decisions += len(items)
+            for (bi, k), a in zip(items, acts):
+                acts_out[bi][k] = int(a)
         n = sum(map(len, rows))
         if n:
+            rows_k = rows
+            rows = [all_rows[bi][rk] for bi, rk in enumerate(rows_k)]
             raws = [self._pack(b, r) for b, r in zip(batches, rows)]
             raw = np.concatenate(raws)
             batch = {k: raw[:, off:off + nb].copy().view(dtype).reshape(n, *shape)
@@ -137,14 +195,12 @@ class FastCollector:
                 if mass >= 0.5:
                     tr[OPP_T] = target / mass
             k = 0
-            for w, b, r in zip(ws, batches, rows):
-                self.env.send_to(w, b, np.asarray(actions[k:k + len(r)]))
-                self.in_flight.add(w)
-                k += len(r)
-        else:
-            for w, b in zip(ws, batches):
-                self.env.send_to(w, b, np.zeros(0, np.int64))
-                self.in_flight.add(w)
+            for bi, rk in enumerate(rows_k):
+                acts_out[bi][rk] = np.asarray(actions[k:k + len(rk)])
+                k += len(rk)
+        for w, b, a in zip(ws, batches, acts_out):
+            self.env.send_to(w, b, a)
+            self.in_flight.add(w)
 
     # -- Collector interface
     def step(self, timeout: float = 1.0) -> None:

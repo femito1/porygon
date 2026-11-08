@@ -39,3 +39,38 @@ def test_collector_rollout(fmt):
         assert all(sorted(e["result"]) in ([-1, 1], [0, 0]) for e in eps)
     finally:
         workers.close()
+
+
+def test_collector_pool_snapshots(tmp_path):
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    from porygon.v2.workers import Packer
+
+    (tmp_path / "snap_a.pt").write_bytes(b"")
+    rng = np.random.default_rng(1)
+    seen = []
+
+    def act(batch):
+        mask = batch["action_mask"] > 0
+        probs = mask / mask.sum(1, keepdims=True)
+        acts = (rng.random(mask.shape) * mask).argmax(1)
+        n = len(acts)
+        return acts, np.log(probs[np.arange(n), acts]), np.zeros(n, np.float32), probs.astype(np.float32)
+
+    def opp(name, batch):
+        seen.append((name, len(batch["action_mask"])))
+        assert "aux_item" not in batch and "drop_seed" in batch
+        return (rng.random(batch["action_mask"].shape) * (batch["action_mask"] > 0)).argmax(1)
+
+    workers = FastWorkers(FastEnv("gen9randombattle", 1, 4, seed=3, encoder="v2", shaping=(0, 0, 0)))
+    try:
+        col = FastCollector(workers.env, Packer(9), act, opp, seed=0, pool_per_worker=2, pool_dir=tmp_path)
+        while len(col.episodes) < 6:
+            col.step()
+        segs, eps = col.take()
+        kinds = {e["kind"] for e in eps}
+        assert kinds == {"pool", "selfplay"}, kinds
+        assert seen and all(n == "snap_a.pt" for n, _ in seen)
+        assert all(s % 2 == 0 for s in segs if (s // 2) % 4 < 2), "pool battles: only the learner side has transitions"
+    finally:
+        workers.close()
