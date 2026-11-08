@@ -82,6 +82,14 @@ def test_search_labels_soft_targets_root_value_and_visits():
     assert pol.item() == pytest.approx(uniform_ce, rel=1e-4)  # CE to a distribution under a uniform policy
 
 
+def test_meta_with_null_n_actions_is_inferred(tmp_path):
+    d = bc.synth_shard(50, 26, 4)
+    np.savez(tmp_path / "shard-00000.npz", **d)
+    (tmp_path / "meta.json").write_text(json.dumps({"n_actions": None, "obs_dim": 4079, "format": "gen9randombattle"}))
+    m = bc.read_meta([tmp_path])
+    assert m["n_actions"] == 26 and m["obs_dim"] == d["obs"].shape[1]
+
+
 def test_game_level_split_is_deterministic():
     games = np.repeat(np.arange(2000), 7)
     v = bc.val_bucket(games, 0.1)

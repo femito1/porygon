@@ -108,10 +108,9 @@ def read_meta(paths: list[Path]) -> dict:
     for p in map(Path, paths):
         d = p if p.is_dir() else p.parent
         m = json.loads((d / "meta.json").read_text()) if (d / "meta.json").exists() else {}
-        if "obs_dim" not in m or "n_actions" not in m:
+        if not isinstance(m.get("obs_dim"), int) or not isinstance(m.get("n_actions"), int):  # absent / null
             with np.load(list_shards([p])[0]) as z:
-                m.setdefault("obs_dim", int(z["obs"].shape[1]))
-                m.setdefault("n_actions", int(z["mask"].shape[1]))
+                m["obs_dim"], m["n_actions"] = int(z["obs"].shape[1]), int(z["mask"].shape[1])
                 m.setdefault("legacy", "ret" in z.files and "z" not in z.files)
         m.setdefault("encoder", "porygon.encoder:embed_battle")
         m["path"] = str(p)
