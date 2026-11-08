@@ -59,9 +59,9 @@ class FastBattles(VecEnv):
     def collect(self, policy, n: int, on_transitions: Callable[[int, list[dict]], bool]):
         segments: dict[int, list[tuple]] = defaultdict(list)
         in_flight: set[int] = set()
-        taken, keep_going = 0, True
-        while (taken < n and keep_going) or in_flight:
-            if self.ready and taken < n and keep_going:
+        done_n, keep_going = 0, True  # completed transitions (fill_buffer needs >= n; extras are trimmed)
+        while (done_n < n and keep_going) or in_flight:
+            if self.ready and done_n < n and keep_going:
                 ws = list(self.ready)
                 batches = [self.ready.pop(w) for w in ws]
                 rows = [b.needs_action for b in batches]
@@ -77,7 +77,6 @@ class FastBattles(VecEnv):
                                              int(actions[k + j]), float(values[k + j]), float(log_probs[k + j]))
                     k += m
                     in_flight.add(w)
-                taken += len(obs)
             finished: list[dict] = []
             got = 0
             for w, b in self.env.poll():
@@ -86,6 +85,7 @@ class FastBattles(VecEnv):
                 self._absorb(b, segments, finished)
                 got += sum(map(len, segments.values())) - before
                 self.ready[w] = b
+            done_n += got
             if got or finished:
                 keep_going = on_transitions(got, finished) and keep_going
         # bootstrap every segment that ends mid-episode from its slot's next observation
