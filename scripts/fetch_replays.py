@@ -135,13 +135,37 @@ _socket.getaddrinfo = _cached_getaddrinfo
 
 
 class Client:
+    """One persistent HTTPS connection (keep-alive), one request in flight, >= min_interval apart."""
+
     def __init__(self, min_interval: float = 1.0):
         self.min_interval = max(0.5, min_interval)  # never more than 2 requests/s, one in flight
         self.last = 0.0
         self.n = 0
+        self.conn = None
+        self.host = None
+
+    def _conn(self, host):
+        import http.client
+        if self.conn is None or self.host != host:
+            if self.conn is not None:
+                self.conn.close()
+            self.conn = http.client.HTTPSConnection(host, timeout=60)
+            self.host = host
+        return self.conn
+
+    def _drop(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+        self.conn = None
 
     def get(self, url: str) -> tuple[int, bytes]:
-        """GET with rate limit and backoff. Returns (status, body); 404/403 are returned, not raised."""
+        """GET with rate limit and backoff. Returns (status, body); final 4xx are returned, not raised."""
+        import http.client
+        u = urllib.parse.urlsplit(url)
+        path = u.path + ("?" + u.query if u.query else "")
         backoff = 30.0
         while not STOP:
             wait = self.last + self.min_interval - time.monotonic()
@@ -149,25 +173,28 @@ class Client:
                 time.sleep(wait)
             self.last = time.monotonic()
             self.n += 1
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
             try:
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    body = r.read()
-                    if r.headers.get("Content-Encoding") == "gzip":
-                        body = gzip.decompress(body)
+                c = self._conn(u.netloc)
+                c.request("GET", path, headers={"User-Agent": UA, "Accept-Encoding": "gzip",
+                                                "Connection": "keep-alive"})
+                r = c.getresponse()
+                body = r.read()
+                if r.getheader("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                if r.getheader("Connection", "").lower() == "close":
+                    self._drop()
+                if r.status < 400:
                     return r.status, body
-            except urllib.error.HTTPError as e:
-                if 400 <= e.code < 500 and e.code not in (408, 429):  # final (404, 410 "inputlog not found", ...)
-                    return e.code, e.read() or b""
-                retry_after = e.headers.get("Retry-After") if e.headers else None
-                wait = float(retry_after) if retry_after and retry_after.isdigit() else backoff
-                log(f"HTTP {e.code} on {url}; backing off {wait:.0f}s")
-            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                if r.status < 500 and r.status not in (408, 429):  # final (404, 410 "inputlog not found", ...)
+                    return r.status, body
+                ra = r.getheader("Retry-After")
+                wait = float(ra) if ra and ra.isdigit() else backoff
+                log(f"HTTP {r.status} on {url}; backing off {wait:.0f}s")
+            except (http.client.HTTPException, TimeoutError, ConnectionError, OSError) as e:
+                self._drop()
                 wait = backoff
                 log(f"network error {e!r} on {url}; backing off {wait:.0f}s")
-            t_end = time.monotonic() + wait
-            while time.monotonic() < t_end and not STOP:
-                time.sleep(1)
+            nap(wait)
             backoff = min(backoff * 2, 1800.0)
         return -1, b""
 
