@@ -5,6 +5,8 @@
         --builds SHOWDOWN/builds --out OUT [--workers 3] [--encoder porygon.encoder:embed_battle] [--min-rating 0]
     # our runs that logged every websocket message (search-label runs: <run>/{a,b}/streams + decisions.jsonl)
     python scripts/convert_replays.py runs RUN_DIR [...] --format gen9randombattle --out OUT
+    # old gen4 benchmark runs with --log-oracle (live v1 obs in decisions.jsonl, no requests): v1 shards only
+    python scripts/convert_replays.py logged-obs gloria/runs/search-20261103-* --format gen4randombattle --out OUT
 
 Outputs (formats: .orchestra/CONTRACTS.md "Data formats"):
   OUT/records/<format>/part-NNNNN.jsonl.gz   one JSON per (battle, side): the player's whole client message stream
@@ -41,6 +43,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from porygon import replay  # noqa: E402
+from porygon.encoder import OBS_DIM  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 RESIM = ROOT / "scripts" / "resim_inputlog.js"
@@ -295,6 +298,64 @@ def run_unit(battles: list[dict], gen: int, encoder, counts: Counter
         yield None, sides, None
 
 
+def logged_obs_battles(d: Path) -> Iterator[dict]:
+    """Old benchmark runs with `--log-oracle` (gloria runs/search-*-309116, -309120): their decisions.jsonl holds the
+    live v1 observation (`obs`, float16) next to mask, action and search shares, but no |request| was logged, so
+    these battles cannot be replayed into poke-env: v1 encoder only."""
+    by: dict[str, list[dict]] = {}
+    for line in open(d / "decisions.jsonl"):
+        r = json.loads(line)
+        if "obs" in r:
+            by.setdefault(r["battle"], []).append(r)
+    for line in open(d / "battles.jsonl"):
+        b = json.loads(line)
+        b["logged_obs"] = by.get(b["roomid"], [])
+        b["run"] = d.name
+        b["replay"] = d / "replays" / f"{b['roomid']}.log"
+        yield b
+
+
+class LoggedDecision:
+    """A decision rebuilt from a decisions.jsonl record (no battle object): what `encode_rows` reads."""
+
+    def __init__(self, r: dict):
+        import base64
+        self.obs = np.frombuffer(base64.b64decode(r["obs"]), dtype=np.float16)
+        self.mask = np.asarray(r["mask"], dtype=np.int8)
+        self.action = int(r["action"])
+        self.legal = bool(self.mask[self.action]) if 0 <= self.action < len(self.mask) else False
+        self.turn = int(r["turn"])
+        self.kind = "forced" if not self.mask[6:].any() and self.mask[:6].any() else "turn"
+        self.n_legal = int(self.mask.sum())
+        self.search = {k: r[k] for k in SEARCH_FIELDS if k in r}
+        self.choice, self.desc, self.retry = "logged", None, False
+
+
+def logged_obs_unit(battles: list[dict], gen: int) -> Iterator[tuple[dict | None, list[dict], str | None]]:
+    for b in battles:
+        if not b["logged_obs"]:
+            yield None, [], "logged-obs: no observations"
+            continue
+        player = b["logged_obs"][0]["player"]
+        side = "p1" if player == b["p1"] else "p2"
+        other = "p2" if side == "p1" else "p1"
+        winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
+        decs = [LoggedDecision(r) for r in b["logged_obs"]]
+        if len(decs[0].obs) != OBS_DIM:
+            yield None, [], "logged-obs: unexpected obs size"
+            continue
+        rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player, "rating": -1,
+               "opp_rating": -1, "result": result_of(winner, side), "end": "normal", "source": f"run:{b['run']}",
+               "view": "logged v1 obs, no requests (v1 encoder only; search with the PPO network prior)",
+               "team": true_team(b[f"{side}team"], gen), "true_team": true_team(b[f"{side}team"], gen),
+               "opp_team": true_team(b[f"{other}team"], gen), "stream": None,
+               "log": b["replay"].read_text() if b["replay"].exists() else None, "seed": replay.seed_of(b["roomid"]),
+               "decisions": [{"turn": d.turn, "kind": d.kind, "a": d.action, "n_legal": d.n_legal,
+                              "legal": d.legal, "mask": d.mask.tolist(), "search": d.search} for d in decs],
+               "_decisions": decs}
+        yield None, [rec], None
+
+
 # ---------------------------------------------------------------- units
 
 def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, list]:
@@ -353,8 +414,13 @@ def do_unit(job: tuple) -> dict:
     obs_dim = None
     t0 = time.time()
     try:
-        it = (human_unit(battles, Path(a["builds"]), gen, encoder, a["keep_inexact"], a["min_rating"])
-              if mode == "corpus" else run_unit(battles, gen, encoder, counts))
+        if mode == "corpus":
+            it = human_unit(battles, Path(a["builds"]), gen, encoder, a["keep_inexact"], a["min_rating"])
+        elif mode == "runs":
+            it = run_unit(battles, gen, encoder, counts)
+        else:
+            assert a["encoder"] == "porygon.encoder:embed_battle", "logged-obs runs hold v1 observations only"
+            it = logged_obs_unit(battles, gen)
         with gzip.open(rec_dir / f"part-{unit:05d}.jsonl.gz.tmp", "wt") as f:
             for i, (r, sides, err) in enumerate(it):
                 counts["battles"] += 1
@@ -392,7 +458,7 @@ def do_unit(job: tuple) -> dict:
             else:
                 arrays["obs"] = np.stack(obs).astype(np.float16)
             tmp = enc_dir / f"shard-{unit:05d}.tmp.npz"
-            np.savez_compressed(tmp, **arrays)
+            (np.savez if a.get("no_compress") else np.savez_compressed)(tmp, **arrays)
             os.replace(tmp, enc_dir / f"shard-{unit:05d}.npz")
     except Exception as e:
         counts[f"unit error: {type(e).__name__}"] += 1
@@ -417,7 +483,7 @@ def units(items: Iterator[dict], size: int, mode: str, a: dict, start: int = 0) 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["corpus", "runs"])
+    p.add_argument("mode", choices=["corpus", "runs", "logged-obs"])
     p.add_argument("inputs", nargs="+", type=Path)
     p.add_argument("--format", required=True)
     p.add_argument("--out", type=Path, required=True)
@@ -429,17 +495,19 @@ def main() -> None:
     p.add_argument("--start-unit", type=int, default=0, help="resume: skip the units before this one")
     p.add_argument("--min-rating", type=int, default=0)
     p.add_argument("--keep-inexact", action="store_true")
+    p.add_argument("--no-compress", action="store_true", help="write shards with np.savez (faster to load)")
     a = p.parse_args()
     gen = int(a.format[3])
     if int(os.environ.get("PORYGON_GEN", "4")) != gen:
         print(f"warning: PORYGON_GEN={os.environ.get('PORYGON_GEN', '4 (default)')} but format is gen{gen}",
               file=sys.stderr)
     args = {"format": a.format, "gen": gen, "encoder": a.encoder, "out": str(a.out), "builds": str(a.builds),
-            "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src}
+            "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src,
+            "no_compress": a.no_compress}
     if a.mode == "corpus":
         items = corpus_battles(a.inputs, a.format)
     else:
-        items = (b for d in a.inputs for b in run_battles(d))
+        items = (b for d in a.inputs for b in (run_battles(d) if a.mode == "runs" else logged_obs_battles(d)))
     total, sources, commits = Counter(), {}, Counter()
     obs_dim = n_actions = None
     t0 = time.time()
