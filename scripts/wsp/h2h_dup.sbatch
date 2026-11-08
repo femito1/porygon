@@ -1,7 +1,7 @@
 #!/bin/bash
 # Duplicate-pair raw-network head-to-heads: every MODEL A_i vs the reference B, one duplicate Showdown server
 # (gloria's .showdown-eval, run read-only, never rebuilt) and one pairing process per A_i, all in parallel.
-#   sbatch --partition=long -c 24 scripts/wsp/h2h_dup.sbatch N_BATTLES B A1 [A2 ...]
+#   sbatch --partition=long -c 24 scripts/wsp/h2h_dup.sbatch N_BATTLES B A1 [A2 ...]   (an arg A@B2 uses reference B2)
 # Output: $WSP/out/h2h/<job>/<name>/{battles.jsonl,log.txt}; summary.txt (duplicate-pair 95% CIs).
 #SBATCH --job-name=ws-wsp-h2h
 #SBATCH --cpus-per-task=24
@@ -17,8 +17,9 @@ BASE=$(( 30000 + (SLURM_JOB_ID % 1000) * 16 ))
 PS=$GLORIA/.showdown-eval
 find $GLORIA/.venv/lib/python3.12/site-packages/{websockets,poke_env,torch,stable_baselines3} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
 i=0; names=()
-for A in "$@"; do
-  name=$(basename "$(dirname "$A")")_$(basename "$A" | sed 's/\.\(zip\|pt\)$//'); name=${name#.}
+for AB in "$@"; do
+  A=${AB%@*}; RB=$B; [[ "$AB" == *@* ]] && RB=${AB#*@}
+  name=$(basename "$(dirname "$A")")_$(basename "$A" | sed 's/\.\(zip\|pt\)$//')_vs_$(basename "$RB" | sed 's/\.\(zip\|pt\)$//'); name=${name#.}
   mkdir -p "$OUT/$name"; names+=("$name")
   PORT=$(( BASE + i ))
   (cd "$PS" && PORYGON_DUPLICATE="wsp-$SLURM_JOB_ID-$i" PORYGON_DUPLICATE_LOG="$OUT/$name/battles.jsonl" \
@@ -42,10 +43,11 @@ PYEOF
 trap 'pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $BASE" || true; for ((j=0;j<i;j++)); do pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $((BASE+j))\$" || true; done' EXIT
 echo "h2h $N battles: B=$B vs $* (servers $BASE..$((BASE+i-1)))"
 j=0
-for A in "$@"; do
-  python scripts/wsp/h2h_dup.py "$A" "$B" --port $(( BASE + j )) --n-battles "$N" --out "$OUT/${names[$j]}" \
+for AB in "$@"; do
+  A=${AB%@*}; RB=$B; [[ "$AB" == *@* ]] && RB=${AB#*@}
+  python scripts/wsp/h2h_dup.py "$A" "$RB" --port $(( BASE + j )) --n-battles "$N" --out "$OUT/${names[$j]}" \
     > "$OUT/${names[$j]}/log.txt" 2>&1 &
   j=$(( j + 1 ))
 done
 wait
-for n in "${names[@]}"; do echo "== $n vs $B: $(python scripts/wsp/h2h_dup.py --score "$OUT/$n")"; done | tee "$OUT/summary.txt"
+for n in "${names[@]}"; do echo "== $n: $(python scripts/wsp/h2h_dup.py --score "$OUT/$n")"; done | tee "$OUT/summary.txt"
