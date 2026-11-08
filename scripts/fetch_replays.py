@@ -48,7 +48,8 @@ import urllib.request
 import zlib
 from datetime import datetime, timezone
 
-UA = "porygon-research (academic; contact via github femito1)"
+UA = "porygon-research-crawler/1.0 (Imperial College research; contact fr1226@ic.ac.uk)"
+HOST = __import__("socket").gethostname().split(".")[0]
 BASE = "https://replay.pokemonshowdown.com"
 DEFAULT_ROOT = os.path.expanduser("~/.cache/porygon-ws-data/raw/showdown-replays")
 CLUSTER = "gpucluster2"
@@ -320,7 +321,7 @@ class Crawler:
         hour = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
         d = os.path.join(self.st.root, kind, fmt)
         os.makedirs(d, exist_ok=True)
-        return os.path.join(d, f"{hour}.jsonl.gz")
+        return os.path.join(d, f"{hour}-{HOST}.jsonl.gz")  # host tag: shards from different machines never collide
 
     def flush(self, fmt: str | None = None):
         if fmt is None and self.qkey:
@@ -443,7 +444,7 @@ class Crawler:
                 fh.write(gzip.compress(data, 6))
                 fh.flush()
                 os.fsync(fh.fileno())
-            for r in recs:
+            for r in (recs if self.a.record_queue else []):
                 il = int(r["status"] == 200 and r["inputlog"].startswith(">"))
                 self.st.db.execute("INSERT OR REPLACE INTO replays VALUES (?,?,?,?,?,?,?)",
                                    (r["id"], fmt, r["fetched"], r["status"],
@@ -541,7 +542,7 @@ def sync_shards(root: str, cluster_dir: str) -> bool:
             if not os.path.isdir(src):
                 continue
             # closed shards (not this hour's): copy, then delete locally
-            r = subprocess.run(base + ["--remove-source-files", "--exclude", f"{hour}.jsonl.gz",
+            r = subprocess.run(base + ["--remove-source-files", "--exclude", f"{hour}*.jsonl.gz",
                                        src + "/", f"{CLUSTER}:{cluster_dir}/{kind}/"],
                                capture_output=True, timeout=3600)
             rc = rc or r.returncode
@@ -550,6 +551,16 @@ def sync_shards(root: str, cluster_dir: str) -> bool:
         idx = os.path.join(root, "search-rows.jsonl.gz")
         export_rows(root, idx)
         r2 = subprocess.run(base + [idx, f"{CLUSTER}:{cluster_dir}/"], capture_output=True, timeout=600)
+        # back up the crawl state (cursors, search rows) next to the shards, as state-<host>.sqlite
+        snap = os.path.join(root, f"state-{HOST}.sqlite")
+        src_db = sqlite3.connect(os.path.join(root, "state.sqlite"))
+        dst_db = sqlite3.connect(snap)
+        src_db.backup(dst_db)
+        dst_db.close()
+        src_db.close()
+        r3 = subprocess.run(base + [snap, f"{CLUSTER}:{cluster_dir}/"], capture_output=True, timeout=600)
+        os.remove(snap)
+        r2 = r2 if r2.returncode else r3
         ok = r1.returncode == 0 and r2.returncode == 0
         log(f"sync {'ok' if ok else 'FAILED'} (rsync rc {r1.returncode}/{r2.returncode})")
         return ok
@@ -1059,6 +1070,8 @@ def main() -> int:
                    help="per-format override of --min-prio, e.g. gen4randombattle=2")
     c.add_argument("--queue", help="gzip text file of id<TAB>format<TAB>prio (priority-sorted) whose "
                    ".inputlog to fetch; see the `queue` subcommand")
+    c.add_argument("--record-queue", action="store_true",
+                   help="also log every queue fetch in the state DB (grows ~100 B/fetch; off on the laptop)")
     c.add_argument("--queue-min-prio", type=int, default=0,
                    help="stop the queue at the first id below this band (2 = replay rating >= 1500)")
     c.add_argument("--queue-weight", type=int, default=2,
