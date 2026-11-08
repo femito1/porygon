@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 GEN=$1 CHUNKS=$2 N=$3; shift 3
 DATA=/vol/bitbucket/fr1226/porygon-ws-data
-export PATH=$ROOT/.node/bin:$PATH
+export PATH=$ROOT/.node/bin:$PATH PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH=$ROOT/src${PYTHONPATH:+:$PYTHONPATH}
 if [ "$GEN" = 9 ]; then export PORYGON_GEN=9 PYTHONPATH=$ROOT/.engine-gen9:$PYTHONPATH; fi
 OUT=$DATA/runs/searchlabels-gen$GEN-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT/teams"
