@@ -114,8 +114,12 @@ function commitTime(args, sha) {
   return t;
 }
 
+let BUILT = null, BUILT_AT = 0; // the shared disk is slow: list the builds once every 10 minutes
 function builtShas(builds) {
-  return fs.readdirSync(builds).filter(d => fs.existsSync(path.join(builds, d, "dist", "sim", "battle-stream.js")));
+  if (BUILT && Date.now() - BUILT_AT < 600e3) return BUILT;
+  BUILT = fs.readdirSync(builds).filter(d => fs.existsSync(path.join(builds, d, "dist", "sim", "battle-stream.js")));
+  BUILT_AT = Date.now();
+  return BUILT;
 }
 
 function pickSim(args, version) {
