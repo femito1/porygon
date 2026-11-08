@@ -1,0 +1,7 @@
+node scripts/fastenv/simspeed.js gen9randombattle 200
+$PY scripts/fastenv/bench_fastenv.py --format gen9randombattle --workers 1 --battles 64 --seconds 40 --async
+$PY scripts/fastenv/bench_fastenv.py --format gen9randombattle --workers 12 --battles 64 --seconds 40 --async
+$PY scripts/fastenv/bench_fastenv.py --format gen9randombattle --workers 23 --battles 64 --seconds 60 --async
+$PY scripts/fastenv/bench_fastenv.py --format gen4randombattle --workers 23 --battles 64 --seconds 60 --async
+$PY scripts/fastenv/bench_fastenv.py --format gen9randombattle --workers 22 --battles 64 --seconds 60 --async --policy init
+$PY scripts/fastenv/bench_fastenv.py --format gen4randombattle --workers 22 --battles 64 --seconds 60 --async --policy init
