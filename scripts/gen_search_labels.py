@@ -5,6 +5,9 @@ determinization assumed) plus their first-person replay logs, while the server l
 of a benchmark run (battles.jsonl, a/decisions.jsonl + a/replays/, b/...), so scripts/convert_replays.py turns it
 into encoder-agnostic game records and encoded shards (first-person mode, true teams) like any benchmark log;
 the policy target is the visit-share distribution, the value target the game result.
+Each side also writes the exact message stream it received live (`<side>/streams/<battle tag>.jsonl.gz`: one JSON
+list of '|'-split lines per websocket message, `|request|` included, in arrival order), so a converter can feed it
+to a fresh poke-env Battle and reproduce the live battle object exactly (porygon.replay).
 
 gen9 needs PORYGON_GEN=9 and the gen9 engine first on PYTHONPATH; MODEL "none" is pure engine search.
 
@@ -14,6 +17,8 @@ gen9 needs PORYGON_GEN=9 and the gen9 engine first on PYTHONPATH; MODEL "none" i
 
 import argparse
 import asyncio
+import gzip
+import json
 import logging
 import random
 import sys
@@ -28,6 +33,28 @@ from porygon import inference  # noqa: E402
 from porygon.decisions import LoggedSearchPlayer  # noqa: E402
 from porygon.env import local_server  # noqa: E402
 from porygon.search import CONFIG, add_value_args, load_model  # noqa: E402
+
+
+class StreamLoggedSearchPlayer(LoggedSearchPlayer):
+    """LoggedSearchPlayer that also keeps every raw battle message it receives, written when the battle ends."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        (self.out / "streams").mkdir(parents=True, exist_ok=True)
+        self.streams: dict[str, list[list[list[str]]]] = {}
+
+    async def _handle_battle_message(self, split_messages):
+        tag = split_messages[0][0].lstrip(">")
+        if tag.startswith("battle-"):
+            self.streams.setdefault(tag, []).append([list(m) for m in split_messages])
+        await super()._handle_battle_message(split_messages)
+
+    def _battle_finished_callback(self, battle) -> None:
+        super()._battle_finished_callback(battle)
+        msgs = self.streams.pop(battle.battle_tag, [])
+        with gzip.open(self.out / "streams" / f"{battle.battle_tag}.jsonl.gz", "wt") as f:
+            for m in msgs:
+                f.write(json.dumps(m) + "\n")
 
 
 async def main() -> None:
@@ -59,9 +86,9 @@ async def main() -> None:
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=a.concurrency, log_level=40)
     # the "sla" player is the duplicate group anchor (PORYGON_DUPLICATE_GROUP='^sla')
-    pa = LoggedSearchPlayer(policy, **cfg, workers=a.workers, out=a.out / "a",
+    pa = StreamLoggedSearchPlayer(policy, **cfg, workers=a.workers, out=a.out / "a",
                             account_configuration=AccountConfiguration(f"sla{tag}", None), **common)
-    pb = LoggedSearchPlayer(policy, **cfg, workers=a.workers, out=a.out / "b",
+    pb = StreamLoggedSearchPlayer(policy, **cfg, workers=a.workers, out=a.out / "b",
                             account_configuration=AccountConfiguration(f"slb{tag}", None), **common)
     guard_pool(pa.pool, a.search_timeout)  # one process-wide pool: guarding it once covers both players
     print(f"search labels: {cfg}, {a.chunks} x {a.n_battles} battles -> {a.out}", flush=True)
