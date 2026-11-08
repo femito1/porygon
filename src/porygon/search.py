@@ -690,6 +690,7 @@ class SearchPlayer(Player):
         self.stats = {"decisions": 0, "searched": 0, "fallbacks": 0, "agree": 0, "failed_samples": 0,
                       "value_failed": 0, "root_game_failed": 0}
         self.last_convs: dict[str, list[Converted]] = {}  # battle tag -> its last determinizations
+        self.last_values: dict[str, tuple[np.ndarray, float, float]] = {}  # tag -> (Q per action, root value, visits)
         assert oracle in (None, "revealed", "all") and (oracle is None or oracle_dir), "oracle needs oracle_dir"
         self.oracle, self.oracle_dir = oracle, oracle_dir
         self.truth: dict[str, list[dict[str, Any]] | None] = {}
@@ -728,7 +729,7 @@ class SearchPlayer(Player):
         value = (asyncio.create_task(asyncio.to_thread(self.lookahead.shares, battle, convs, probs, mask))
                  if self.lookahead else None)
         try:
-            mcts = await self.mcts_shares(convs, probs, mask) if w < 1 else None
+            mcts = await self.mcts_shares(convs, probs, mask, battle.battle_tag) if w < 1 else None
         except Exception:
             if value is None:
                 raise
@@ -757,8 +758,12 @@ class SearchPlayer(Player):
                 return None
         return self.truth[battle.battle_tag]
 
-    async def mcts_shares(self, convs: list[Converted], probs: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Mean MCTS visit share per action index, or with root_game the Bayesian root game's strategy."""
+    async def mcts_shares(self, convs: list[Converted], probs: np.ndarray, mask: np.ndarray,
+                          tag: str | None = None) -> np.ndarray:
+        """Mean MCTS visit share per action index, or with root_game the Bayesian root game's strategy. With `tag`
+        (visit-share path only) the search's values are kept in `last_values[tag]`: mean over samples of each action's
+        Q = total_score / visits (NaN where no sample visited it), of the root value sum(total_score) / sum(visits)
+        (side one = us, in [0, 1]) and of the root visit count."""
         priors = (lambda c: c.priors(probs, mask)) if self.c_puct > 0 else (lambda c: None)
         kw = {"rm_gamma": self.rm_gamma} if self.rm_gamma > 0 else {}
         kw |= {"eval_config": self.eval_config} if self.eval_config is not None else {}
@@ -776,15 +781,29 @@ class SearchPlayer(Player):
                         else self.pool.search(c.state_str, self.ms) for c in convs]
             results = await asyncio.gather(*searches, return_exceptions=True)
         shares, ok, errors = np.zeros(N_ACTIONS), 0, []
+        q_sum, q_n, roots, visits = np.zeros(N_ACTIONS), np.zeros(N_ACTIONS), [], []
         for conv, options in zip(convs, results):  # a failed sample (engine panic) is just skipped
             try:
                 shares += self._sample_shares(conv, options)
                 ok += 1
             except Exception as e:
                 errors.append(e)
+                continue
+            n = sum(v for _, v, _ in options)
+            if n:
+                roots.append(sum(t for _, _, t in options) / n)
+                visits.append(n)
+            for choice, v, t in options:
+                if v and choice != "No Move":
+                    a = conv.action(choice)
+                    q_sum[a] += t / v
+                    q_n[a] += 1
         self.stats["failed_samples"] += len(errors)
         if not ok:
             raise errors[0]
+        if tag is not None and roots:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                self.last_values[tag] = (q_sum / q_n, float(np.mean(roots)), float(np.mean(visits)))
         return shares / ok
 
     @staticmethod
@@ -859,6 +878,7 @@ class SearchPlayer(Player):
     def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         self.weather_seen.pop(battle.battle_tag, None)
         self.last_convs.pop(battle.battle_tag, None)
+        self.last_values.pop(battle.battle_tag, None)
         self.last_action.pop(battle.battle_tag, None)
         self.truth.pop(battle.battle_tag, None)
 

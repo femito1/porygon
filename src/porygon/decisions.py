@@ -1,7 +1,8 @@
 """Benchmark recording for diagnosis (`scripts/analyze_benchmark.py`).
 
 `LoggedSearchPlayer` writes one JSON line per searched decision to `<out>/decisions.jsonl`: the network's
-probabilities, the search shares, the action played, the network's value of the position (V + Φ, as in
+probabilities, the search shares and its own values (`q` per action, `root_value`, `visits`), the action played,
+the network's value of the position (V + Φ, as in
 `porygon.lookahead`), and what each determinization assumed about the opponent's team next to what was
 revealed. Every finished battle's protocol log goes to `<out>/replays/<battle tag>.log`. With the duplicate
 server (`scripts/build_eval_server.sh`) the true teams are in its log, so the samples can be scored.
@@ -16,6 +17,7 @@ import base64
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import poke_engine as pe
@@ -41,6 +43,15 @@ def revealed(battle: Battle) -> list[dict]:
              "moves": list(m.moves), "active": m.active} for m in battle.opponent_team.values()]
 
 
+def search_values(sv: tuple[np.ndarray, float, float] | None) -> dict[str, Any]:
+    """The search's own values for a decision record: `q` per action index (mean over samples of total_score /
+    visits, our win expectation in [0, 1]; null where unvisited), `root_value` (same scale) and `visits` (mean root
+    visits per sample, a confidence weight). Empty without them (root_game, value lookahead only)."""
+    if sv is None:
+        return {}
+    q, root, visits = sv
+    return {"q": [None if np.isnan(x) else round(float(x), 4) for x in q], "root_value": round(root, 4),
+            "visits": round(visits)}
 class LoggedSearchPlayer(SearchPlayer):
     def __init__(self, *args, out: str | Path, log_oracle: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
@@ -52,6 +63,7 @@ class LoggedSearchPlayer(SearchPlayer):
 
     def on_decision(self, battle: Battle, probs: np.ndarray, mask: np.ndarray, shares: np.ndarray) -> None:
         convs = self.last_convs.pop(battle.battle_tag, [])
+        sv = self.last_values.pop(battle.battle_tag, None)
         x, value, phi = None, None, 0.0
         if self.policy is not None:  # pure engine search (gen9): no network value
             x = embed_battle(battle)
@@ -63,7 +75,8 @@ class LoggedSearchPlayer(SearchPlayer):
         rec = {"battle": battle.battle_tag, "turn": battle.turn, "player": self.username,
                "action": self.last_action[battle.battle_tag], "mask": mask.astype(int).tolist(),
                "probs": np.round(probs, 4).tolist(), "shares": np.round(shares, 4).tolist(),
-               "value": None if value is None else round(value + phi, 4), "revealed": revealed(battle),
+               "value": None if value is None else round(value + phi, 4), **search_values(sv),
+               "revealed": revealed(battle),
                "samples": [opponent_samples(c.state_str) for c in convs]}
         if self.log_oracle:
             if x is not None:  # the network's observation (none without a network)
