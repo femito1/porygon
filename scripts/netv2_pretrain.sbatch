@@ -20,5 +20,5 @@ for arm in "$@"; do
   [ -f "$OUT/final.pt" ] && { echo "skip $OUT (done)"; continue; }
   echo "== $OUT  cfg=$cfg"
   $PY -u -m porygon.v2.pretrain --shards "$SHARDS" --gen "$GEN" --out "$OUT" --model-json "$cfg" --seed "$seed" \
-    ${PRETRAIN_ARGS:-} 2>&1 | grep -vE '"event": "train"' | tail -n 40
+    ${PRETRAIN_ARGS:---epochs 6 --val-frac 0.06} 2>&1 | grep -vE '"event": "train"' | tail -n 40
 done
