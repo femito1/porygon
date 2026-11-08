@@ -1,84 +1,90 @@
-"""Batched damage / speed features for model v2 (owner: netv2). A parameter-free `nn.Module` that turns a batch of
-v2 observations (porygon.v2.spec, dict of tensors with a leading batch dim) into damage and speed-order features,
-vectorised over the batch (GPU-friendly; no Python loop over B).
+"""Batched damage / speed features for model v2 (owner: netv2). A parameter-free `nn.Module` (buffers only, all
+non-persistent) that turns a batch of v2 observations (porygon.v2.spec; dict of tensors with a leading batch dim,
+integer fields of any integer dtype, floats float32) into damage and speed-order features. Fully vectorised: a fixed
+~650 aten ops per call whatever B (no Python loop over B, mons, moves, items or abilities).
 
-    feats = DamageFeatures(gen)(obs)
+    feats = DamageFeatures(gen)(obs)        # gen 4 or 9; DamageFeatures(gen, trim=False) for static shapes
     feats["move_vs"]         [B, 12, 24, 6, 4]  attacker mon i, its move slot j, vs mon k of the OTHER side
                                                 (i < 6: defenders 6..11; i >= 6: defenders 0..5)
                              (0) expected damage / defender max HP (mean of the 16 rolls, no crit, accuracy not
                                  applied; clipped to [0, 4]), (1) expected damage / defender current HP (clip [0, 2]),
                              (2) P(KO now) = share of rolls >= current HP, (3) = (0) x accuracy
     feats["active_tera_vs"]  [B, 4, 6, 4]       our active mon's move slots 0-3 vs the 6 opponent mons as if it had
-                                                terastallized (to `tera`) first; gen 4: zeros
+                                                terastallized (to `tera`) first; zeros in gen 4 or without an active
     feats["speed"]           [B, 12, 6]         P(mon i moves before mon k of the other side at equal priority)
     feats["pair"]            [B, 12, 12, 3]     opposite-side pairs (i, k): (0) i's best move vs k (feature 0, over
                                                 move slots with move_p >= 0.5 or known), (1) the same from k to i,
                                                 (2) speed[i before k]; zero for same-side pairs / absent mons
-Every feature is zero for status moves, empty / unknown move slots and absent or fainted mons on either side.
-Integer fields may be any integer dtype (cast with .long() here); floats float32.
+Exact zeros for status moves, empty / unknown move slots and absent or fainted mons on either side; immune pairs
+(type chart, Levitate, ...) get ~1e-13 rather than an exact 0 (log-space tables, see NEG).
+`trim=True` (default) computes only the move slots used anywhere in the batch (real observations use <= 10 of the
+24) and pads the rest with zeros; it reads that count with one host sync. Use trim=False for CUDA graphs / compile.
 
-Model (gen-correct for gens 4 and 9; float arithmetic, no intermediate floors):
+Damage model (gen-correct for gens 4 and 9; float arithmetic, no intermediate floors):
     damage = ((2L/5 + 2) * BP * A / D / 50 + 2) * modifiers * roll, roll uniform over 0.85..1.00
-- A, D: raw stats x boost stages (Unaware on the other side as an expectation, Mold Breaker ignores it),
-  ability / item stat multipliers (Huge/Pure Power, Hustle, Gorilla Tactics, Guts incl. burn immunity, Defeatist,
-  Toxic/Flare Boost, Solar Power, Slow Start, Protosynthesis / Quark Drive on the highest raw stat when sun /
-  electric terrain or Booster Energy may be active; Choice Band / Specs, Muscle Band, Wise Glasses, Light Ball,
-  Thick Club, gen-4 Soul Dew; Eviolite on NFE species, Assault Vest (gen >= 6), Fur Coat, Marvel Scale), burn,
-  snow (Ice Def, gen 9) and sand (Rock SpD), Body Press (Def), Foul Play (target's Atk), Psyshock / Psystrike /
-  Secret Sword (Def), Tera Blast / Photon Geyser / Shell Side Arm category from the higher attack;
-  Reflect / Light Screen / Aurora Veil x0.5 (Infiltrator, gen >= 5, ignores them).
-- BP: table power, and the variable-power moves eruption/water spout/dragon energy (user HP), flail/reversal,
-  gyro ball, electro ball, low kick/grass knot, heavy slam/heat crash (weights), stored power/power trip,
-  punishment, weather ball (power and type), tera blast (type, category, stellar 100), acrobatics (no item),
-  facade, hex/infernal parade/bitter malice, venoshock/barb barrage, brine, knock off (x1.5 if the target may hold
-  an item, gen >= 6), crush grip/wring out/hard press, last respects (fainted allies), wake-up slap,
-  smelling salts, judgment/revelation dance/multi-attack (user's primary type), ivy cudgel/raging bull (user's
-  secondary type), psyblade (electric terrain), solar beam/blade (weakened in rain/sand/hail/snow),
-  return/frustration 102, gen-4 hidden power 70, gen-4 Explosion/Self-Destruct x2 (Defence halving),
-  tera-type moves below 60 BP raised to 60; multi-hit expected hits (2-5: 3.0 gen 4, 3.1 later; Skill Link /
-  Loaded Dice; triple axel/triple kick/population bomb per-hit accuracy), Technician on the final BP.
-- modifiers: STAB 1.5 / Adaptability 2 / gen-9 tera rules (tera type STAB, original types kept, 2x / 2.25x when
-  they coincide, stellar 2x on original types and 1.2x otherwise); type chart of the generation with the
-  defender's tera type (not stellar), Scrappy / Mind's Eye, Freeze-Dry, Magnet Rise; weather (sun / rain,
-  desolate land / primordial sea cancel water / fire), terrains for grounded mons (x1.3 gen >= 8, x1.5 gen 6-7;
-  misty halves dragon); Life Orb, Expert Belt, type-boosting items / plates / incenses, legendary orbs / cores /
-  masks, gen-9 Soul Dew, Punching Glove; -ate abilities (as a mixture over the attacker's ability candidates),
-  pinch abilities (Blaze ...), Steelworker / Transistor / Dragon's Maw / Rocky Payload / Water Bubble, Sand Force,
-  Iron Fist, Tough Claws, Strong Jaw, Sharpness, Mega Launcher, Reckless, Punk Rock, Sheer Force, Tinted Lens,
-  Flash Fire / Charge volatiles; defender Thick Fat, Heatproof, Dry Skin, Fluffy, Water Bubble, Purifying Salt,
-  Ice Scales, Punk Rock, Multiscale / Shadow Shield (full HP), Filter / Solid Rock / Prism Armor, type-resist
-  berries, Glaive Rush; will-crit moves (x1.5 gen >= 6, x2 gen <= 5).
-- immunities (as probabilities): type chart, Levitate / Earth Eater / Flash Fire / Well-Baked Body / Water Absorb /
-  Dry Skin / Storm Drain / Volt Absorb / Lightning Rod / Motor Drive / Sap Sipper (the gen-4 redirect abilities
-  grant none), Wonder Guard, Bulletproof, Soundproof, Wind Rider, an intact Disguise, Air Balloon, harsh sun /
-  heavy rain. Mold Breaker / Teravolt / Turboblaze / Mycelium Might ignore defender abilities.
-- fixed damage: seismic toss / night shade (level), super fang / ruination / nature's madness (half current HP),
-  sonic boom / dragon rage, endeavor, final gambit, psywave (level on average), OHKO moves (current HP; Sturdy).
+- A, D: raw stats x boost stages (Unaware on the other side mixes in the unboosted stat; Mold Breaker ignores it),
+  Huge / Pure Power, Hustle, Gorilla Tactics, Guts (incl. burn), Defeatist, Toxic / Flare Boost, Solar Power,
+  Slow Start, the Ruin abilities (as the holder's own x4/3), Protosynthesis / Quark Drive (highest raw stat, active
+  when sun / electric terrain or Booster Energy may be active), Choice Band / Specs, Muscle Band, Wise Glasses,
+  Light Ball, Thick Club, gen-4 Soul Dew, Eviolite (NFE species), Assault Vest (gen >= 6), Fur Coat, Marvel
+  Scale, burn, snow (Ice Def, gen 9), sand (Rock SpD); Body Press (Def), Foul Play (target's Atk), Psyshock /
+  Psystrike / Secret Sword (Def); Tera Blast (if terastallized) / Photon Geyser / Shell Side Arm take the
+  category of the higher attack; Reflect / Light Screen / Aurora Veil x0.5 (Infiltrator, gen >= 5, ignores them).
+- BP: table power, and eruption / water spout / dragon energy (user HP), flail / reversal, stored power / power
+  trip, last respects, acrobatics (no item), facade, weather ball (power and type), psyblade, solar beam / blade,
+  tera blast (type, stellar 100), heavy slam / heat crash and low kick / grass knot (weights), hex / infernal
+  parade / bitter malice, knock off (x1.5 if the target may hold an item, gen >= 6), poltergeist (fails without
+  one), judgment / revelation dance / multi-attack (user's primary type, revelation dance: tera type), ivy cudgel
+  / raging bull (user's secondary type), return / frustration 102, gen-4 hidden power 70, gen-4 Explosion /
+  Self-Destruct x2 (Defence halving), tera-type moves below 60 BP raised to 60; multi-hit expected hits (2-5:
+  3.0 in gen 4, 3.1 later; Skill Link, Loaded Dice; triple axel / triple kick / population bomb with per-hit
+  accuracy), Technician (on the table BP).
+- modifiers: STAB 1.5 / Adaptability 2, gen-9 tera rules (tera-type STAB, original types kept, 2x / 2.25x when
+  they coincide, stellar 2x on original types and 1.2x otherwise); the generation's type chart against the
+  defender's tera type (not stellar), stellar moves 2x vs terastallized mons, Scrappy / Mind's Eye, Freeze-Dry,
+  Magnet Rise; sun / rain (desolate land / primordial sea cancel water / fire); terrains for grounded mons (x1.3
+  gen >= 8, x1.5 gen 6-7; misty halves dragon); Life Orb, Expert Belt, type-boosting items / plates / incenses,
+  legendary orbs / cores, Ogerpon masks, gen-9 Soul Dew, Punching Glove; -ate abilities (applied when more
+  likely than not), pinch abilities (Blaze ...), Steelworker / Transistor / Dragon's Maw / Rocky Payload /
+  Water Bubble, Sand Force, Supreme Overlord, Iron Fist, Tough Claws, Strong Jaw, Sharpness, Mega Launcher,
+  Reckless, Punk Rock, Sheer Force, Tinted Lens; Flash Fire / Charge volatiles; defender Thick Fat, Heatproof,
+  Dry Skin, Fluffy, Water Bubble, Purifying Salt, Ice Scales, Punk Rock, Multiscale / Shadow Shield (full HP),
+  Filter / Solid Rock / Prism Armor, type-resist berries, Glaive Rush; will-crit moves (x1.5 gen >= 6).
+- immunities (probabilities): type chart, Levitate, Earth Eater, Flash Fire, Well-Baked Body, Water Absorb, Dry
+  Skin, Storm Drain / Lightning Rod (gen >= 5), Volt Absorb, Motor Drive, Sap Sipper, Wonder Guard, Bulletproof,
+  Soundproof, Wind Rider, an intact Disguise, Air Balloon, harsh sun / heavy rain. Mold Breaker / Teravolt /
+  Turboblaze / Mycelium Might ignore defender abilities.
+- fixed damage: seismic toss / night shade / psywave (level), super fang / ruination / nature's madness (half
+  current HP), sonic boom / dragon rage, endeavor, OHKO moves (current HP; Sturdy blocks).
 - P(KO): Focus Sash / Focus Band / Sturdy (gen >= 5) at full HP stop single-hit KOs.
-- accuracy: move accuracy with accuracy / evasion stages, thunder / hurricane / blizzard in weather, No Guard,
-  Compound Eyes, Hustle, Wide Lens / Zoom Lens (x1.1).
-- speed: raw Spe x stage x paralysis (x0.25 gen <= 6, x0.5 gen >= 7; Quick Feet cancels it and gives x1.5 when
-  statused), Choice Scarf / Iron Ball, tailwind (x2), Swift Swim / Chlorophyll / Sand Rush / Slush Rush /
-  Surge Surfer (x2 in their weather / terrain), Unburden (known no item), Protosynthesis / Quark Drive (Spe x1.5),
-  Slow Start; trick room reverses the order; ties count 0.5. Item and ability uncertainty is integrated exactly
-  over the per-mon distribution of speed multipliers.
+- accuracy: move accuracy x accuracy / evasion stages, thunder / hurricane / blizzard in weather, No Guard (either
+  side), Compound Eyes, Hustle, Wide Lens / Zoom Lens (x1.1); OHKO 30%.
+- speed: raw Spe x stage x Protosynthesis / Quark Drive / Slow Start x paralysis (x0.25 gen <= 6, x0.5 gen >= 7)
+  x tailwind (x2), with 2 ability bins (plain; Swift Swim / Chlorophyll / Sand Rush / Slush Rush / Surge Surfer
+  x2 in their weather / terrain, Unburden x2 with no item, or Quick Feet: x1.5 if statused, no paralysis drop)
+  x 2 item bins (none; Choice Scarf x1.5 or Iron Ball x0.5); trick room reverses; ties 0.5. The bins' probabilities
+  come from the candidate distributions and are integrated exactly over both mons.
 
-Uncertain opponent sets: every item / ability effect is an expectation over the candidate distributions
-(`item`/`item_p`, `ability`/`ability_p`), treating attacker item, attacker ability, defender item and defender
-ability as independent. The mean damage is then exact for independent candidates; P(KO) uses the expected
-multiplier (given no immunity) times P(no immunity), i.e. it ignores the spread the uncertainty adds.
-The opponent's stats are the posterior expectation in the observation, used as if exact.
+Uncertain opponent sets: item / ability effects are expectations over the candidate distributions (`item`/
+`item_p`, `ability`/`ability_p`), attacker item, attacker ability, defender item and defender ability taken as
+independent; most factors are exact expectations, the few that couple attacker and defender (Mold Breaker vs
+defender abilities, Expert Belt / Tinted Lens vs effectiveness, Scrappy, the move-flag ability factors) are
+geometric (exact when the probability is 0 or 1). P(KO) uses the expected multiplier given no immunity times
+P(no immunity), i.e. ignores the extra spread from the uncertainty. The opponent's stats are the posterior
+expectation in the observation, used as if exact.
 
-Ignored (rare or needing information the observation lacks): crits (other than will-crit moves), spread moves,
-abilities Analytic, Stakeout, Supreme Overlord, Parental Bond, Normalize, Liquid Voice, the Ruin abilities,
-Orichalcum Pulse / Hadron Engine, Flower Gift, Rivalry, Plus / Minus, Battery / Power Spot, Tera Shell, Ice Face,
-Cloud Nine / Air Lock; items Metronome, gems, Utility Umbrella; Payback / Avalanche / Revenge / Assurance /
-Pursuit / Bolt Beak / Fishious Rend doubling (order-dependent), collision course / electro drift SE boost,
-rage fist hit counts, stomping tantrum / temper flare / lash out conditions, expanding force / rising voltage /
-grav apple / misty explosion, beat up, magnitude / present / natural gift / fling / spit up (fixed averages),
-counter / mirror coat / metal burst / comeuppance (zero), substitute, roost type loss, smack down, the
-remaining terrain effects (grassy halving earthquake), Ability Shield, illusion, transform details, the
-facade burn exemption, damage floors / rounding between steps (expect ~1-2% of max HP noise).
+Not modelled (rare in random battles or needing information the observation lacks): crits other than will-crit
+moves, spread moves; Analytic, Stakeout, Parental Bond, Normalize, Liquid Voice, Orichalcum Pulse / Hadron
+Engine, Flower Gift, Rivalry, Plus / Minus, Battery / Power Spot, Tera Shell, Ice Face, Cloud Nine / Air Lock,
+Protean / Libero (the observed types are used); Metronome (item), gems, Utility Umbrella, Ability Shield;
+order-dependent doubling (payback, avalanche, revenge, assurance, pursuit, bolt beak, fishious rend),
+collision course / electro drift SE boost, rage fist hits, stomping tantrum / temper flare / lash out, expanding
+force, rising voltage, grav apple, beat up, magnitude / present / natural gift / fling / spit up (fixed averages);
+gyro ball / electro ball / crush grip / wring out / hard press / punishment / venoshock / brine / wake-up slap /
+smelling salts use a fixed power (they do not occur in the gen-4 / gen-9 random-battle sets); counter / mirror
+coat / metal burst / comeuppance / bide / final gambit (no damage); Technician on variable-power moves;
+substitute, roost type loss, smack down, grassy terrain halving earthquake, illusion, the facade burn exemption,
+damage floors between steps (~1% of max HP).
 """
 
 import math
@@ -124,7 +130,7 @@ AB1 = ["adaptability", "technician", "skilllink", "moldbreaker", "scrappy", "inf
        "windrider", "levitate", "sandforce", "supremeoverlord"]
 A1 = {n: i for i, n in enumerate(AB1)}
 O_ATTRB, O_ATE, O_TB, O_PINCH, O_DT, O_IMM = (len(AB1) + k for k in (0, 10, 30, 50, 70, 90))
-N_AB1 = len(AB1) + 110  # + attr boosts (10), ate (20), type boost dev (20), pinch (20), defensive type dev (20), immunity (20)
+N_AB1 = len(AB1) + 110  # + move-flag boosts (10), ate, type boost, pinch, defensive type dev, immunity (20 each)
 CTX = ["one", "statused", "brn", "psn", "hph", "sun", "rain", "sand", "hail", "eterr", "noitem"]
 CX = {n: i for i, n in enumerate(CTX)}
 AB2 = ["atk", "def", "spa", "spd", "dbl", "proto_cond"]  # stat-multiplier deviations, P(speed doubled), P(proto cond)
@@ -239,7 +245,8 @@ def _item_table(gen: int) -> np.ndarray:
     return t
 
 
-MPACK = ["category", "type", "tfid", "cfid", "pfid", "tcol_ovr", "row", "pkcls", "acc", "acc_kind", "isfx", "nf", "valid",
+MPACK = ["category", "type", "tfid", "cfid", "pfid", "tcol_ovr", "row", "pkcls", "acc", "acc_kind", "isfx", "nf",
+         "valid",
          "roll", "lo", "inv", "tera60",
          # columns of the additive log factor (dotted with per-attacker weights, porygon.v2.damage._calc)
          "lbp", "lconst", "lh", "lsl", "lld", "tech_ok", "ate_ok",
@@ -353,7 +360,6 @@ class DamageFeatures(nn.Module):
         self.n_rows = 5 + J + 5
         buf("combo_r", np.array([c - 1 for _, c in combos], np.int64))
         buf("combo_dk", np.array([DK_COL[k] for k, _ in combos], np.int64))
-        buf("combo_abs", np.array([float(k in DK_ABS) for k, _ in combos], np.float32))
         sp = T.species_raw(gen)
         buf("s_tab", np.stack([sp["nfe"], sp["disguise"]], 1))
         t1, t2 = _ability_tables(gen)
@@ -439,7 +445,6 @@ class DamageFeatures(nn.Module):
         buf("e_ground", oh(t_["ground"]))
         buf("e_dragon", oh(t_["dragon"]))
         buf("e_normal", oh(t_["normal"]))
-        buf("e_invalid", oh(INVALID_T))
         buf("e_stellar20", oh(t_["stellar"], 20))
         buf("e_ground20", oh(t_["ground"], 20))
         buf("e_ice_fd", np.stack([oh(t_["ice"], 20), oh(t_["ice"], 20)], 1))  # [20, 2]: ice column -> freeze-dry
@@ -448,23 +453,16 @@ class DamageFeatures(nn.Module):
         buf("no_typeless", no0)
         buf("e_punch", oh(2, N_ATTR))
         buf("proto_v", np.array([0.3, 0.3, 0.3, 0.3, 0.5], np.float32))
-        buf("bspe_v", np.array([1.0, 1.5, 0.5], np.float32))
         buf("brn_v", np.array([-0.5, 0, 0, 0, 0], np.float32))
         buf("evio_v", np.array([0, 0.5, 0, 0.5, 0], np.float32))
         buf("snow_v", np.array([0, 0.5, 0, 0, 0], np.float32))
         buf("sand_v", np.array([0, 0, 0, 0.5, 0], np.float32))
         buf("ss_v", np.array([0.5, 0, 0, 0, 0.5], np.float32))
+        buf("fin_i", np.array([MP[k] - L0 for k in ("lconst", "lh", "lsl", "lld", "ate_ok")], np.int64))
         buf("num_i", np.array([0, 2, 2, 1, 0], np.int64))  # aux rows 0-4: attacking stat (atk def spa ...)
         buf("den_i", np.array([1, 3, 1, 1, 1], np.int64))  # defending stat
         buf("mcat_i", np.array([0, 1, 1, 0, 0], np.int64))  # screen / ice scales factor: phys 0, spec 1
         self.par_mult = 0.5 if gen >= 7 else 0.25
-        buf("idx_a", np.array(list(range(6)) + [12] + list(range(6, 12)) + [12], np.int64))
-        buf("idx_d", np.array(list(range(6, 12)) + list(range(6)), np.int64))
-        alive_a = np.ones(14, np.float32)
-        alive_a[13] = 0.0
-        if gen < 9:
-            alive_a[6] = 0.0
-        buf("mask_a", alive_a)
         buf("opp_i", np.array(list(range(6, 12)) + list(range(6)), np.int64))
 
     # ------------------------------------------------------------------------------------------ forward
@@ -482,7 +480,7 @@ class DamageFeatures(nn.Module):
         # ================= per mon [B, 12, ...]
         cs = COL["status_brn"]
         stt = mn[..., cs:cs + 6]  # brn frz par psn slp tox
-        brn, par, slp = stt[..., 0], stt[..., 2], stt[..., 4]
+        brn, par = stt[..., 0], stt[..., 2]
         psn = stt[..., 3] + stt[..., 5]
         statused = stt.sum(-1).clamp_(max=1)
         hpx = obs["hp"].float()
@@ -493,7 +491,8 @@ class DamageFeatures(nn.Module):
         Yi = Fn.embedding_bag(obs["item"].long().view(-1, ki), self.i_tab,
                               per_sample_weights=obs["item_p"].float().reshape(-1, ki), mode="sum").view(B, N_MONS, -1)
         Ya = Fn.embedding_bag(obs["ability"].long().view(-1, ka), self.a_tab,
-                              per_sample_weights=obs["ability_p"].float().reshape(-1, ka), mode="sum").view(B, N_MONS, -1)
+                              per_sample_weights=obs["ability_p"].float().reshape(-1, ka),
+                              mode="sum").view(B, N_MONS, -1)
         p_noitem = Yi[..., I1["noitem"]]
         fld = Fv[:, [FC["sun"], FC["rain"], FC["sand"], FC["hail"], FC["eterr"]]][:, None].expand(B, N_MONS, 5)
         ctx = torch.cat([torch.stack([torch.ones_like(hp), statused, brn, psn, (hpr <= 0.5).float()], -1), fld,
@@ -516,7 +515,8 @@ class DamageFeatures(nn.Module):
         it5 = it5.add_(1).add_((it("eviolite") * Ys[..., 0])[..., None] * self.evio_v)
         fl5 = 1 + (fcol("snow")[:, None] * t1h[..., t_["ice"]])[..., None] * self.snow_v \
             + (fcol("sand")[:, None] * t1h[..., t_["rock"]])[..., None] * self.sand_v
-        M5 = ab5 * it5 * fl5 * (1 - eff["slowstart"][..., None] * self.ss_v) * (1 + active[..., None] * best * self.proto_v)
+        M5 = ab5 * it5 * fl5 * (1 - eff["slowstart"][..., None] * self.ss_v) \
+            * (1 + active[..., None] * best * self.proto_v)
         bo = obs["boosts"].float().clamp(-6, 6)
         bm5 = self.stage_tab[(bo[..., :5] + 6).long()]
         # speed bins: ability (none / doubled / quick feet) x item (none / scarf / iron ball)
@@ -543,7 +543,7 @@ class DamageFeatures(nn.Module):
             + (ab("sandforce") * fcol("sand")[:, None])[..., None] * self.v_sandforce
         escal = torch.stack([eff["flashfire"], eff["charge"], grounded * fcol("eterr")[:, None],
                              grounded * fcol("gterr")[:, None], grounded * fcol("pterr")[:, None]], -1)
-        latt = _log(1 + fn @ self.f_Wv)[:, None] + torch.log1p(ab_tv) + torch.log1p(Yi[..., O_ITB:O_ITB + 20]) \
+        latt = torch.log1p(ab_tv) + torch.log1p(Yi[..., O_ITB:O_ITB + 20]) \
             + escal @ self.e_logv
         attrb = Ya[..., O_ATTRB:O_ATTRB + N_ATTR] + it("punchingglove")[..., None] * self.e_punch
         ate_v = Ya[..., O_ATE:O_ATE + 20]
@@ -566,7 +566,8 @@ class DamageFeatures(nn.Module):
             "acc_mult": sc((1 + 0.3 * ab("compoundeyes")) * (1 + it("accuracy"))), "stab_item": sc(it("stab_item")),
         }
         pd_ = {  # defender fields
-            "alive": sc(alive), "hp": sc(hp), "maxhp": sc(maxhp), "full": sc((mn[..., COL["hp_frac"]] >= 0.999).float()),
+            "alive": sc(alive), "hp": sc(hp), "maxhp": sc(maxhp),
+            "full": sc((mn[..., COL["hp_frac"]] >= 0.999).float()),
             "S5": S5, "bm5": bm5, "atk_raw": st5[..., :1], "eva_st": sc(bo[..., 6]), "types": typesf, "tera_flag": tf_,
             "tera_t": tt_, "weight": sc(weight), "ab1": ab1, "grounded": sc(grounded), "sash": sc(it("focussash")),
             "balloon": sc(it("airballoon") * (1 - fcol("gravity")[:, None])), "glaive": sc(eff["glaiverush"]),
@@ -603,7 +604,7 @@ class DamageFeatures(nn.Module):
         mvA, mtA = A[..., k0:k0 + nm].long(), A[..., k0 + nm:]
         accw = (self.acc_c + fn @ self.f_Wacc).view(B, 3, 2)
         f4 = self._calc(A, D, mvA, mtA, offA, offD, Fv, fn @ self.f_wb + t_["normal"],
-                         obs["side_num"].float()[:, [1, 0], :3], accw)  # [B,2,7,nm,6,4]
+                         obs["side_num"].float()[:, [1, 0], :3], accw, _log(1 + fn @ self.f_Wv))
         # f4: 4 x [B,G,ND,NA,nm] -> move_vs [B,12,24,6,4] (zero-padded slots), tera_vs [B,4,6,4]
         move_vs = torch.zeros(B, 2, 6, KM, 6, N_MOVE_VS, device=dev)
         tera_vs = torch.zeros(B, 4, 6, N_MOVE_VS, device=dev)
@@ -616,14 +617,14 @@ class DamageFeatures(nn.Module):
         vk = spe_v[:, self.opp_i].view(B, 2, 1, 6, 4)
         pk = spe_p[:, self.opp_i].view(B, 2, 6, 4)
         sgn = torch.sign(spe_v.view(B, 2, 6, 1, 4, 1) - vk[..., None, :])  # [B,2,6,6,4,4]
-        e = torch.einsum("bgic,bgikcd,bgkd->bgik", spe_p.view(B, 2, 6, 4), sgn, pk)
+        e = ((sgn * spe_p.view(B, 2, 6, 1, 4, 1)).sum(-2) * pk[:, :, None]).sum(-1)
         ao = alive[:, self.opp_i].view(B, 2, 1, 6)
         speed = (0.5 + 0.5 * (1 - 2 * fcol("tr")).view(B, 1, 1, 1) * e) * alive.view(B, 2, 6, 1) * ao
         speed = speed.reshape(B, N_MONS, 6)
 
         # pair [B,12,12,3]
         usable = ((obs["move_num"][..., 0] > 0) | (obs["move_p"] >= 0.5))[..., :nm].float()
-        best_mv = (move_vs[:, :, :nm, :, 0] * usable[..., None]).amax(2)  # [B,12,6]
+        best_mv = (f4[0][:, :, :, :6] * usable.view(B, 2, 1, 6, nm)).amax(-1).transpose(2, 3).reshape(B, N_MONS, 6)
         z = torch.zeros(B, 6, 6, device=dev)
         bfull = torch.cat([torch.cat([z, best_mv[:, :6]], 2), torch.cat([best_mv[:, 6:], z], 2)], 1)
         sfull = torch.cat([torch.cat([z, speed[:, :6]], 2), torch.cat([speed[:, 6:], z], 2)], 1)
@@ -633,9 +634,12 @@ class DamageFeatures(nn.Module):
     # ------------------------------------------------------------------------------------------ core
 
     def _calc(self, A: Tensor, D: Tensor, mv: Tensor, mt_obs: Tensor, offA: dict, offD: dict, Fv: Tensor,
-              wb_type: Tensor, screens: Tensor, accw: Tensor) -> tuple[Tensor, ...]:
-        """A [B,G,NA,K] / D [B,G,ND,K] packed mon features, mv [B,G,NA,NM] move ids, screens [B,G,3] on the
-        defenders' side, accw [B,3,2] accuracy (mult, add) by kind. -> [B,G,NA,NM,ND,4]."""
+              wb_type: Tensor, screens: Tensor, accw: Tensor, lweather: Tensor) -> tuple[Tensor, ...]:
+        """Group g of attackers (g = 0: our 6 mons + our terastallized active, g = 1: their 6 mons + a dead row) vs
+        the other side's 6 mons. A [B,G,NA,K] / D [B,G,ND,K] packed mon features (offA / offD: column slices),
+        mv / mt_obs [B,G,NA,NM] move ids / observed move types, Fv [B,15] field flags, wb_type [B] weather ball
+        type, screens [B,G,3] on the defenders' side, accw [B,3,2] accuracy (mult, add) by kind, lweather [B,20]
+        log weather multiplier by type. -> (f0, f1, P(KO), f3), each [B,G,ND,NA,NM]."""
         gen = self.gen
         B, G, NA, NM = mv.shape
         ND = D.shape[2]
@@ -677,7 +681,11 @@ class DamageFeatures(nn.Module):
                                        aa("skilllink"), a1("loadeddice"), LN(1.5) * aa("technician"),
                                        LN(1.2 if gen >= 7 else 1.3) * (a1("ate_p") >= 0.5).float()], -1),
                           torch.log1p(a("attrb"))], -1)  # [B,G,NA,17]
-        LA = (Pt[L0:] * wlin.permute(3, 0, 1, 2)[..., None]).sum(0)
+        wl = wlin.permute(3, 0, 1, 2)[..., None]
+        LA = (Pt[L0:] * wl).sum(0)
+        # the "+2" of the base damage takes the final modifiers only (STAB, Life Orb, hits, crit, -ate, and in the
+        # type tables effectiveness, Expert Belt, Filter, berries ...), not the power / stat ones
+        LF = (Pt[L0 + self.fin_i] * wl[self.fin_i]).sum(0)
         hpr = a1("hpr")
         pf = torch.stack([torch.ones_like(hpr), hpr.clamp(min=1 / 150), self.flail_v[torch.bucketize(
             torch.floor(48 * hpr), self.flail_b)], 20 + 20 * a1("pos"), 50 + 50 * a1("nf_own"), 1 + a1("noitem"),
@@ -693,13 +701,19 @@ class DamageFeatures(nn.Module):
             stel = u((tt == t_["stellar"]).float() * tera)
             st_tera = 1 + 0.5 * own + tm * (0.5 + 0.5 * p_ad - 0.25 * p_ad * own)
             stab = stab + u(tera - stel[..., 0]) * (st_tera - stab) + stel * (1.2 + 0.8 * own - stab)
-        latt = a("latt") + torch.log(stab) + torch.log1p(0.2 * u(a1("stab_item")) * own)
-        latt = torch.cat([latt, latt[..., t_["ice"]:t_["ice"] + 1], torch.zeros_like(latt[..., :1])], -1)
-        rest = u(torch.log(torch.floor(2 * a1("level") / 5) + 2) + torch.log(a1("allmoves"))) \
-            + torch.gather(torch.log(pf), -1, c("pfid").long()) + torch.gather(latt, -1, tcol)
+        # [B,G,NA,2,22]: log STAB (a final modifier) | log type-dependent power modifiers (weather, type items /
+        # abilities, orbs, Flash Fire, Charge, terrains); column 20 = freeze-dry (ice), 21 = no damage
+        lw = lweather.view(B, 1, 1, 20)  # weather: before the "+2" in gen 4, a final modifier later
+        lt = torch.stack([torch.log(stab) + (lw if gen >= 5 else 0.0),
+                          a("latt") + torch.log1p(0.2 * u(a1("stab_item")) * own) + (lw if gen <= 4 else 0.0)], -2)
+        lt = torch.cat([lt, lt[..., t_["ice"]:t_["ice"] + 1], torch.zeros_like(lt[..., :1])], -1)
+        fin = u(torch.log(a1("allmoves"))) + torch.gather(lt[..., 0, :], -1, tcol)
+        rest = fin + torch.gather(lt[..., 1, :], -1, tcol) + u(torch.log(torch.floor(2 * a1("level") / 5) + 2)) \
+            + torch.gather(torch.log(pf), -1, c("pfid").long())
         if gen >= 9:
             rest = rest + c("tera60") * ((mtype == u(tt)) & u(tera > 0)).float()
         LA = LA + rest * c("nf")
+        LF = LF + fin * c("nf")
         # accuracy (always hits = 10, clamped after the stage factor)
         aw = Fn.embedding(c("acc_kind").long() + 3 * torch.arange(B, device=dev).view(B, 1, 1, 1), accw.view(-1, 2))
         acc = torch.addcmul(aw[..., 1], c("acc"), aw[..., 0])
@@ -732,7 +746,6 @@ class DamageFeatures(nn.Module):
         dk = torch.cat([u(self.hs_v[torch.bucketize(wr, self.hs_b, right=True)]),
                         d("dkd")[:, :, None].expand(B, G, NA, ND, 4)], -1)  # [B,G,NA,ND,5]
         cdk = dk[..., self.combo_dk]
-        cdk = cdk * (1 + 0.5 * u(u(aa("technician"))) * self.combo_abs * (cdk <= 60).float())
         lvl_a = u(a1("level")).expand(B, G, NA, ND)
         hp_d = dpair(d1("hp")).expand(B, G, NA, ND)
         hp_a = u(a1("hp"))
@@ -795,7 +808,7 @@ class DamageFeatures(nn.Module):
         lF.mul_(am(nf))
         Fm, Nm = lFN.clamp_(min=NEG).exp_().unbind(2)
         valid = c("valid") * u(a1("alive"))  # exact zeros: invalid / status moves, absent or fainted attackers
-        dmax = torch.addcmul(am(2 * nf * valid), am(torch.exp(LA) * valid), Xg).mul_(Fm)
+        dmax = torch.addcmul(am(2 * nf * valid * torch.exp(LF)), am(torch.exp(LA) * valid), Xg).mul_(Fm)
         mean = (dmax * Nm).mul_(am(c("roll")))
         hp100 = dl((100 * d1("hp")).clamp(min=1e-3))
         inv = am(c("inv"))

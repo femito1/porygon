@@ -90,7 +90,8 @@ STATUS_KINDS = ["brn", "frz", "par", "psn", "slp", "tox"]
 FIXED = {"seismictoss": 1, "nightshade": 1, "superfang": 2, "ruination": 2, "naturesmadness": 2,
          "sonicboom": 3, "dragonrage": 3, "endeavor": 4, "finalgambit": 5, "psywave": 6}
 
-# variable-power / type / category kinds (move_raw "special"), evaluated by porygon.v2.damage
+# variable-power / type / category kinds (move_raw "special"); porygon.v2.damage evaluates most of them (see its
+# docstring for the ones it gives a fixed power)
 SPECIAL = {
     "eruption": 1, "waterspout": 1, "dragonenergy": 1,
     "flail": 2, "reversal": 2,
@@ -279,7 +280,8 @@ def move_table(gen: int) -> np.ndarray:
         r[col["volatile_status"]] = float(bool(vs))
         r[col["confusion"]] = float(vs == "confusion") + sum(
             _num(s.get("chance"), 100) / 100 for s in secs if s.get("volatileStatus") == "confusion")
-        r[col["flinch_chance"]] = sum(_num(s.get("chance"), 100) / 100 for s in secs if s.get("volatileStatus") == "flinch")
+        r[col["flinch_chance"]] = sum(_num(s.get("chance"), 100) / 100 for s in secs
+                                      if s.get("volatileStatus") == "flinch")
         sc = e.get("sideCondition")
         r[col["side_condition"]] = float(bool(sc))
         r[col["hazard"]] = float(sc in HAZARDS)
