@@ -33,3 +33,17 @@ PL=$!
 $PY -m porygon.train --fastenv 5x48 --overlap-update $COMMON --run-dir $A > $A/train.log 2>&1 &
 PA=$!
 wait $PL; echo "lockstep exit $?"; wait $PA; echo "async exit $?"
+# results: training diagnostics and head-to-heads at equal steps vs the Oct-19 reference run
+for r in $L $A; do $PY scripts/fastenv/tb_scalars.py $r time/fps train/explained_variance train/entropy_loss \
+  train/clip_fraction train/approx_kl diag/ratio0_mean diag/ratio0_std diag/clip0_frac diag/policy_lag; done
+EV="$PY -m porygon.fastenv_eval --format gen4randombattle --workers 20 --battles 32 --games 1000"
+for st in 2500000:ppo_2499840_steps.pt 5000000:ppo_4999680_steps.zip; do
+  n=${st%%:*}; ref=old-ckpts/${st#*:}
+  for r in $L $A; do
+    c=$r/checkpoints/ppo_${n}_steps.zip
+    [ -f "$c" ] && { echo "=== $c vs $ref"; $EV --a "$c" --b "$ref" 2>&1 | tail -1; }
+  done
+  [ -f $L/checkpoints/ppo_${n}_steps.zip ] && [ -f $A/checkpoints/ppo_${n}_steps.zip ] && \
+    $EV --a $L/checkpoints/ppo_${n}_steps.zip --b $A/checkpoints/ppo_${n}_steps.zip 2>&1 | tail -1
+done
+echo "diag2 done"
