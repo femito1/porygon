@@ -32,7 +32,7 @@ export PORYGON_GEN=$GEN PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 export PYTHONPATH=$CODE/src
 [[ $GEN == 9 ]] && export PYTHONPATH=$G/.engine-gen9:$PYTHONPATH
 export PATH=$G/.node/bin:$PATH
-export PORYGON_COMMIT=$(cat "$CODE/COMMIT" 2>/dev/null || echo unknown)
+export PORYGON_COMMIT=${PORYGON_COMMIT:-$(cat "$CODE/COMMIT" 2>/dev/null || echo unknown)}
 WORKERS=$(( ${SLURM_CPUS_PER_TASK:-4} > 1 ? ${SLURM_CPUS_PER_TASK:-4} - 1 : 1 ))
 mkdir -p "$OUT" "$D/logs"
 cd "$CODE"
