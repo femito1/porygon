@@ -12,7 +12,8 @@ Outputs (formats: .orchestra/CONTRACTS.md "Data formats"):
       decision {idx (stream message index of the request), turn, kind, action, a (action index), n_legal, legal,
       search?}
   OUT/encoded/<format>/<encoder name>/shard-NNNNN.npz   obs f16 [N, D], mask i8 [N, A], action i16, target f16 [N, A],
-      z f32, rating i16, opp_rating i16, game i32, turn i16, source u8, forced u8, n_legal u8
+      z f32, rating i16, opp_rating i16, game i32, turn i16, source u8, forced u8, n_legal u8, and from search runs
+      q f16 [N, A] (NaN: unvisited / absent), root_value f16 (NaN: absent), visits f32, searched u8
   OUT/encoded/<format>/<encoder name>/meta.json, OUT/records/<format>/meta.json   counts, errors by class, sources
 
 Work is split into units of --unit battles (in input order; unit k writes part k / shard k), so the output does not
@@ -59,7 +60,14 @@ def open_text(path: Path):
     return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
 
 
-def load_encoder(spec: str):
+def load_encoder(spec: str, extra_src: list[str] | None = None):
+    """`module:function`; extra_src: other src trees whose `porygon` subpackages join ours (e.g. netv2's
+    porygon.v2 from its worktree), so `--encoder porygon.v2.encoder:encode --extra-src ../ws-netv2/src` works."""
+    import porygon
+    for d in extra_src or []:
+        p = str(Path(d).resolve() / "porygon")
+        if p not in porygon.__path__:
+            porygon.__path__.append(p)
     mod, _, fn = spec.partition(":")
     return getattr(importlib.import_module(mod), fn)
 
@@ -149,7 +157,9 @@ def human_unit(battles: list[dict], builds: Path, gen: int, encoder, keep_inexac
         except Exception as e:
             yield r, [], f"replay: {type(e).__name__}"
             continue
-        yield r, [human_side(b, r, s, sr) for s, sr in sides.items()], None
+        recs = [human_side(b, r, s, sr) for s, sr in sides.items()]
+        pair_opponent_actions(recs)
+        yield r, recs, None
 
 
 def true_team(sets: list[dict], gen: int) -> list[dict]:
@@ -175,12 +185,23 @@ def true_team(sets: list[dict], gen: int) -> list[dict]:
 
 def decision_json(d: replay.Decision) -> dict:
     j = {"idx": d.msg, "turn": d.turn, "kind": d.kind, "action": d.desc, "a": d.action, "n_legal": d.n_legal,
-         "legal": d.legal}
+         "legal": d.legal, "mask": d.mask.tolist()}
     if d.default:
         j["default"] = True
     if d.retry:
         j["retry"] = True
     return j
+
+
+def pair_opponent_actions(sides: list[dict]) -> None:
+    """Each turn decision gets the other side's action at the same turn request (`opp_action`, for auxiliary
+    targets: what the opponent did while we chose); forced decisions get none."""
+    if len(sides) != 2:
+        return
+    for me, other in ((sides[0], sides[1]), (sides[1], sides[0])):
+        theirs = {d.turn: d.desc for d in other["_decisions"] if d.kind == "turn" and not d.retry}
+        for d, j in zip(me["_decisions"], me["decisions"]):
+            j["opp_action"] = theirs.get(d.turn) if d.kind == "turn" else None
 
 
 def result_of(winner: str | None, side: str) -> int:
@@ -221,7 +242,11 @@ def run_battles(d: Path) -> Iterator[dict]:
         yield b
 
 
-def run_unit(battles: list[dict], gen: int, encoder) -> Iterator[tuple[dict | None, list[dict], str | None]]:
+SEARCH_FIELDS = ("shares", "probs", "value", "q", "root_value", "visits")  # decisions.jsonl fields kept per decision
+
+
+def run_unit(battles: list[dict], gen: int, encoder, counts: Counter
+             ) -> Iterator[tuple[dict | None, list[dict], str | None]]:
     for b in battles:
         if not b["streams"]:
             yield None, [], "run: no stream"
@@ -234,14 +259,20 @@ def run_unit(battles: list[dict], gen: int, encoder) -> Iterator[tuple[dict | No
                                if len(m) > 2 and m[1] == "request" and m[2]), None)
                 side = "p1" if player == b["p1"] else "p2"
                 sr = replay.replay_stream(stream, player, gen, side, encoder=encoder, battle_tag=b["roomid"])
-                for ours, rec in replay.align_logged(sr.decisions, b["logged"].get((b["roomid"], player), [])):
+                logged = b["logged"].get((b["roomid"], player), [])
+                counts["logged decisions"] += len(logged)
+                for ours, rec in replay.align_logged(sr.decisions, logged):
+                    counts["paired with logged"] += 1
+                    counts["mask equal to logged"] += ours.mask.tolist() == list(rec["mask"])
                     ours.action = int(rec["action"])
                     ours.legal = bool(ours.mask[ours.action])
+                    ours.desc = ours.describe(ours.action)
                     ours.choice = "logged"
-                    ours.search = {"shares": rec.get("shares"), "value": rec.get("value")}
+                    ours.search = {k: rec[k] for k in SEARCH_FIELDS if k in rec}
                 for d in sr.decisions:  # unlogged decisions with a single legal action
                     if d.action < 0 and d.n_legal == 1:
                         d.action, d.legal = int(np.argmax(d.mask)), True
+                        d.desc = d.describe(d.action)
                 winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
                 other = "p2" if side == "p1" else "p1"
                 rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player,
@@ -260,15 +291,23 @@ def run_unit(battles: list[dict], gen: int, encoder) -> Iterator[tuple[dict | No
         except Exception as e:
             yield None, [], f"replay: {type(e).__name__}"
             continue
+        pair_opponent_actions(sides)
         yield None, sides, None
 
 
 # ---------------------------------------------------------------- units
 
 def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, list]:
-    rows: dict[str, list] = {k: [] for k in ("obs", "mask", "action", "target", "z", "rating", "opp_rating", "game",
-                                             "turn", "source", "forced", "n_legal")}
+    rows: dict[str, list] = {k: [] for k in DTYPES}
     for d in rec["_decisions"]:
+        q = np.full(n_actions, np.nan, dtype=np.float32)
+        if d.search and d.search.get("q") is not None and len(d.search["q"]) == n_actions:
+            q = np.array([np.nan if v is None else v for v in d.search["q"]], dtype=np.float32)
+        rv = d.search.get("root_value") if d.search else None
+        rows["q"].append(q.astype(np.float16))
+        rows["root_value"].append(np.nan if rv is None else rv)
+        rows["visits"].append((d.search or {}).get("visits") or 0)
+        rows["searched"].append(d.search is not None)
         target = np.zeros(n_actions, dtype=np.float32)
         search = d.search
         shares = np.asarray(search["shares"], dtype=np.float32) if search and search.get("shares") else None
@@ -276,7 +315,7 @@ def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, 
             target = shares * d.mask / (shares * d.mask).sum()
         elif d.action >= 0 and d.legal:
             target[d.action] = 1.0
-        rows["obs"].append(np.asarray(d.obs, dtype=np.float16))
+        rows["obs"].append(d.obs if isinstance(d.obs, dict) else np.asarray(d.obs, dtype=np.float16))
         rows["mask"].append(d.mask.astype(np.int8))
         rows["action"].append(d.action if d.legal else -1)
         rows["target"].append(target.astype(np.float16))
@@ -293,14 +332,16 @@ def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, 
 
 DTYPES = {"obs": np.float16, "mask": np.int8, "action": np.int16, "target": np.float16, "z": np.float32,
           "rating": np.int16, "opp_rating": np.int16, "game": np.int32, "turn": np.int16, "source": np.uint8,
-          "forced": np.uint8, "n_legal": np.uint8}
+          "forced": np.uint8, "n_legal": np.uint8,
+          # search-label runs (additive): the search's values, NaN / 0 where absent
+          "q": np.float16, "root_value": np.float16, "visits": np.float32, "searched": np.uint8}
 
 
 def do_unit(job: tuple) -> dict:
     """Convert one unit of battles; writes its record part and its shard. Returns counts."""
     (unit, base, battles, mode, a) = job
     fmt, gen = a["format"], a["gen"]
-    encoder = load_encoder(a["encoder"])
+    encoder = load_encoder(a["encoder"], a["extra_src"])
     from poke_env.environment import SinglesEnv
     n_actions = SinglesEnv.get_action_space_size(gen)
     rec_dir = Path(a["out"]) / "records" / fmt
@@ -313,7 +354,7 @@ def do_unit(job: tuple) -> dict:
     t0 = time.time()
     try:
         it = (human_unit(battles, Path(a["builds"]), gen, encoder, a["keep_inexact"], a["min_rating"])
-              if mode == "corpus" else run_unit(battles, gen, encoder))
+              if mode == "corpus" else run_unit(battles, gen, encoder, counts))
         with gzip.open(rec_dir / f"part-{unit:05d}.jsonl.gz.tmp", "wt") as f:
             for i, (r, sides, err) in enumerate(it):
                 counts["battles"] += 1
@@ -337,13 +378,19 @@ def do_unit(job: tuple) -> dict:
                         counts["illegal actions"] += d.action >= 0 and not d.legal
                         counts["unmapped choices"] += d.action < 0 and d.choice is not None
                         if obs_dim is None and d.obs is not None:
-                            obs_dim = int(np.asarray(d.obs).shape[0])
+                            obs_dim = ({k: [list(v.shape), str(v.dtype)] for k, v in d.obs.items()}
+                                       if isinstance(d.obs, dict) else int(np.asarray(d.obs).shape[0]))
                     rec.pop("_decisions")
                     f.write(json.dumps(rec) + "\n")
         os.replace(rec_dir / f"part-{unit:05d}.jsonl.gz.tmp", rec_dir / f"part-{unit:05d}.jsonl.gz")
         if cols["obs"]:
-            arrays = {k: (np.stack(v) if k in ("obs", "mask", "target") else np.asarray(v)).astype(DTYPES[k])
+            obs = cols.pop("obs")
+            arrays = {k: (np.stack(v) if k in ("mask", "target", "q") else np.asarray(v)).astype(DTYPES[k])
                       for k, v in cols.items()}
+            if isinstance(obs[0], dict):  # a structured encoder (netv2's v2): one array per field, own dtypes
+                arrays.update({f"obs_{k}": np.stack([o[k] for o in obs]) for k in obs[0]})
+            else:
+                arrays["obs"] = np.stack(obs).astype(np.float16)
             tmp = enc_dir / f"shard-{unit:05d}.tmp.npz"
             np.savez_compressed(tmp, **arrays)
             os.replace(tmp, enc_dir / f"shard-{unit:05d}.npz")
@@ -376,6 +423,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--builds", type=Path, default=Path("/vol/bitbucket/fr1226/porygon-ws-data/showdown/builds"))
     p.add_argument("--encoder", default="porygon.encoder:embed_battle")
+    p.add_argument("--extra-src", action="append", default=[], help="another src tree for porygon.* encoders")
     p.add_argument("--workers", type=int, default=3)
     p.add_argument("--unit", type=int, default=500, help="battles per record part / encoded shard")
     p.add_argument("--start-unit", type=int, default=0, help="resume: skip the units before this one")
@@ -387,7 +435,7 @@ def main() -> None:
         print(f"warning: PORYGON_GEN={os.environ.get('PORYGON_GEN', '4 (default)')} but format is gen{gen}",
               file=sys.stderr)
     args = {"format": a.format, "gen": gen, "encoder": a.encoder, "out": str(a.out), "builds": str(a.builds),
-            "keep_inexact": a.keep_inexact, "min_rating": a.min_rating}
+            "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src}
     if a.mode == "corpus":
         items = corpus_battles(a.inputs, a.format)
     else:

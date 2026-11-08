@@ -85,6 +85,17 @@ class Decision:
     legal: bool | None = None  # mask[action] == 1 (None: no action)
     default: bool = False  # the choice was Showdown's "default" (timer / auto-choice)
     search: dict[str, Any] | None = None  # {"shares", "value"} when a logged search took the decision
+    team: list[str] = field(default_factory=list)  # species behind switch actions 0-5 (battle.team order)
+    moves: list[str] = field(default_factory=list)  # move ids behind move actions 6-9 (poke-env's order)
+
+    def describe(self, action: int) -> dict[str, Any] | None:
+        """{"type": "switch", "species"} / {"type": "move", "move", "tera"} for a poke-env action index."""
+        if 0 <= action < 6:
+            return {"type": "switch", "species": self.team[action]} if action < len(self.team) else None
+        slot = (action - 6) % 4
+        if action >= 6 and slot < len(self.moves):
+            return {"type": "move", "move": self.moves[slot], "tera": action >= TERA_OFFSET}
+        return None
 
     @property
     def n_legal(self) -> int:
@@ -149,7 +160,13 @@ class StreamReplayer:
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.int8)
         obs = self.encoder(battle) if self.encoder is not None else None
         kind = "forced" if request.get("forceSwitch") else "turn"
-        return Decision(idx, battle.turn, kind, request, mask, obs)
+        team = [m.species for m in battle.team.values()]
+        moves = []
+        if battle.active_pokemon is not None:
+            avail = [m.id for m in battle.available_moves]
+            known = [m.id for m in list(battle.active_pokemon.moves.values())[:4]]
+            moves = avail if len(avail) == 1 and avail[0] not in known else known  # as SinglesEnv.action_to_order
+        return Decision(idx, battle.turn, kind, request, mask, obs, team=team, moves=moves)
 
 
 # ---------------------------------------------------------------- choices -> poke-env actions
