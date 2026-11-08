@@ -1,249 +1,121 @@
 # Porygon
-A Pokémon Showdown agent trained with self-play reinforcement learning (gen4 random battles).
+A Pokémon Showdown agent for random battles (gen4, gen9): determinized MCTS on poke-engine with a fitted leaf
+evaluation and set inference, plus a PPO self-play network (gen4).
 
-The training recipe follows Jett Wang, *Winning at Pokémon Random Battles Using Reinforcement
-Learning* (MIT MEng thesis, 2024 — [dspace](https://hdl.handle.net/1721.1/153888)), whose PPO
-self-play agent reached 1693 Elo (rank 8) on the gen4randombattle ladder:
+**Goal:** the best bot in gen4 and gen9 random battles, and a network strong enough to rival or beat search on
+its own. The bar is Jaxcalibur (gen9, closed source: self-play transformer + pUCT, peak 2557 Elo / 95.3 GXE, #1
+on the ladder); Foul Play (pmariglia, open source, peak 2341 / 88 in gen9) is the strongest bot we can benchmark.
 
-- **Self-play PPO** (stable-baselines3) where both players of every battle are the learner and
-  both trajectories are training data; sparse ±1 win reward; γ = 0.9999, λ = 0.754, clip 0.0829,
-  7 epochs, ~40k transitions per update, and the annealed learning rate
-  `10^-4.23 / (8x + 1)^1.5` that the thesis found to be the single biggest factor.
-- **Markov state encoding**: every multi-turn condition (weather, screens, hazards, boosts,
-  status counters, volatile effects) is encoded with its elapsed turns.
-- **Action masking**: illegal actions get probability 0 in rollouts and in the PPO update.
+## Where it stands (95% intervals from duplicate pairs)
+| | vs Foul Play |
+|---|---|
+| gen4, search with fitted eval (default), 4 × 1 s, prior 0.25 | **59.2% ± 2.2%** (1599 games) |
+| gen4, same, compute matched (us 2 × 1 s / Foul Play 4 × 1 s) | 57.8% ± 2.2% / 58.4% ± 2.2% |
+| gen4, stock eval (and stock weights at ×2 scale) | 54.5% ± 1.5% (54.5% ± 2.3%) |
+| gen4, oracle: true sets of revealed mons / whole team | 62.1% ± 3.2% / 64.4% ± 3.0% |
+| gen9, pure engine search (no network), stock / stock ×2 / fitted ×2 | 51.7% / 53.3% / 53.3% (± 2.4%) |
 
-Differences from the thesis: a transformer over field + 12 Pokémon tokens instead of an MLP,
-learned embeddings for species/moves/items/abilities, a movepool prior for unrevealed opponent
-sets (from Showdown's random-battle data), and poke-env's slot-based 10-action space.
+The gen4 network alone is far weaker than the search (it loses ~75% to it). The gen9 fit beat stock 60.2% in
+engine self-play but not measurably against Foul Play. Opponent inference is near its ceiling (whole set right
+56–58%, hidden item 82–88%, move 79–80%, ability 96–97%).
 
-## Results (gen4randombattle)
-- **Raw network** (PPO, 60M steps): 83.5% vs `SimpleHeuristicsPlayer`, 95% vs `MaxBasePowerPlayer`
-  (200 battles each) — on par with the thesis (~80% at 40M, ~85% at 150M steps). Continued
-  training with the opponent pool keeps improving: 300M beats 60M 71.5% and the heuristic bot
-  89.5% (400 battles each); 400M beats 300M 54.5% (600 battles).
-- **Checkpoint tournament** (`porygon.tournament`, 100 battles per pairing, Bradley-Terry Elo):
-  60M 1711 > 46M 1663 > 31M 1635 > 10M 1493 > heuristic 1457 > 2.5M 1346 > max_power 1194.
-  Every checkpoint beats every earlier one; gains slow after ~30M steps.
-- **Search** (`porygon.search`, defaults 1000 ms/move, 4 sampled opponent sets, prior weight
-  0.25): beats the raw network ~75% head-to-head and the heuristic bot 97%.
-- **vs Foul Play** (pmariglia's search bot, 1000 ms/move on one core), before the inference rebuild below:
-  our search won **52.6% ± 2.2%** (all runs of the default search with the 400M–500M networks; 49% with
-  91M; the raw network alone 16.5%), using 4x its compute (4 parallel 1 s searches). It did not move with the patched engine
-  (49.1% ± 4.1% head-to-head vs the stock engine), 500M vs 400M, prior weight 0.5 (54.2%) or 1.0
-  (49.6%), or the value lookahead.
-- **Oracle** (the search given the opponent's true sets, 500M, 400 battles each): true sets of the
-  revealed mons **61.3% ± 4.4%**, the whole true team 65.4% ± 4.1%, so opponent inference was the
-  bottleneck (unrevealed species are at chance, as they must be).
-- **Opponent inference** (`porygon.inference`, scored offline on 800 logged Foul Play battles with
-  `scripts/score_inference.py`): sampling whole sets from Showdown's own generator, conditioned on
-  what the log shows and rules out, gets a revealed mon's whole set right 58% of the time (the old
-  re-implemented set logic: 35%), a hidden item 83–86% (58–60%), a hidden move 78% (65%); the same live.
-  Damage evidence (each hit against poke-engine's damage range per set) then lifts items to 86–89% and
-  whole sets to 59%; every kind of evidence agrees with the true teams in every decisive check.
-  Against Foul Play (500M) the default search with it wins **54.5% ± 1.5%** (8 runs, 3198 games, incl. the
-  damage evidence; single runs 50.7–57.8%), +1.9 ± 2.7 over the old inference: probably a small gain, not
-  yet significant. 8 samples instead of 4 (2x the compute): 53.6% ± 4.3%.
-- **Root PUCT** (`--c-puct`: the network's priors steer our root options in the engine's MCTS instead of the
-  post-hoc mix, `patches/poke-engine-0.0.48-search-options.patch`; 400 games each, `--prior-weight 0`):
-  c = 2 55.0% ± 3.2% (2 runs), c = 8 53.2% ± 3.8%: no change from the default; poke-engine's Q values differ by only a
-  few hundredths between moves, so the engine still overrides a strong network favourite.
-- **Equilibrium search** (from the simultaneous-move MCTS literature: decoupled UCB1 does not converge to
-  an equilibrium, determinization causes strategy fusion; 400 games each): the Bayesian root game over the
-  samples (`--root-game`: one mixed strategy against an opponent who knows its set) 52.9% ± 4.4% playing
-  its most likely move, **40.8% ± 4.5%** drawing from it; regret matching at every node (`--rm-gamma 0.1`)
-  53.4% ± 4.3%, with the drawn root game 41.8% ± 4.5%. Mixing costs ~13 points: Foul Play never exploits
-  our predictability, so playing a near-equilibrium mix only plays worse moves; nothing here beat the default.
-- **Value lookahead** (`porygon.lookahead`, one turn ahead scored by the network's value, 400M): alone it
-  beats the raw network only 53.3% ± 5.6%; mixed 0.5 into the search 53.7% ± 5.6% vs the search; as
-  a replacement for the engine search 42.7%. The value is not yet sharper than poke-engine's search.
-- **Tuned leaf evaluation** (`--eval-config`, `patches/poke-engine-0.0.48-tunable-eval.patch`): poke-engine's
-  `evaluate()` refit on 40k engine-only self-play games (`porygon.selfplay`, Showdown's own random teams, both
-  sides searching with full information: what every determinized leaf is). 64 features (the stock score plus
-  63 corrections: alive count, HP bands, status × HP, items, hazard damage by type, boosts × attacker kind,
-  speed order, …), labels luck-adjusted (the outcome minus the later chance swings, a control variate in the
-  style of AIVAT), a fixed effect per team pair so only within-matchup differences fit the weights
-  (`scripts/fit_eval.py`). Better at predicting held-out outcomes, but at scale 1 it plays only 54% vs stock in
-  self-play: the big lever is the leaf sigmoid's scale (≈ the inverse of UCB's exploration), too soft in stock.
-  Self-play vs stock at 300k iterations/decision (≈ 1 s): ×2 58.1% ± 1.1%, ×4 56.0%, ×8 56.8% (flat); at 20k
-  iterations stock weights ×4 alone 62%, the fit ×4 65%. On Showdown, the full search with the fit ×2 beats
-  the same search with the stock evaluation **54.9% ± 1.6%** (800 battles, 400 duplicate pairs), despite
-  ~12% fewer iterations/s. Against Foul Play (500M, `--eval-config src/porygon/data/eval_r1.json`, 4 runs,
-  1600 games): **59.2% ± 1.1%** (single runs 55.5–60.8%), +4.7 ± 1.9 over the stock-evaluation 54.5% ± 1.5%.
-- **Ladder**: 13-7 with the raw 60M network. Both accounts used (femito, porygon-agent) are now
-  flagged as bots by Showdown, which matches bots only with players who opted in to bot games;
-  datacenter IPs are locked too, so ladder games could only run from a home connection anyway.
+**Tried, no gain — don't retry as is:** 8 determinizations instead of 4; root PUCT on the prior (`--c-puct`);
+regret matching in the tree (`--rm-gamma`); Bayesian root game (`--root-game max`; `sample` is −13 points);
+prior weight 0.5 / 1.0; one-turn value lookahead (`--value-weight`); luck-adjusted fit targets (raw outcomes are
+as good); patched vs stock engine (correctness fix, neutral); PPO 400M → 600M and +40M steps at the learning-rate
+floor; boosted embedding learning (`--embedding-lr-mult`); one round of expert iteration (9k battles); oracle
+labels from the same engine (side with the search, cannot judge the network). The 0.25 network prior does help
+(+3.8 ± 3.5 vs none, 800 games).
+
+## Roadmap
+1. **A strong network (the main lever).** Likely gaps vs Jaxcalibur, by expected value: damage calculations as
+   inputs (per pair of mons; ours gets only power, type effectiveness and stats); auxiliary heads predicting the
+   opponent's hidden sets and next action; ~5× more games and a bigger model (8.5M vs our 3.5M); a learning-rate
+   schedule that does not decay to ~2·10⁻⁶ (ours did by 400M steps, so the "plateau" may be no learning).
+   A gen9 network needs tera actions (poke-env actions 22–25). Measure every network against our search head to
+   head (target: beat it) and against Foul Play (target in gen9: ~75%, Jaxcalibur's level by Elo).
+   Undecided: gen9 first (where the bar is) or gen4 (existing baseline network).
+2. **A faster training environment:** self-play inside poke-engine (Rust) with a partial-observation encoder
+   instead of Showdown servers (~2k steps/s now). Worth it once the network shows it responds to data.
+3. **Network in the search:** the network as prior and leaf value inside the tree needs Rust-side inference
+   (Python evaluates ~1.3k states/s per thread vs the engine's ~430k iterations/s); then expert iteration at scale.
+4. **Leaf evaluation, round 2:** refit on self-play played with the fitted evaluation; TreeStrap-style targets
+   from deeper search; recheck the leaf scale whenever the time per move changes. Engine-only head-to-heads
+   over-predict Showdown gains (gen9: 60% in self-play, +1.6 ± 3.4 vs Foul Play): confirm on Showdown.
+5. **Paper** (`docs/paper/`): IEEE CoG / workshop on the fitted evaluation; see `docs/paper/README.md`.
+6. **Search fidelity left:** locked moves always last 3 turns (gen4: 2–3); a taunt applied after its target moved
+   misses that turn; encore needs the engine's last-move tracking; damage evidence ignores crits, stat stages and
+   screens; gen9 team sampling lacks the Fire / Freeze-Dry weakness caps.
+7. **A public rating:** the official ladder is closed to us (both accounts flagged as bots, datacenter IPs locked);
+   the PokéAgent Challenge ladder has no random battles.
 
 ## Layout
 | | |
 |---|---|
-| `src/porygon/encoder.py` | battle → flat observation (field token + 12 mon tokens) |
-| `src/porygon/model.py` | `BattleTransformer` features extractor, `MaskedPolicy` (per-action pointer head) |
-| `src/porygon/env.py` | `SelfPlayEnv` (poke-env PettingZoo env), vectorised self-play, `PolicyPlayer` |
-| `src/porygon/async_env.py` | asynchronous rollouts (`--async-envs`, `--overlap-update`) |
-| `src/porygon/pool.py` | opponent pool: past policy snapshots + baseline bots |
-| `src/porygon/train.py` | PPO training with eval-vs-baselines, checkpoints, pool snapshots |
-| `src/porygon/search.py` | `SearchPlayer`: network-guided poke-engine MCTS over sampled opponent sets |
+| `src/porygon/encoder.py`, `model.py` | battle → observation (field + 12 mon tokens); `BattleTransformer`, `MaskedPolicy` |
+| `src/porygon/env.py`, `async_env.py`, `pool.py`, `train.py` | self-play PPO: envs, async rollouts, opponent pool, training |
+| `src/porygon/search.py`, `engine_worker.py` | `SearchPlayer`: poke-engine MCTS over sampled opponent sets (gen4, gen9) |
 | `src/porygon/inference.py` | opponent set posterior: generator set library + evidence from the battle log |
-| `src/porygon/engine_worker.py` | poke-engine search subprocesses used by `search.py` |
-| `src/porygon/lookahead.py` | one-turn lookahead scored by the network's value (`--value-weight`), leaf encoder |
-| `src/porygon/expert.py` | expert iteration: search-vs-search training data, distillation into a checkpoint |
-| `src/porygon/evaluate.py`, `tournament.py` | win rates vs baseline bots; round-robin Elo |
-| `src/porygon/play.py` | play on the official server (ladder / challenges) |
-| `src/gloria/` | alias of `porygon` (the old name) so checkpoints saved before the rename load |
-| `scripts/slurm_train.sbatch` | PPO training job for the Imperial DoC Slurm cluster |
-| `scripts/slurm_foulplay.sbatch` | Foul Play benchmark job (local Showdown server on the node) |
-| `scripts/slurm_search.sbatch` | `porygon.search` head-to-heads on a node (fits next to a training job) |
-| `scripts/slurm_expert.sbatch`, `slurm_distill.sbatch` | expert-iteration jobs: generate + distil, or re-distil existing data |
-| `scripts/sync_results.sh`, `fetch_results.sh` | push a run's results to a git repo / download and archive them |
-| `scripts/pod_*.sh`, `pod_retry_deploy.py`, `vm_setup.sh` | fallbacks: RunPod pods, a plain GPU VM |
-| `scripts/vs_foulplay.py` | benchmark vs Foul Play (setup in its docstring) |
-| `src/porygon/decisions.py`, `scripts/analyze_benchmark.py` | benchmark decision logs; duplicate scoring, inference accuracy, swings |
-| `scripts/build_set_library.js`, `score_inference.py` | build the gen4 set library (`data/*library.json.gz`); score inference offline |
+| `src/porygon/selfplay.py`, `scripts/gen_teams.js`, `scripts/fit_eval.py` | engine-only self-play; fit the leaf evaluation |
+| `src/porygon/data/eval_r1.json`, `eval_gen9_r1.json` | fitted leaf evaluations (gen4: the default; gen9: not yet the default) |
+| `src/porygon/lookahead.py`, `expert.py`, `tune.py` | value lookahead; expert iteration; SPSA on the evaluation |
+| `src/porygon/decisions.py`, `scripts/analyze_benchmark.py` | benchmark decision logs; pair-scored win rate, inference accuracy |
+| `src/porygon/evaluate.py`, `tournament.py`, `play.py` | vs baseline bots; round-robin Elo; play on the official server |
+| `src/gloria/` | alias of `porygon` (old name) so old checkpoints load |
+| `scripts/build_engine.sh`, `patches/poke-engine-*` | poke-engine 0.0.48: gen4 durations, search options, tunable evaluation |
 | `scripts/build_eval_server.sh`, `patches/showdown-*` | benchmark Showdown: duplicate battles, true teams logged |
-| `scripts/build_engine.sh`, `patches/` | poke-engine 0.0.48: gen4 taunt / encore / confusion durations; search options (root priors, joint root statistics, regret matching); tunable leaf evaluation (`pe.set_eval`, `pe.eval_features`) |
-| `src/porygon/selfplay.py`, `scripts/gen_teams.js` | engine-only self-play: evaluation training data (with luck terms), evaluation head-to-heads |
-| `scripts/fit_eval.py`, `src/porygon/tune.py` | fit the leaf evaluation to self-play outcomes; SPSA on its scale / feature groups |
-| `scripts/slurm_selfplay.sbatch`, `slurm_h2h_arms.sbatch`, `slurm_fit.sbatch` | the same as cluster jobs |
-| `scripts/ladder_watchdog.sh` | long ladder sessions |
+| `scripts/build_set_library.js`, `score_inference.py` | set libraries (`data/<format>_library.json.gz`); offline inference scoring |
+| `scripts/vs_foulplay.py`, `slurm_foulplay.sbatch` | benchmark vs Foul Play |
+| `scripts/slurm_*.sbatch` | cluster jobs: train (and `--arm` experiments), search / net head-to-heads, self-play, fit, expert |
+| `scripts/oracle_labels.py`, `probe_embeddings.py` | network diagnostics (oracle-labelled decisions; embedding probes) |
+| `docs/paper/` | paper draft, figure, literature review and search tool |
 
 ## Setup
 ```bash
-git submodule update --init            # official smogon/pokemon-showdown
+git submodule update --init            # smogon/pokemon-showdown
 cd pokemon-showdown && npm install && cd ..
-python -m venv .venv && .venv/bin/pip install -e .
-scripts/build_engine.sh                # poke-engine 0.0.48 gen4 + patches/ (for search; needs Rust)
-node scripts/build_data.js             # only if the Showdown checkout changes
+python -m venv .venv && .venv/bin/python -m pip install -e .
+scripts/build_engine.sh                # poke-engine 0.0.48 gen4 + patches (needs Rust)
+WHEEL_DIR=/tmp/w GEN=9 scripts/build_engine.sh && .venv/bin/python -m pip install --no-deps --target .engine-gen9 /tmp/w/*.whl
+node scripts/build_set_library.js 2000000 4 gen9randombattle   # only when pokemon-showdown/ changes (also gen4)
 ```
+The generation is process-wide: `PORYGON_GEN=9 PYTHONPATH=$PWD/.engine-gen9:$PWD/src` selects gen9 (inference,
+conversion, action space, set library, engine build). gen9 search runs without a network: MODEL `none`.
 
 ## Train
-Locally (throughput is bound by battle latency, ~3 cores per Showdown server):
 ```bash
 scripts/start_servers.sh 10 8100        # stop: scripts/stop_servers.sh
 python -m porygon.train --async-envs --overlap-update --n-battles 60 --pool-battles 30 \
   --ports 8100-8109 --resume runs/<run>/final_model.zip --total-steps 500_000_000
 ```
-Use `--async-envs --overlap-update`. In the default lockstep mode every step waits for the slowest of
-~150 battles, and throughput decays within a job (1.4k → ~800 steps/s over 20 h). `--async-envs`
-steps every battle independently and `--overlap-update` keeps battles running during the PPO
-update (training data at most one update old); together they held 1.5–2.0k steps/s for 17 h on a
-30-core node. The PPO update (~17 s per 40k steps) is now the bottleneck, and evals stall
-collection for ~200 s every 2.5M steps.
+Always `--async-envs --overlap-update` (lockstep decays to ~800 steps/s). `--pool-battles` adds battles against
+past snapshots and baseline bots; `--anchor CKPT` evaluates against a fixed checkpoint and picks `best_model` by
+it. The learning rate is `10^-4.23 / (8x + 1)^1.5` with `x` = steps / `--total-steps`.
 
-`--pool-battles` adds battles against frozen snapshots (one added every `--snapshot-every` steps)
-and baseline bots; seed a pool with `python -m porygon.pool CKPTS... --out DIR`. `--anchor CKPT`
-also evaluates against a fixed earlier checkpoint and picks `best_model` by that score: the
-baseline bots saturate around 85%, while head-to-head win rates keep showing progress.
-
-On the Imperial DoC cluster, from the repo copy on `/vol/bitbucket`: put `SHA=<showdown commit>`,
-`RESUME=<zip>`, `POOL=<pool dir>`, `TOTAL=<steps>`, `CHAIN=<follow-up jobs>`, optionally
-`ANCHOR=<zip or .pt>` (default `RESUME`) in `slurm.env`
-(never `sbatch --export`, which gets jobs held), then `sbatch scripts/slurm_train.sbatch`. The job
-sets itself up, resumes from the newest checkpoint, uses all cores it gets (30 on a 32-core
-request), stops after 70.5 h, keeps its run directory and pool on the node's local disk (mirrored
-to the shared disk every 10 min, at the end and on `scancel`) and pushes results every 20 min;
-extra arguments go to `porygon.train`: `sbatch scripts/slurm_train.sbatch --async-envs --overlap-update`.
-`TOTAL` sets the learning-rate schedule (`x` = steps / `TOTAL`), so raise it to continue a
-finished run. Fetch results anywhere with
-`scripts/fetch_results.sh` (into `runs/remote/`). The push holds only the newest checkpoint and
-pool snapshots, so the fetch also copies them into `runs/archive/` (never overwritten); the full
-history stays on the cluster (`runs/<run>/checkpoints/` every 5M steps, `$POOL/*.pt` every 2.5M)
-for `rsync`.
-
-## Expert iteration
-Distil the search player into the network: search-vs-search games record every searched decision
-(observation, the move distribution search played, and the shaped return PPO would assign), then
-the checkpoint is trained toward them. The output is a normal PPO checkpoint that PPO can resume.
-```bash
-python -m porygon.expert generate MODEL --games 9000 --out data/round1 --ports 8100-8103   # 300 ms x 4 samples
-python -m porygon.expert distill MODEL data/round1 --out runs/round1/distilled.zip      # --temperature 0.25
-```
-Raw visit shares are much flatter than the move search plays (entropy ~1.2 vs the network's
-~0.33 nats), so `distill` sharpens them (`--temperature`, default 0.25) and keeps the policy near
-its source (`--beta`, KL weight). On the cluster: `EXPERT_MODEL=<zip>` (optionally `EXPERT_GAMES`,
-`EXPERT_MS`) in `slurm.env`, then `sbatch scripts/slurm_expert.sbatch` (9,000 battles ≈ 640k
-decisions, ~11 h on 30 cores); re-distil existing data with `scripts/slurm_distill.sbatch`.
-
-**Result so far: no gain.** One round from 300M: the distilled raw network at best tied its source
-(50.5% with `--beta 3`; worse with weaker anchoring), and search with it as prior tied search with
-the source. A 300 ms search scored by poke-engine's evaluation is no better a teacher than PPO;
-it needs the network's value inside the search first.
-
-## Evaluate / play
-```bash
-python -m porygon.evaluate MODEL --port 8000 --n-battles 500 [--anchor OLD_MODEL]
-python -m porygon.tournament MODEL_A MODEL_B ... --n-battles 100   # .zip checkpoints or pool .pt
-python -m porygon.search MODEL --opponent {policy,heuristic,max_power,search} --n-battles 100
-python -m porygon.search MODEL --opponent search --value-weight 0.5 --device cuda   # mix in the value lookahead
-python -m porygon.play MODEL --username USER --accept 5 --search                # search player; --ladder N for the ladder
-python scripts/vs_foulplay.py MODEL --player search --opponents fpa0 fpa1 ...   # setup in its docstring
-PS_PASSWORD=... PLAY_ARGS=--search scripts/ladder_watchdog.sh USER MODEL TOTAL_GAMES 4   # from a home connection
-```
+Cluster (Imperial DoC Slurm): settings in `slurm.env` (`SHA`, `RESUME`, `POOL`, `TOTAL`, `CHAIN`, `ANCHOR`; never
+`sbatch --export`), then `sbatch scripts/slurm_train.sbatch --async-envs --overlap-update`. The job resumes from
+its newest checkpoint, mirrors its run to the shared disk, pushes results, and requeues itself if its log is
+silent for 45 min. Side-by-side experiment arms that cannot touch the main lineage:
+`sbatch -c 16 scripts/slurm_train.sbatch --arm NAME START_ZIP TOTAL [train args]`. Raw-network head-to-heads:
+`sbatch scripts/slurm_h2h_nets.sbatch N_BATTLES REF MODEL...`.
 
 ## Benchmark
 ```bash
-sbatch -c 24 scripts/slurm_foulplay.sbatch MODEL 100 4 [vs_foulplay args]   # 4 Foul Play instances x 100 games
-sbatch scripts/slurm_search.sbatch MODEL --opponent search [porygon.search args]   # head-to-heads
+sbatch --partition=long -c 24 scripts/slurm_foulplay.sbatch MODEL 100 4 [--fp-parallelism P] [vs_foulplay args]
+sbatch --partition=long -c 24 scripts/slurm_foulplay.sbatch none 100 4 --gen 9 --eval-config FILE|stock
+sbatch scripts/slurm_search.sbatch MODEL --opponent search [porygon.search args]
 ```
-Both run a patched Showdown (`scripts/build_eval_server.sh` → `.showdown-eval/`, never the training
-server's checkout) that plays duplicate pairs (same seeds, teams swapped) and writes the true teams,
-and they log every searched decision (`porygon.decisions`). Output in `runs/{foulplay,search}-<date>-<job>/`:
-`battles.jsonl` (true teams, winners), `decisions.jsonl` (probs, shares, action, value, each
-determinization's opponent team), `replays/`, `teams/`, and `analysis.txt` from
-`scripts/analyze_benchmark.py` (pair-scored win rate, inference accuracy against the true teams,
-largest value drops of lost-both pairs). Pairing is worth only ~1.1–1.4x the games, so a 400-game run
-is ±4.5% and a 3-point change needs ~2000 games per arm; compare against the pooled 54.5% ± 1.5%. Judge
-changes by general strength: confirm a Foul Play gain head-to-head against our previous search too.
-- `--oracle revealed|all`: search with the true sets of the revealed mons / the whole team (diagnosis).
-- `--engine-python .venv-stock/bin/python` (`--opp-engine-python` for the opponent): engine workers
-  under another poke-engine build (`STOCK=1 VENV=.venv-stock scripts/build_engine.sh`), for engine A/Bs.
-- Search options (all off by default, none helped vs Foul Play, see Results): `--c-puct` (root PUCT on the
-  network's priors), `--root-game max|sample` (Bayesian root game over the samples), `--rm-gamma` (regret
-  matching at every node). They need the engine's search-options patch; on the cluster only `.venv-puct`
-  has it so far, so add `--engine-python .venv-puct/bin/python`.
-- `--eval-config FILE|stock` (`--opp-eval-config`): the engine's leaf evaluation, a `scripts/fit_eval.py` JSON
-  (weights, scale, root weight). Default: the tuned `src/porygon/data/eval_r1.json` (needs the tunable-eval
-  patch; the player refuses to start on an engine without it); `stock` = poke-engine's own `evaluate()`, e.g.
-  with `--engine-python .venv-stock/bin/python`.
-- Locally: `scripts/build_eval_server.sh`, then `PS_DIR=$PWD/.showdown-eval PORYGON_DUPLICATE=<seed>
-  PORYGON_DUPLICATE_LOG=<file> PORYGON_DUPLICATE_TEAMS=<dir> scripts/start_servers.sh 1 8001`.
-
-## Roadmap
-1. **Opponent inference, what is left**: P(true set) is ~59% and most of the rest is the generator's own
-   randomness among sets the battle cannot tell apart yet, so more evidence of the same kind has little
-   left to give. Damage evidence skips crits, stat stages and screens; modelling them would add hits. New
-   evidence: score it on the logged benchmarks first (`scripts/score_inference.py`; it must stay 100%
-   consistent with the true teams), then a Foul Play run. Rebuild the library
-   (`node scripts/build_set_library.js`) whenever `pokemon-showdown/` is updated.
-2. **Leaf evaluation, what is left** (first round done, see Results): the scale is a search hyperparameter;
-   recheck it whenever the time per move changes. Train on positions like the search's leaves rather than game
-   positions (TreeStrap: targets from deeper search values), then SPSA (`porygon.tune`) on a few feature-group
-   multipliers. Engine-only self-play (`scripts/slurm_selfplay.sbatch`, `slurm_h2h_arms.sbatch`) is the cheap
-   first filter (~6k games/h), Showdown head-to-heads the real test. The engine's occasional `NonFinite` panic
-   (src/mcts.rs:178) is still unexplained.
-3. **A public rating**: the [PokéAgent Challenge](https://pokeagentchallenge.com/battling.html)
-   runs a live leaderboard for AI agents (bots welcome; Foul Play won its Gen 9 OU final). It has
-   no random battles: Gen 1–4 OU, Gen 9 OU and VGC, headline boards Gen 1 OU and Gen 9 OU. Entering
-   needs team handling and usage-stat opponent priors instead of random-battle sets, and retraining.
-4. **Search fidelity left**: locked moves (Outrage) always last 3 turns (gen4: 2–3), a taunt applied
-   after its target moved misses that turn, encore needs the engine's last-move tracking, occasional
-   `NonFinite` engine panics (sample skipped). Time per move: 1 s beat 0.3 s; more may help.
-5. **Training**: PPO reached 600M (`slurm.env` `TOTAL` = 600M; raise it to continue); 400M → 600M did
-   not move the Foul Play result, and neither the prior weight nor root PUCT changed the search's
-   strength, so more PPO pays only once the network weighs more in the search.
-   Cheaper PPO updates (bf16, larger minibatches) and evals that don't stall collection would help.
-   Moving training off Showdown onto a Rust simulator would multiply throughput but risks training
-   on mechanics that differ from Showdown's.
-6. **gen9randombattle**: encoder, action space (tera) and vocab already support it; start from the
-   gen4 model.
+Games are duplicate pairs (same seeds, teams swapped) on a patched Showdown that logs the true teams. Output in
+`runs/{foulplay,search}-<date>-<job>/` with `analysis.txt`. Pairing is worth only ~1.1–1.4× the games: a
+400-game run is ±4.8 points and a 3-point difference needs ~2000 games per arm. Report 95% intervals from pair
+means. Foul Play's default uses 2 core-seconds per move, our search 4; `--fp-parallelism 2` matches them.
+Judge changes by general strength: confirm a Foul Play gain head-to-head against our previous search too.
+Options: `--oracle revealed|all` (diagnosis), `--engine-python` (another engine build),
+`--eval-config FILE|stock`, `--prior-weight` (default 0.25; 0 with MODEL none), `--log-oracle`.
 
 ## Credits
-- Training recipe: Jett Wang, *Winning at Pokémon Random Battles Using Reinforcement Learning*
-  (MIT MEng thesis, 2024).
-- [poke-engine](https://github.com/pmariglia/poke-engine) (MIT) by pmariglia is the battle
-  simulator behind `porygon.search`.
-- [Foul Play](https://github.com/pmariglia/foul-play) (GPL-3.0) by pmariglia was a reference
-  for how a Showdown battle maps to a poke-engine state and is our strongest benchmark; no
-  Foul Play code is included in this repository.
-- [poke-env](https://github.com/hsahovic/poke-env) and
-  [Pokémon Showdown](https://github.com/smogon/pokemon-showdown).
+- PPO recipe: Jett Wang, *Winning at Pokémon Random Battles Using Reinforcement Learning* (MIT MEng thesis, 2024).
+- [poke-engine](https://github.com/pmariglia/poke-engine) (MIT) by pmariglia: the simulator behind the search.
+- [Foul Play](https://github.com/pmariglia/foul-play) (GPL-3.0) by pmariglia: reference and benchmark; no Foul Play
+  code is included here.
+- [poke-env](https://github.com/hsahovic/poke-env) and [Pokémon Showdown](https://github.com/smogon/pokemon-showdown).

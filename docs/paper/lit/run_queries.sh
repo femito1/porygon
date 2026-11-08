@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs every query block of protocol.md through litsearch.py (cached: reruns are free). Output: lit/runs/queries.log
+# Runs every query in queries.txt through litsearch.py (cached: reruns are free). Output: lit/runs/queries.log; mkdir -p lit/runs before redirecting into it
 cd "$(dirname "$0")/../../.."
 mkdir -p docs/paper/lit/runs
 while IFS='|' read -r block q; do

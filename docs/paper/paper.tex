@@ -18,7 +18,7 @@ logistic model, to the outcomes of 40{,}000 engine self-play games, fitting with
 variation a search compares identifies the weights. With nothing else changed, our search goes from
 54.5\%~$\pm$~1.5\% to 59.2\%~$\pm$~2.2\% against Foul Play in Generation~4 random battles (95\% intervals,
 1{,}600--3{,}200 games per arm), and still wins 57.8--58.4\% with compute matched in either direction. Rescaling
-the stock evaluation alone gives no gain (54.5\%~$\pm$~2.3\%). \todo{Generation 9 replication.} With the same
+the stock evaluation alone gives no gain (54.5\%~$\pm$~2.3\%). In Generation~9 the fit wins in engine self-play but not measurably against Foul Play. With the same
 statistical power we also report what did \emph{not} help: network priors, PUCT, regret matching, Bayesian root
 solving, a value-network lookahead, more determinizations and longer self-play training.
 \end{abstract}
@@ -147,16 +147,21 @@ All rows in Table~\ref{tab:fp} add a PPO policy prior with weight 0.25 to the vi
 the 500M-step network in the second and third rows (\verify{and the first}, per our notes: runs do not log the
 network), the 600M-step one in the compute-matched rows; we have not compared the two networks directly. The Generation~9 search uses no network (prior weight 0): our network has no tera actions.
 
-\textbf{Generation 9.} \todo{Foul Play benchmark, 3 arms $\times$ 1600 games, running.} The same recipe on 39{,}970
-Generation~9 self-play games gives a larger held-out improvement (Table~\ref{tab:fit}); in engine self-play the
-fitted evaluation at $k{=}2$ scores 60.2\%~$\pm$~1.4\% against the stock one and the rescaled stock evaluation
-58.4\%~$\pm$~1.4\% (4000 games each).
+\textbf{Generation 9.} The same recipe on 39{,}970 Generation~9 self-play games gives a larger held-out
+improvement (Table~\ref{tab:fit}); in engine self-play the fitted evaluation at $k{=}2$ scores
+60.2\%~$\pm$~1.4\% against the stock one and the rescaled stock evaluation 58.4\%~$\pm$~1.4\% (4000 games each).
+Against Foul Play, however, the gain is within noise: with pure engine search (no network prior; our network has
+no tera actions) the stock evaluation scores 51.7\%~$\pm$~2.4\% (1508 games), the rescaled stock evaluation
+53.3\%~$\pm$~2.3\% (1600) and the fitted one 53.3\%~$\pm$~2.4\% (1494): $+1.6\pm3.4$ points. Engine-only
+self-play over-predicts the gain under hidden information. \todo{whether the Generation~4 gain depends on the
+network prior (no prior-0 Generation~4 arms yet).}
 
 \section{Where the strength is}\label{sec:where}
-\textbf{Information.} Given the true sets of the opponent's revealed Pok\'emon, the search scored 61.3\% against
-Foul Play, given the whole true team 65.4\% (400 games each, $\pm$4.8; stock evaluation, an earlier version of our
-set inference whose own result was 52.5\%~$\pm$~3.5\% over 796 games). \todo{rerun both oracles with the current
-inference and the fitted evaluation.} Most of the remaining gap is generator randomness that the battle cannot
+\textbf{Information.} Given the true sets of the opponent's revealed Pok\'emon, the search (fitted evaluation,
+current inference) scores 62.1\%~$\pm$~3.2\% against Foul Play, given the whole true team 64.4\%~$\pm$~3.0\%
+(800 games each), against 59.2\%~$\pm$~2.2\% without: $+2.9\pm3.9$ and $+5.2\pm3.7$ points. With an earlier
+version of the inference and the stock evaluation the same oracles were worth $+8.8$ and $+12.9$. Most of the
+remaining gap is generator randomness that the battle cannot
 reveal. Generation~9 inference is about as accurate: 53--56\% of sampled sets exactly right.
 
 \textbf{Techniques that did not help} against Foul Play (stock evaluation, 400 games each unless noted, $\pm$4.9
@@ -192,7 +197,7 @@ deeper search (TreeStrap), may add more. Determinization's strategy fusion is un
 \bibitem{foulplay} P.~Mariglia, ``Foul Play: a Pok\'emon Showdown battle bot,'' \url{https://github.com/pmariglia/foul-play}.
 \bibitem{pokeengine} P.~Mariglia, ``poke-engine,'' \url{https://github.com/pmariglia/poke-engine}, v0.0.48.
 \bibitem{wang2024} J.~Wang, ``Winning at Pok\'emon random battles using reinforcement learning,'' MEng thesis, MIT, 2024.
-\bibitem{metamon} \todo{Metamon / PokeAgent paper, arXiv 2603.15563: authors, title.}
+\bibitem{metamon} J.~Grigsby et al., ``Human-level competitive Pok\'emon via scalable offline reinforcement learning with transformers,'' Reinforcement Learning Journal, 2025.
 \bibitem{treestrap} J.~Veness, D.~Silver, A.~Blair, W.~Uther, ``Bootstrapping from game tree search,'' NeurIPS 2009.
 \bibitem{frank1998} I.~Frank, D.~Basin, ``Search in games with incomplete information: a case study using Bridge card play,'' Artificial Intelligence, 1998.
 \bibitem{ismcts} P.~Cowling, E.~Powley, D.~Whitehouse, ``Information set Monte Carlo tree search,'' IEEE TCIAIG, 2012.

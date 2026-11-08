@@ -30,8 +30,9 @@ def boost_embedding_steps(policy, mult: float) -> None:
     clipping or other layers, no extra param group, so checkpoints load as before).
 
     The embeddings start at N(0, 1), the linear layers at ~0.03, and Adam moves each weight by ~lr per step, so in
-    500M steps the embeddings moved ~0.4% and stayed random codes (scripts/rescale_embeddings.py has the
-    evidence); `mult` gives them a learning rate that is not 30x too small relative to their scale."""
+    500M steps the embeddings moved ~0.4%; `mult` gives them a learning rate that is not 30x too small relative to
+    their scale. Measured: x30 / x300 for 40M steps from 600M did not make the network stronger (50.6% / 48.5%
+    vs its start, unboosted 50.0%, 4000 games each)."""
     if mult == 1.0:
         return
     fe = policy.features_extractor
