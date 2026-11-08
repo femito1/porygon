@@ -319,17 +319,24 @@ def human_side(b: dict, r: dict, side: str, sr: replay.SideReplay) -> dict:
             "decisions": [decision_json(d) for d in sr.decisions], "_decisions": sr.decisions}
 
 
+def json_lines(path: Path) -> Iterator[dict]:
+    """JSON lines of a file another process may still be appending to: a torn last line is skipped."""
+    for line in open(path):
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
 def run_battles(d: Path) -> Iterator[dict]:
     """A run dir's battles (battles.jsonl) with each logged player's stream and decisions."""
     subs = [s for s in [d] + [d / x for x in ("a", "b")] if (s / "streams").is_dir()]
     logged: dict[tuple[str, str], list[dict]] = {}
     for s in subs:
         if (s / "decisions.jsonl").exists():
-            for line in open(s / "decisions.jsonl"):
-                r = json.loads(line)
+            for r in json_lines(s / "decisions.jsonl"):
                 logged.setdefault((r["battle"], r["player"]), []).append(r)
-    for line in open(d / "battles.jsonl"):
-        b = json.loads(line)
+    for b in json_lines(d / "battles.jsonl"):
         b["streams"] = [p for s in subs for p in [s / "streams" / f"{b['roomid']}.jsonl.gz"] if p.exists()]
         b["logged"] = logged
         b["run"] = d.name
@@ -595,18 +602,38 @@ def do_unit(job: tuple) -> dict:
             "obs_dim": obs_dim, "n_actions": n_actions, "seconds": time.time() - t0, "games": games}
 
 
-def units(items: Iterator[dict], size: int, mode: str, a: dict, start: int = 0) -> Iterator[tuple]:
+def units(items: Iterator[dict], size: int, mode: str, a: dict, start: int = 0, first_unit: int = 0,
+          first_game: int = 0) -> Iterator[tuple]:
+    """Units of `size` battles numbered from `first_unit` (incremental refreshes continue the numbering); the
+    game index of a battle = first_game + its position in the input."""
     batch, base, k = [], 0, 0
     for i, b in enumerate(items):
         if not batch:
-            base = i
+            base = first_game + i
         batch.append(b)
         if len(batch) == size:
             if k >= start:
-                yield (k, base, batch, mode, a)
+                yield (first_unit + k, base, batch, mode, a)
             batch, k = [], k + 1
     if batch and k >= start:
-        yield (k, base, batch, mode, a)
+        yield (first_unit + k, base, batch, mode, a)
+
+
+def item_id(b: dict, mode: str) -> str:
+    return b["id"] if mode == "corpus" else f"{b['run']}/{b['roomid']}"
+
+
+def link_previous(prev: Path, new: Path) -> None:
+    """Hard-link (or copy) a previous version's files into the new version dir (all but meta.json)."""
+    import shutil
+    new.mkdir(parents=True, exist_ok=True)
+    for f in prev.iterdir():
+        if f.name == "meta.json" or not f.is_file():
+            continue
+        try:
+            os.link(f, new / f.name)
+        except OSError:
+            shutil.copy2(f, new / f.name)
 
 
 def main() -> None:
@@ -629,6 +656,8 @@ def main() -> None:
                    help="crawler inputlog shards to join by id (corpus records without an input log)")
     p.add_argument("--keep-inexact", action="store_true")
     p.add_argument("--no-compress", action="store_true", help="write shards with np.savez (faster to load)")
+    p.add_argument("--incremental", action="store_true",
+                   help="keep the current version's parts / shards and convert only battles it does not have")
     a = p.parse_args()
     gen = int(a.format[3])
     if int(os.environ.get("PORYGON_GEN", "4")) != gen:
@@ -654,8 +683,32 @@ def main() -> None:
     game_ids: list[str] = []
     obs_dim: dict[str, Any] = {}
     n_actions = None
+    first_unit = first_game = 0
+    finals = [rec_final] + list(enc_finals.values())
+    if a.incremental and all((f / "meta.json").exists() for f in finals):
+        prev = json.loads((rec_final / "meta.json").read_text())
+        done = set(prev.get("games", []))
+        game_ids = list(prev.get("games", []))
+        total.update(prev.get("counts", {}))
+        sources.update(prev.get("sources", {}))
+        first_game = prev.get("next_game", len(game_ids) * 100)
+        first_unit = 1 + max([int(f.name[5:10]) for f in rec_final.glob("part-*.jsonl.gz")] + [-1])
+        for f in finals:
+            link_previous(f.resolve(), Path(str(f) + f".v{stamp}"))
+        for spec, f in enc_finals.items():
+            obs_dim[spec] = json.loads((f / "meta.json").read_text()).get("obs_dim")
+        items = (b for b in items if item_id(b, a.mode) not in done)
+        print(f"incremental: {len(done)} games kept, new units from {first_unit}", flush=True)
+    elif a.incremental:
+        print("incremental: no complete previous version, converting everything", flush=True)
     t0 = time.time()
-    jobs = units(items, a.unit, a.mode, args, a.start_unit)
+    n_seen = [0]
+
+    def counted(it):
+        for b in it:
+            n_seen[0] += 1
+            yield b
+    jobs = units(counted(items), a.unit, a.mode, args, a.start_unit, first_unit, first_game)
     with Pool(a.workers) as pool:
         for res in pool.imap(do_unit, jobs):
             total.update(res["counts"])
@@ -674,6 +727,7 @@ def main() -> None:
             "counts": dict(total), "sources": sources, "source_ids": SOURCE_IDS, "showdown_commits": len(commits),
             "code_commit": code_commit(), "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1),
             "workers": a.workers, "version": stamp, "n_games": len(game_ids), "games": game_ids,
+            "next_game": first_game + n_seen[0],
             "note": "game index g in a shard = position of the battle in input order; `games` lists the converted ids;"
                     " every encoder dir of one version holds the same decisions"}
     for spec, d in args["enc_dirs"].items():  # per-encoder meta keeps the old single-encoder keys too
