@@ -1,0 +1,8 @@
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/diag-fast-701591/checkpoints/ppo_2500000_steps.zip --b old-ckpts/ppo_2499840_steps.pt --games 1000
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/diag-old-701591/checkpoints/ppo_2500000_steps.zip --b old-ckpts/ppo_2499840_steps.pt --games 1000
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/diag-fast-701591/checkpoints/ppo_2500000_steps.zip --b runs/diag-old-701591/checkpoints/ppo_2500000_steps.zip --games 1000
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/diag-fast-701591/checkpoints/ppo_2500000_steps.zip --b max_power --games 400
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/diag-old-701591/checkpoints/ppo_2500000_steps.zip --b max_power --games 400
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a old-ckpts/ppo_2499840_steps.pt --b max_power --games 400
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --a runs/recipe7-696550/checkpoints/ppo_2500000_steps.zip --b max_power --games 400
+$PY scripts/fastenv/time_update.py --n-actions 10 --updates 2
