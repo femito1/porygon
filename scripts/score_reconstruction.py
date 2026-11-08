@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+import zlib
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -238,18 +239,21 @@ def resim_input(files: list[Path], fmt: str, out: Path, inputlogs: list[Path]) -
     sys.path.insert(0, str(Path(__file__).parent))
     import convert_replays as cr
     logs = cr.load_inputlogs(inputlogs) if inputlogs else None
-    seen, n = set(), 0
+    seen, lines = set(), []
+    for b in cr.corpus_battles(files, fmt, logs):
+        if b["id"] in seen or not b.get("inputlog") or not b.get("log"):
+            continue
+        if any(s in str(p).lower() for p in b.get("players") or [] for s in cr.SKIP_PLAYERS):
+            continue
+        seen.add(b["id"])
+        version = b["inputlog"][9:49] if b["inputlog"].startswith(">version ") else ""
+        lines.append((version, zlib.compress(json.dumps({"id": b["id"], "inputlog": b["inputlog"], "log": b["log"],
+                                                          "uploadtime": b.get("uploadtime")}).encode())))
+    lines.sort(key=lambda x: x[0])  # grouped by commit: resim_inputlog.js loads each simulator once
     with gzip.open(out, "wt") as f:
-        for b in cr.corpus_battles(files, fmt, logs):
-            if b["id"] in seen or not b.get("inputlog") or not b.get("log"):
-                continue
-            if any(s in str(p).lower() for p in b.get("players") or [] for s in cr.SKIP_PLAYERS):
-                continue
-            seen.add(b["id"])
-            f.write(json.dumps({"id": b["id"], "inputlog": b["inputlog"], "log": b["log"],
-                                "uploadtime": b.get("uploadtime")}) + "\n")
-            n += 1
-    print(f"{n} battles with input log and stored log -> {out}")
+        for _, z in lines:
+            f.write(zlib.decompress(z).decode() + "\n")
+    print(f"{len(lines)} battles with input log and stored log, {len({v for v, _ in lines})} commits -> {out}")
 
 
 def fallback_report(own: Path, fb: Path, git_dir: Path) -> dict:
