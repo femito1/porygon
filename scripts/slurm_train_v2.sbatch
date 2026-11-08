@@ -38,7 +38,13 @@ export PATH=${NODE_BIN:-/vol/bitbucket/fr1226/gloria/.node/bin}:$PATH
 export PYTHONPATH=$ROOT/src${PYTHONPATH:+:$PYTHONPATH}
 export OMP_NUM_THREADS=1
 FORMAT=${FORMAT:-gen9randombattle}; TOTAL=${TOTAL:-300000000}
-"$PY" -c "import torch, porygon.v2.train; assert torch.cuda.is_available(); print('cuda ok', torch.cuda.get_device_name(), porygon.v2.train.__file__)"
+if ! "$PY" -c "import torch, porygon.v2.train; assert torch.cuda.is_available(); print('cuda ok', torch.cuda.get_device_name(), porygon.v2.train.__file__)"; then
+  # a node with a broken GPU (seen: CUDA unknown error): resubmit the same run elsewhere, excluding this node
+  EXCL=$(hostname -s)${SLURM_JOB_EXC_NODES:+,$SLURM_JOB_EXC_NODES}
+  echo "no usable CUDA on $(hostname -s): resubmitting $RUN_NAME excluding $EXCL" >&2
+  sbatch --job-name="$SLURM_JOB_NAME" --partition="$SLURM_JOB_PARTITION" --exclude="$EXCL" scripts/slurm_train_v2.sbatch "$RUN_NAME" "$@"
+  exit 1
+fi
 [ -f pokemon-showdown/package.json ] || { echo "no Showdown checkout at $ROOT/pokemon-showdown" >&2; exit 1; }
 
 # --- servers: one per ~3 cores, ports from the job id (nodes are shared) ---
