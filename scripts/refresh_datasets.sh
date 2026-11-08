@@ -11,6 +11,7 @@
 # (`flock $D/datasets/.convert.lock <cmd>` for one-off conversions). Log: $D/logs/ws-data-refresh.log (when started as documented in data/STATUS.md).
 set -uo pipefail
 INTERVAL=${1:-14400}
+FIRST_DELAY=${2:-0}  # seconds before the first round (restarts keep the schedule)
 D=/vol/bitbucket/fr1226/porygon-ws-data
 NS=${NETV2_SRC:-$D/netv2-src/cc6d8dd/src}
 PY=/vol/bitbucket/fr1226/gloria/.venv/bin/python
@@ -24,6 +25,7 @@ check() {  # $1 = output of one conversion; returns 1 on failure
   ! grep -q -E "Traceback|unit error" <<< "$1"
 }
 LOCK=$D/datasets/.convert.lock  # any conversion that holds it makes this round skip (no CPU overlap)
+sleep "$FIRST_DELAY"
 while true; do
   exec 9> "$LOCK"
   if ! flock -n 9; then
@@ -35,6 +37,13 @@ while true; do
         $(ls -d "$D"/runs/searchlabels-gen9-*) -- --workers 2 --incremental "${ENC[@]}" \
         --v2pre-out "$D/datasets/v2pre/gen9-searchlabels" 2>&1) || ok=0
   check "$out" || ok=0
+  if ls -d "$D"/runs/searchlabels-gen4-* > /dev/null 2>&1; then  # gen4 full-search labels (long-slot jobs)
+    echo "=== $(date -Is) gen4 search labels: $(ls -d "$D"/runs/searchlabels-gen4-* | wc -l) runs"
+    out=$(nice -n 10 bash scripts/slurm_convert.sbatch runs gen4randombattle "$D/datasets/searchlabels" \
+          $(ls -d "$D"/runs/searchlabels-gen4-*) -- --workers 2 --incremental "${ENC[@]}" \
+          --v2pre-out "$D/datasets/v2pre/gen4-searchlabels" 2>&1) || ok=0
+    check "$out" || ok=0
+  fi
   echo "=== $(date -Is) human replays"
   out=$(nice -n 10 "$PY" scripts/convert_replays.py prepare "$CORPUS"/part-*.jsonl.gz --format gen9randombattle \
         --out "$D/datasets/human-prep" --inputlogs "$D"/raw/inputlogs/gen9randombattle/part-*.jsonl.gz \
