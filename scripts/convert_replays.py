@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import traceback
+import zlib
 from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
@@ -51,7 +52,8 @@ SKIP_PLAYERS = ("jaxcalibur",)
 V1 = "porygon.encoder:embed_battle"
 SET_FIELDS = ("species", "level", "item", "ability", "moves", "tera_type", "stats")
 # shard `source` ids (stable across units and runs)
-SOURCE_IDS = {"other": 0, "showdown-replays": 1, "holidayougi": 2, "pokechamp": 3, "searchlabels": 10, "benchmark": 11}
+SOURCE_IDS = {"other": 0, "showdown-replays": 1, "showdown": 1, "holidayougi": 2, "pokechamp": 3, "searchlabels": 10,
+              "benchmark": 11}
 
 
 def source_id(name: str) -> int:
@@ -191,6 +193,57 @@ def corpus_battles(files: list[Path], fmt: str, inputlogs: dict[str, str] | None
             yield r
 
 
+def prepare_human(corpus_parts: list[Path], inputlog_files: list[Path], fmt: str, out: Path,
+                  split: int) -> None:
+    """Corpus records that have an input log (inline or in the crawler's inputlog shards), with it attached, in two
+    files: rating >= `split` first (out/hi.jsonl.gz) and the rest (out/rest.jsonl.gz), each grouped by Showdown
+    commit so the re-simulation loads each simulator once. Reads only the corpus parts the index points at."""
+    logs = load_inputlogs(inputlog_files)
+    out.mkdir(parents=True, exist_ok=True)
+    parts = sorted({p for p in corpus_parts if p.name.startswith("part-")})
+    index = next((p.parent / "index.jsonl.gz" for p in parts if (p.parent / "index.jsonl.gz").exists()), None)
+    need = None
+    if index is not None:  # which parts hold battles with an input log
+        need = set()
+        for r in json_lines_gz(index):
+            if r.get("id") in logs or r.get("has_inputlog"):
+                need.add(r.get("part"))
+        parts = [p for p in parts if p.name in need]
+    rows = {"hi": [], "rest": []}
+    seen = set()
+    for p in parts:
+        for line in open_text(p):
+            head = line[:80]
+            i = head.find('"id": "')
+            rid = head[i + 7: head.find('"', i + 7)] if i >= 0 else None
+            if rid is None or (rid not in logs and '"inputlog"' not in line) or rid in seen:
+                continue
+            r = json.loads(line)
+            r["inputlog"] = r.get("inputlog") or logs.get(rid)
+            if not r["inputlog"] or not r["inputlog"].startswith(">"):
+                continue
+            seen.add(rid)
+            v = r["inputlog"][9:49] if r["inputlog"].startswith(">version ") else ""
+            rows["hi" if (r.get("rating") or 0) >= split else "rest"].append((v, zlib.compress(json.dumps(r).encode())))
+    for k, v in rows.items():
+        v.sort(key=lambda x: x[0])
+        with gzip.open(out / f"{k}.jsonl.gz", "wt") as f:
+            for _, z in v:
+                f.write(zlib.decompress(z).decode() + "\n")
+    no_log = len(logs) - len(seen & set(logs))
+    print(json.dumps({"inputlogs": len(logs), "with corpus record": len(seen), "inputlog without corpus record": no_log,
+                      f"rating >= {split}": len(rows["hi"]), "rest": len(rows["rest"]),
+                      "commits": len({v for x in rows.values() for v, _ in x})}))
+
+
+def json_lines_gz(path: Path) -> Iterator[dict]:
+    for line in open_text(path):
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
 def human_unit(battles: list[dict], builds: Path, gen: int, encoder, keep_inexact: bool,
                min_rating: int) -> Iterator[tuple[dict | None, list[dict], str | None]]:
     """(resim result, side records, error class) per battle, re-simulated by one node process."""
@@ -253,7 +306,11 @@ def human_unit(battles: list[dict], builds: Path, gen: int, encoder, keep_inexac
             continue
         recs = [human_side(b, r, s, sr) for s, sr in sides.items()]
         pair_opponent_actions(recs)
-        yield r, recs, None
+        kept = [x for x in recs if replay.to_id(x["player"] or "") not in BC_EXCLUDE]
+        for x in recs:
+            if x not in kept:
+                DROPPED.append(f"{x['id']}:{x['side']}")
+        yield r, kept, None
 
 
 def true_team(sets: list[dict], gen: int) -> list[dict]:
@@ -300,6 +357,10 @@ def pair_opponent_actions(sides: list[dict]) -> None:
 
 def result_of(winner: str | None, side: str) -> int:
     return 0 if winner in (None, "tie") else (1 if winner == side else -1)
+
+
+BC_EXCLUDE: set[str] = set()  # player ids whose own sides are dropped (--bc-exclude); set per worker
+DROPPED: list[str] = []  # "<id>:<side>" dropped in this unit
 
 
 def human_side(b: dict, r: dict, side: str, sr: replay.SideReplay) -> dict:
@@ -516,6 +577,9 @@ def do_unit(job: tuple) -> dict:
     decisions of the same replay pass). Returns counts."""
     (unit, base, battles, mode, a) = job
     fmt, gen = a["format"], a["gen"]
+    BC_EXCLUDE.clear()
+    BC_EXCLUDE.update(a.get("bc_exclude") or [])
+    DROPPED.clear()
     specs = a["encoders"]
     fns = {spec: V2PreEncoder(a["extra_src"]) if spec == "v2pre" else load_encoder(spec, a["extra_src"])
            for spec in specs}
@@ -599,7 +663,8 @@ def do_unit(job: tuple) -> dict:
         counts[f"unit error: {type(e).__name__}"] += 1
         traceback.print_exc()
     return {"unit": unit, "counts": dict(counts), "sources": sources, "commits": dict(commits),
-            "obs_dim": obs_dim, "n_actions": n_actions, "seconds": time.time() - t0, "games": games}
+            "obs_dim": obs_dim, "n_actions": n_actions, "seconds": time.time() - t0, "games": games,
+            "dropped": list(DROPPED)}
 
 
 def units(items: Iterator[dict], size: int, mode: str, a: dict, start: int = 0, first_unit: int = 0,
@@ -638,7 +703,7 @@ def link_previous(prev: Path, new: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["corpus", "runs", "logged-obs"])
+    p.add_argument("mode", choices=["corpus", "runs", "logged-obs", "prepare"])
     p.add_argument("inputs", nargs="+", type=Path)
     p.add_argument("--format", required=True)
     p.add_argument("--out", type=Path, required=True)
@@ -656,6 +721,9 @@ def main() -> None:
                    help="crawler inputlog shards to join by id (corpus records without an input log)")
     p.add_argument("--keep-inexact", action="store_true")
     p.add_argument("--no-compress", action="store_true", help="write shards with np.savez (faster to load)")
+    p.add_argument("--bc-exclude", type=Path, default=None,
+                   help="bc-exclude.json: drop the listed players' own sides (the opponent's side is kept)")
+    p.add_argument("--rating-split", type=int, default=1900, help="prepare: battles rated >= this go first")
     p.add_argument("--incremental", action="store_true",
                    help="keep the current version's parts / shards and convert only battles it does not have")
     a = p.parse_args()
@@ -663,10 +731,14 @@ def main() -> None:
     if int(os.environ.get("PORYGON_GEN", "4")) != gen:
         print(f"warning: PORYGON_GEN={os.environ.get('PORYGON_GEN', '4 (default)')} but format is gen{gen}",
               file=sys.stderr)
+    if a.mode == "prepare":
+        prepare_human(a.inputs, a.inputlogs, a.format, a.out, a.rating_split)
+        return
     a.encoder = a.encoder or [V1]
+    bc = json.loads(a.bc_exclude.read_text()) if a.bc_exclude else None
     args = {"format": a.format, "gen": gen, "encoders": a.encoder, "out": str(a.out), "builds": str(a.builds),
             "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src,
-            "no_compress": a.no_compress}
+            "no_compress": a.no_compress, "bc_exclude": sorted(bc["bc_exclude_players"]) if bc else []}
     if a.mode == "corpus":
         items = corpus_battles(a.inputs, a.format, load_inputlogs(a.inputlogs) if a.inputlogs else None)
     else:
@@ -681,6 +753,7 @@ def main() -> None:
     args["enc_dirs"] = {spec: str(d) + f".v{stamp}" for spec, d in enc_finals.items()}
     total, sources, commits = Counter(), {}, Counter()
     game_ids: list[str] = []
+    dropped: list[str] = []
     obs_dim: dict[str, Any] = {}
     n_actions = None
     first_unit = first_game = 0
@@ -689,6 +762,7 @@ def main() -> None:
         prev = json.loads((rec_final / "meta.json").read_text())
         done = set(prev.get("games", []))
         game_ids = list(prev.get("games", []))
+        dropped = list((prev.get("bc_exclude") or {}).get("dropped_sides", []))
         total.update(prev.get("counts", {}))
         sources.update(prev.get("sources", {}))
         first_game = prev.get("next_game", len(game_ids) * 100)
@@ -718,6 +792,7 @@ def main() -> None:
                 obs_dim.setdefault(k, v)
             n_actions = res["n_actions"]
             game_ids += [g for g in res["games"] if g]
+            dropped += res["dropped"]
             el = time.time() - t0
             print(f"unit {res['unit']}: {res['counts'].get('games', 0)} games, {res['counts'].get('decisions', 0)} "
                   f"decisions in {res['seconds']:.0f} s; total {total['games']} games / {total['battles']} battles, "
@@ -728,6 +803,10 @@ def main() -> None:
             "code_commit": code_commit(), "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1),
             "workers": a.workers, "version": stamp, "n_games": len(game_ids), "games": game_ids,
             "next_game": first_game + n_seen[0],
+            "bc_exclude": None if not bc else {
+                "file": str(a.bc_exclude), "rule": bc.get("rule"), "n_players": len(bc["bc_exclude_players"]),
+                "sha1": __import__("hashlib").sha1(a.bc_exclude.read_bytes()).hexdigest()[:12],
+                "n_dropped_sides": len(dropped), "dropped_sides": dropped},
             "note": "game index g in a shard = position of the battle in input order; `games` lists the converted ids;"
                     " every encoder dir of one version holds the same decisions"}
     for spec, d in args["enc_dirs"].items():  # per-encoder meta keeps the old single-encoder keys too
