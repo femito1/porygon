@@ -405,7 +405,14 @@ class Crawler:
             log("inputlog queue exhausted")
             return False
         self.qpos += 1
-        rid, fmt = line.rstrip("\n").split("\t")[:2]
+        rid, fmt, prio = line.rstrip("\n").split("\t")[:3]
+        if int(prio) < self.a.queue_min_prio:  # stop at the band limit; a later run can continue from here
+            self.qpos -= 1
+            self.qfile = None
+            log(f"inputlog queue reached band {prio} < --queue-min-prio {self.a.queue_min_prio}; queue paused "
+                f"at line {self.qpos}")
+            self.flush_queue()
+            return False
         if self.st.db.execute("SELECT 1 FROM replays WHERE id=? AND has_inputlog=1", (rid,)).fetchone():
             return True  # already have it from a .json fetch
         url = f"{BASE}/{rid}.inputlog"
@@ -1042,6 +1049,8 @@ def main() -> int:
                    help="per-format override of --min-prio, e.g. gen4randombattle=2")
     c.add_argument("--queue", help="gzip text file of id<TAB>format<TAB>prio (priority-sorted) whose "
                    ".inputlog to fetch; see the `queue` subcommand")
+    c.add_argument("--queue-min-prio", type=int, default=0,
+                   help="stop the queue at the first id below this band (2 = replay rating >= 1500)")
     c.add_argument("--queue-weight", type=int, default=2,
                    help="queue fetches per round of one json fetch per format")
     c.add_argument("--backfill-until", type=int, default=0,
