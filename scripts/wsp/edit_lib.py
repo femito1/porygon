@@ -33,6 +33,22 @@ def temp05(p):
         p.action_net.score[2].bias.mul_(2.0)
 
 
+def _temp(p, k):
+    with torch.no_grad():
+        p.action_net.score[2].weight.mul_(k)
+        p.action_net.score[2].bias.mul_(k)
+
+
+@edit("temp025", "follow-up to temp05: temperature 0.25 (score.2 x4)")
+def temp025(p):
+    _temp(p, 4.0)
+
+
+@edit("temp0125", "follow-up to temp05: temperature 0.125 (score.2 x8, close to argmax play)")
+def temp0125(p):
+    _temp(p, 8.0)
+
+
 def mean_ablate_head(p, layer: int, head: int, n: int = 8000):
     """Mean-ablate one attention head in weights: zero its value projection and set its value bias to the head's
     mean output z (over logged positions and all tokens) — since the attention pattern sums to 1, the head then
