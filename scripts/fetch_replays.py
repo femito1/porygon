@@ -776,12 +776,13 @@ def parse_log(log_text: str) -> dict:
         winner = next((s for s, n in players.items() if toid(n) == w), None)
     elif re.search(r"^\|tie\|?", log_text, re.M):
         winner = "tie"
-    t = T_RE.search(log_text)
+    ts = T_RE.findall(log_text)
     gt = GAMETYPE_RE.search(log_text)
     tier = TIER_RE.search(log_text)
     return {"players": [players.get("p1"), players.get("p2")], "p1_rating": ratings.get("p1"),
             "p2_rating": ratings.get("p2"), "winner": winner, "has_result": bool(wins) or winner == "tie",
-            "n_turns": max(turns) if turns else 0, "t0": int(t.group(1)) if t else None,
+            "n_turns": max(turns) if turns else 0, "t0": int(ts[0]) if ts else None,
+            "t1": int(ts[-1]) if ts else None,
             "gametype": gt.group(1) if gt else None,
             "tier_format": tier_to_format(tier.group(1)) if tier else None,
             "raw_ratings_after": {s: raw[toid(n)][1] for s, n in players.items() if toid(n) in raw}}
@@ -945,6 +946,58 @@ def consolidate_inputlogs(showdown_dir: str, fmt: str, out_dir: str, part_mb: fl
     return ids, versions, seed_kind
 
 
+SUSPECT_MANUAL = {"bigtest1237", "notmetbh102", "cobblemoneclipse"}  # flagged by volume at >=1900, 2026-05..09
+
+
+def flag_suspects(activity: dict, out_path: str) -> set:
+    """Per-player volume stats from battle start/end times (|t:| lines). Only uploaded games are seen,
+    so these are lower bounds. Suspect = manual list, or >150 games in one UTC day, or active in
+    >=22 distinct hours of one UTC day. Writes the stats of suspects and of the top-100 by volume."""
+    stats = {}
+    for player, iv in activity.items():
+        if len(iv) < 50:
+            continue
+        per_day = collections.Counter(t0 // 86400 for t0, _ in iv)
+        hours_by_day = collections.defaultdict(set)
+        for t0, t1 in iv:
+            for h in range(t0 // 3600, t1 // 3600 + 1):
+                hours_by_day[h // 24].add(h % 24)
+        ev = sorted([(t0, 1) for t0, _ in iv] + [(t1 + 1, -1) for _, t1 in iv])
+        cur = best = 0
+        for _, d in ev:
+            cur += d
+            best = max(best, cur)
+        stats[player] = {"games": len(iv), "active_days": len(per_day),
+                         "max_games_per_day": max(per_day.values()),
+                         "mean_games_per_active_day": round(len(iv) / len(per_day), 1),
+                         "max_active_hours_in_a_day": max(len(h) for h in hours_by_day.values()),
+                         "hour_of_day_coverage": len({h for hs in hours_by_day.values() for h in hs}) / 24,
+                         "max_concurrent_battles": best}
+    suspects = {p for p, s in stats.items()
+                if p in SUSPECT_MANUAL or s["max_games_per_day"] > 150 or s["max_active_hours_in_a_day"] >= 22}
+    suspects |= SUSPECT_MANUAL & set(activity)
+    top = sorted(stats, key=lambda p: -stats[p]["max_games_per_day"])[:100]
+    with open(out_path, "w") as f:
+        json.dump({"rule": "manual list, or >150 games in one UTC day, or active in >=22 hours of one UTC day "
+                           "(uploaded replays only: lower bounds)",
+                   "suspects": {p: stats.get(p) for p in sorted(suspects)},
+                   "top100_by_max_games_per_day": {p: stats[p] for p in top}}, f, indent=1)
+    log(f"suspect bots ({len(suspects)}): {sorted(suspects)[:50]}")
+    return suspects
+
+
+def tag_index(path: str, suspects: set) -> None:
+    tmp = path + ".tmp"
+    with gzip.open(path, "rt") as fi, gzip.open(tmp, "wt") as fo:
+        for line in fi:
+            r = json.loads(line)
+            sp = [p for p in (r.get("players") or []) if toid(p) in suspects]
+            r["suspect_bot"] = bool(sp)
+            r["suspect_players"] = sp
+            fo.write(json.dumps(r) + "\n")
+    os.replace(tmp, path)
+
+
 def cmd_normalise(a):
     out = a.out
     os.makedirs(out, exist_ok=True)
@@ -958,6 +1011,7 @@ def cmd_normalise(a):
             log(f"{fmt}: {len(il_ids)} inputlogs, {len(versions)} Showdown versions, seeds {dict(seed_kind)}")
         w = PartWriter(out, fmt, a.part_mb)
         w.inputlog_ids = il_ids
+        activity: dict[str, list] = collections.defaultdict(list)
         seen: set[str] = set()
         drops = collections.Counter()
         kept = collections.Counter()
@@ -1008,9 +1062,15 @@ def cmd_normalise(a):
                     extra["elo_bucket"] = r["provenance"]["elo_bucket"]
                 w.write(rec, extra)
                 kept[src] += 1
+                if p["t0"]:
+                    for name in rec["players"]:
+                        activity[toid(name)].append((p["t0"], p["t1"] or p["t0"]))
             log(f"{fmt} {src}: kept {kept[src]}, {time.time() - t0:.0f}s")
         w.close()
-        report[fmt] = {"kept": dict(kept), "dropped": {f"{s}:{k}": v for (s, k), v in sorted(drops.items())},
+        suspects = flag_suspects(activity, os.path.join(out, fmt, "suspect-bots.json"))
+        tag_index(os.path.join(out, fmt, "index.jsonl.gz"), suspects)
+        del activity
+        report[fmt] = {"suspect_bots": sorted(suspects), "kept": dict(kept), "dropped": {f"{s}:{k}": v for (s, k), v in sorted(drops.items())},
                        "parts": w.n + 1, "built": now_iso(), "inputlogs": len(il_ids),
                        "inputlog_seed_kind": dict(seed_kind),
                        "inputlog_versions": dict(versions.most_common()),
