@@ -12,12 +12,11 @@
 #   versions.tsv            battles per commit (with --corpus / --count)
 # Run inside a job (esbuild uses every core it gets; -j N parallel builds), never on the login node.
 # NODE_MODULES: node_modules with esbuild + ts-chacha20 (default: gloria's pokemon-showdown, used read-only).
-# FULL=1 keeps data/text (move / ability descriptions; the simulator does not read them).
+#   scripts/build_showdown_versions.sh --add-text                   # repair: compile data/text into builds lacking it
 set -euo pipefail
 ROOT=${SHOWDOWN_ROOT:-/vol/bitbucket/fr1226/porygon-ws-data/showdown}
 NODE_MODULES=${NODE_MODULES:-/vol/bitbucket/fr1226/gloria/pokemon-showdown/node_modules}
 NODE=${NODE:-node}
-FULL=${FULL:-0}
 JOBS=4
 MODE=shas
 ARGS=()
@@ -26,6 +25,7 @@ while (($#)); do
     -j) JOBS=$2; shift 2 ;;
     --corpus) MODE=corpus; shift ;;
     --count) MODE=count; shift ;;
+    --add-text) MODE=text; shift ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
@@ -36,6 +36,28 @@ count_versions() {  # battles per `>version` sha in jsonl[.gz] files (JSON-escap
     case $f in *.gz) zcat -- "$f" ;; *) cat -- "$f" ;; esac
   done | grep -o '>version [0-9a-f]\{40\}' | awk '{print $2}' | sort | uniq -c | sort -rn | awk '{print $2"\t"$1}'
 }
+
+if [[ $MODE == text ]]; then  # builds made while data/text was skipped: older dex.js requires it at load
+  for b in "$ROOT"/builds/*/; do
+    sha=$(basename "$b"); [[ -d $b/dist/data/text || ! -f $b/dist/sim/dex.js ]] && continue
+    tmp="$ROOT/builds/.text-$sha"; rm -rf "$tmp"; mkdir -p "$tmp"
+    git --git-dir="$ROOT/ps.git" archive "$sha" data/text tsconfig.json | tar -x -C "$tmp" && ln -sfn "$NODE_MODULES" "$tmp/node_modules"
+    (cd "$tmp" && "$NODE" -e '
+      const esbuild = require("esbuild"), fs = require("fs"), path = require("path"), out = [];
+      const walk = d => { for (const f of fs.readdirSync(d)) { const p = d + "/" + f;
+        if (fs.statSync(p).isDirectory()) walk(p); else out.push(p); } };
+      walk("./data/text");
+      const ts = out.filter(p => p.endsWith(".ts") && !p.endsWith(".d.ts"));
+      esbuild.buildSync({entryPoints: ts, outdir: process.argv[1] + "/dist", outbase: ".", format: "cjs",
+        platform: "node", tsconfig: "./tsconfig.json", logLevel: "error"});
+      for (const p of out.filter(p => p.endsWith(".json") || p.endsWith(".js"))) {
+        fs.mkdirSync(path.dirname(process.argv[1] + "/dist/" + p), {recursive: true});
+        fs.copyFileSync(p, process.argv[1] + "/dist/" + p); }
+    ' "$b") && echo "text added $sha" || echo "text failed $sha" >&2
+    rm -rf "$tmp"
+  done
+  exit 0
+fi
 
 if [[ $MODE != shas ]]; then
   count_versions "${ARGS[@]}" > "$ROOT/versions.tsv"
@@ -69,7 +91,7 @@ build_one() {
   (cd "$tmp" && "$NODE" -e '
     const esbuild = require("esbuild"), fs = require("fs"), path = require("path");
     const full = process.env.FULL === "1";
-    const skip = p => !full && (p === "./data/text" || p === "data/text");  // formats need every mod
+    const skip = p => false;  // older dex.js require data/text at load; formats need every mod
     const walk = (d, out) => { for (const f of fs.readdirSync(d)) { const p = d + "/" + f;
       if (skip(p)) continue;
       if (fs.statSync(p).isDirectory()) walk(p, out);
@@ -89,7 +111,7 @@ build_one() {
   echo "built $sha"
 }
 export -f build_one
-export ROOT NODE_MODULES NODE FULL
+export ROOT NODE_MODULES NODE
 printf '%s\n' "${ARGS[@]}" | xargs -r -P "$JOBS" -I{} bash -c 'build_one {}'
 
 # sha -> commit time for every build
