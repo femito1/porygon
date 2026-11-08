@@ -171,8 +171,8 @@ function estimateStats(mon, level) {
 // ---------------------------------------------------------------- field layout
 const FIELDS = {4: S.fields[4], 9: S.fields[9]};
 const AUX = {4: S.auxFields[4], 9: S.auxFields[9]};
-const W = {};  // name -> width per row
-for (const g of [4, 9]) for (const [k, , sh] of [...FIELDS[g], ...AUX[g]]) W[k] = prod(sh);
+const WG = {4: {}, 9: {}};  // gen -> name -> width per row (action_mask / aux_opp_class differ by gen)
+for (const g of [4, 9]) for (const [k, , sh] of [...FIELDS[g], ...AUX[g]]) WG[g][k] = prod(sh);
 function fields(gen) { return FIELDS[gen >= 9 ? 9 : 4].map(([k, d, sh]) => [k, d, sh.slice()]); }
 function auxFields(gen) { return AUX[gen >= 9 ? 9 : 4].map(([k, d, sh]) => [k, d, sh.slice()]); }
 
@@ -404,7 +404,7 @@ const MASK = new Uint8Array(32);
 const AVAIL = [];
 /** encode(battle) -> row `row` of outs[name] */
 function encodeFields(t, outs, row) {
-  const F = FIELDS[t.gen >= 9 ? 9 : 4];
+  const F = FIELDS[t.gen >= 9 ? 9 : 4], W = WG[t.gen >= 9 ? 9 : 4];
   const R = {};
   for (const [k] of F) {
     const w = W[k];
@@ -430,7 +430,7 @@ function encodeFields(t, outs, row) {
 /** aux_targets(battle, opp_battle, obs) -> row `row` of outs[name] (opp = the other side's SideTracker) */
 function encodeAux(t, opp, oppTrueTeam, outs, row) {
   const gen = t.gen;
-  const A = AUX[gen >= 9 ? 9 : 4];
+  const A = AUX[gen >= 9 ? 9 : 4], W = WG[gen >= 9 ? 9 : 4];
   const R = {};
   for (const [k] of A) { const w = W[k]; R[k] = row * w; outs[k].fill(k === 'aux_opp_target' ? 0 : -1, row * w, (row + 1) * w); }
   if (!opp) return;

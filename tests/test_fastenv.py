@@ -59,3 +59,18 @@ def test_duplicate_pairs_replay_teams():
             g0, g1 = teams[(pos, 0)], teams[(pos, 1)]
             # game 1 swaps the teams: p1's opponent in game 1 is p2's opponent (= p1's team) of game 0
             assert (g1[0] == g0[1]).all() and (g1[1] == g0[0]).all()
+
+
+@pytest.mark.parametrize("fmt", ["gen4randombattle", "gen9randombattle"])
+def test_v2_rows_consistent(fmt):
+    """Multi-row batches: every row's v2 action_mask equals the env mask (catches per-row stride bugs that
+    single-decision parity harnesses cannot see)."""
+    rng = np.random.default_rng(3)
+    with FastEnv(fmt, n_workers=1, battles_per_worker=6, seed=4, encoder="v2") as env:
+        b = env.reset()
+        for _ in range(60):
+            na = b.needs_action
+            assert (b.obs["action_mask"][na] > 0).tolist() == b.mask[na].tolist()
+            cls = b.aux["aux_opp_class"][na]
+            assert cls.shape[1] == b.mask.shape[1] and (cls >= -1).all()
+            b = env.step(random_actions(b.mask[na], rng))
