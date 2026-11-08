@@ -393,6 +393,7 @@ def aux_targets(battle: AbstractBattle, opp_battle: AbstractBattle | None, obs: 
         if k != "aux_move_in_set":
             out[k][:] = -1
     out["aux_move_in_set"][:] = -1.0
+    out["aux_opp_target"][:] = 0.0  # filled by the trainer from the opponent's policy (aux_opp_class)
     if opp_battle is None:
         return out
     theirs = opp_battle.team  # key "p2: Name" -> Pokemon (full info from its requests)
@@ -439,4 +440,69 @@ def aux_targets(battle: AbstractBattle, opp_battle: AbstractBattle | None, obs: 
             slots = np.flatnonzero(obs["moves"][6 + opp_active_slot] == mid)
             if len(slots):
                 out["aux_opp_class"][a] = 7 + int(slots[0]) + (KM if a >= TERA_OFFSET else 0)
+    return out
+
+
+def opp_action_class(battle: AbstractBattle, obs: dict[str, np.ndarray], kind: str, name: str,
+                     tera: bool = False) -> int:
+    """Class (spec.N_OPP_CLASSES, our frame) of an observed opponent action: kind "switch" with the species /
+    identifier it switched to, or "move" with the move id; -1 when it cannot be placed."""
+    seen = list(battle.opponent_team)
+    if kind == "switch":
+        for k, key in enumerate(seen[:6]):
+            mon = battle.opponent_team[key]
+            if name in (key, mon.species, species_key(mon), norm(key.split(": ", 1)[-1])):
+                return k
+        return 6
+    slot = next((k for k, key in enumerate(seen[:6]) if battle.opponent_team[key].active), None)
+    if slot is None:
+        return -1
+    hits = np.flatnonzero(obs["moves"][6 + slot] == vid("moves", norm(name)))
+    return 7 + int(hits[0]) + (KM if tera else 0) if len(hits) else -1
+
+
+def aux_targets_from_team(battle: AbstractBattle, true_team: list[dict], obs: dict[str, np.ndarray],
+                          opp_action: tuple[str, str, bool] | None = None) -> dict[str, np.ndarray]:
+    """`aux_targets` for logged / replayed games without the opponent's battle object (data stream, F2 records):
+    `true_team` = the opponent's sets as dicts with species, item, ability, moves, tera_type (F2 `true_team`);
+    `opp_action` = the opponent's actual action at this decision (kind "move"/"switch", move id or species,
+    tera) -> `aux_opp_target` one-hot. `aux_opp_class` stays -1 (the opponent's legal set is unknown)."""
+    gen = battle.gen
+    out = empty(gen, aux=True)
+    for k in out:
+        out[k][:] = -1
+    out["aux_move_in_set"][:] = -1.0
+    out["aux_opp_target"][:] = 0.0
+    sets = {}
+    for t in true_team:
+        sp = norm(t.get("species", ""))
+        sets[sp] = t
+        sets.setdefault(set_species(gen, sp), t)
+    seen = list(battle.opponent_team)
+    matched = set()
+    for k, key in enumerate(seen[:6]):
+        mon = battle.opponent_team[key]
+        t = next((sets[s] for s in (mon.species, species_key(mon), set_species(gen, mon.species)) if s in sets), None)
+        if t is None:
+            continue
+        matched.add(id(t))
+        out["aux_item"][k] = vid("items", norm(t.get("item") or ""))
+        out["aux_ability"][k] = vid("abilities", norm(t.get("ability") or "") or None)
+        if gen >= 9 and t.get("tera_type"):
+            out["aux_tera"][k] = TYPE_ID.get(norm(t["tera_type"]), -1)
+        true_moves = [norm(m) for m in t.get("moves", [])][:4]
+        for j, m in enumerate(true_moves):
+            out["aux_moves"][k, j] = vid("moves", m)
+        ids = obs["moves"][6 + k]
+        for j in range(KM):
+            if ids[j] != PAD:
+                out["aux_move_in_set"][k, j] = float(any(vid("moves", m) == ids[j] for m in true_moves))
+    unseen = [t for t in true_team if id(t) not in matched]
+    for k, t in enumerate(unseen[:6]):
+        sp = norm(t.get("species", ""))
+        out["aux_unseen"][k] = vid("species", sp if sp in INDEX["species"] else set_species(gen, sp))
+    if opp_action is not None:
+        c = opp_action_class(battle, obs, *opp_action)
+        if c >= 0:
+            out["aux_opp_target"][c] = 1.0
     return out

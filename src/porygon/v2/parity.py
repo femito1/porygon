@@ -31,7 +31,7 @@ from poke_env.player import Player, RandomPlayer, SimpleHeuristicsPlayer
 
 from porygon.env import local_server
 from porygon.v2.encoder import aux_targets, encode
-from porygon.v2.spec import SPEC_VERSION, aux_fields, fields
+from porygon.v2.spec import COMPATIBLE, SPEC_VERSION, aux_fields, fields
 
 TOLERANCE = 1e-4
 
@@ -183,7 +183,7 @@ def load(fixture: Path) -> tuple[list[dict], dict[str, Any]]:
 
 def check(fixture: Path, candidate: Path | None = None, limit: int | None = None, aux: bool = True) -> int:
     battles, z = load(fixture)
-    assert str(z["spec"]) == SPEC_VERSION, f"fixture spec {z['spec']} != reference {SPEC_VERSION}"
+    assert str(z["spec"]) in COMPATIBLE, f"fixture spec {z['spec']} incompatible with reference {SPEC_VERSION}"
     cand = dict(np.load(candidate)) if candidate else None
     n = len(z["battle"]) if limit is None else min(limit, len(z["battle"]))
     order = range(n) if limit is None else sorted(random.Random(0).sample(range(len(z["battle"])), n))
@@ -192,6 +192,7 @@ def check(fixture: Path, candidate: Path | None = None, limit: int | None = None
         b = battles[z["battle"][d]]
         ref = {k[4:]: v[d] for k, v in z.items() if k.startswith("obs/")}
         ref_aux = {k[4:]: v[d] for k, v in z.items() if k.startswith("aux/")}
+        ref_aux.setdefault("aux_opp_target", np.zeros(aux_fields(int(b["format"][3]))["aux_opp_target"][0], np.float32))
         if cand is not None:  # another implementation's observations vs the stored reference
             problems = compare(ref, {k[4:]: v[d] for k, v in cand.items() if k.startswith("obs/")})
         else:  # the reference encoder now vs when the fixture was made (regression)

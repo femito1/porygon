@@ -10,7 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-SPEC_VERSION = "2.0"
+SPEC_VERSION = "2.1"  # 2.1 = 2.0 observations unchanged + aux_opp_target / aux_targets_from_team
+COMPATIBLE = {"2.0", "2.1"}  # fixture versions whose observation fields equal this version's
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 VOCAB = json.loads((DATA / "vocab.json").read_text())  # same vocabulary as v1
@@ -108,4 +109,7 @@ def aux_fields(gen: int) -> dict[str, tuple[tuple[int, ...], type]]:
         "aux_move_in_set": ((6, KM), np.float32),  # candidate move slot j is in the true set (1/0), -1 = empty slot
         "aux_unseen": ((6,), np.int16),  # species ids of the opponent's mons not yet seen, -1 padded
         "aux_opp_class": ((n_actions(gen),), np.int16),  # opponent's action a (its frame) -> class in our frame
+        # soft target over the classes (sums to 1, all zero = none): self-play trainers fill it from the
+        # opponent's policy through aux_opp_class; logged games put a one-hot of the actual action
+        "aux_opp_target": ((N_OPP_CLASSES,), np.float32),
     }
