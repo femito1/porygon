@@ -231,18 +231,48 @@ def fill_buffer(buffer: DictRolloutBuffer, segments: dict, boot: dict, gamma: fl
     buffer.pos, buffer.full = n, True
 
 
-class AsyncPPO(PPO):
+class DiagPPO(PPO):
+    """PPO that logs, before each update's first gradient step, how far the current policy already is from the
+    behaviour policy on the rollout (diag/ratio0_mean, ratio0_std, clip0_frac: ≈ 1, 0, 0 when the stored
+    log-probs come from the weights being trained) and the policy-version lag of the rollout (diag/policy_lag:
+    updates between the weights that collected it and the weights that train on it)."""
+
+    policy_lag = 0
+
+    def _pre_update_diagnostics(self) -> None:
+        with torch.no_grad():
+            data = next(self.rollout_buffer.get(min(8192, self.rollout_buffer.buffer_size * self.rollout_buffer.n_envs)))
+            _, log_prob, _ = self.policy.evaluate_actions(data.observations, data.actions.long().flatten())
+            ratio = torch.exp(log_prob.float() - data.old_log_prob)
+            clip = self.clip_range(self._current_progress_remaining)
+        self.logger.record("diag/ratio0_mean", float(ratio.mean()))
+        self.logger.record("diag/ratio0_std", float(ratio.std()))
+        self.logger.record("diag/clip0_frac", float(((ratio - 1).abs() > clip).float().mean()))
+        self.logger.record("diag/policy_lag", float(self.policy_lag))
+
+    def train(self) -> None:
+        self.policy.set_training_mode(False)
+        self._pre_update_diagnostics()
+        super().train()
+
+
+class AsyncPPO(DiagPPO):
     """PPO whose rollouts come from `AsyncBattles` instead of a lockstep VecEnv. Set
     `overlap_update = True` to keep battles running during the PPO update (see the module doc)."""
 
     overlap_update = False
     autocast: str | None = None  # "bf16": run the PPO update under torch.autocast (porygon.train --autocast)
 
+    _n_trained = 0  # updates done (policy version)
+    _actor_version = 0  # policy version the acting copy was last refreshed from
+
     def train(self) -> None:
         if self.autocast == "bf16":
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                return super().train()
-        return super().train()
+                super().train()
+        else:
+            super().train()
+        self._n_trained += 1
 
     def _excluded_save_params(self) -> list[str]:
         return super()._excluded_save_params() + ["_actor", "_actor_lock", "_rollouts", "_collector", "_stop"]
@@ -251,7 +281,8 @@ class AsyncPPO(PPO):
         self.policy.set_training_mode(False)
         callback.on_rollout_start()
         if self.overlap_update:
-            segments, boot, finished, n = self._next_background_rollout(env, n_rollout_steps)
+            segments, boot, finished, n, version = self._next_background_rollout(env, n_rollout_steps)
+            self.policy_lag = self._n_trained - version
             self.ep_info_buffer.extend(finished)
             ok = True
             for _ in range(n):
@@ -297,6 +328,7 @@ class AsyncPPO(PPO):
         else:
             with self._actor_lock:
                 self._actor.load_state_dict(self.policy.state_dict())
+                self._actor_version = self._n_trained
         item = self._rollouts.get()
         self._rollouts.task_done()  # lets the collector start the next rollout
         if isinstance(item, BaseException):
@@ -316,8 +348,9 @@ class AsyncPPO(PPO):
         try:
             while not self._stop.is_set():
                 finished: list[dict] = []
+                version = self._actor_version  # refreshed only while this thread waits in join() below
                 segments, boot, _ = env.collect(LockedActor(), n, lambda k, f: finished.extend(f) or True)
-                self._rollouts.put((segments, boot, finished, sum(map(len, segments.values()))))
+                self._rollouts.put((segments, boot, finished, sum(map(len, segments.values())), version))
                 self._rollouts.join()  # at most one rollout ahead: data is <= one update old
         except BaseException as e:  # surface worker failures in the training thread
             if not self._stop.is_set():

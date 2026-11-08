@@ -204,7 +204,8 @@ def main():
         args.n_battles = n_workers * per_worker  # --ports: only for --eval-every
         if args.fastenv_lockstep:  # SB3's own rollout code over poke-env-style lockstep sub-envs (fastenv_vec)
             from porygon.fastenv_vec import FastVecEnv
-            env, algo = VecMonitor(FastVecEnv(fast)), PPO
+            from porygon.async_env import DiagPPO
+            env, algo = VecMonitor(FastVecEnv(fast)), DiagPPO
             assert not args.overlap_update, "--fastenv-lockstep: no --overlap-update"
         else:
             env, algo = FastBattles(fast), AsyncPPO
