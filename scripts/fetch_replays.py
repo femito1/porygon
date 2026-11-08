@@ -517,6 +517,9 @@ class Crawler:
                     continue
             other = any(self.step_backfill(f) or self.step_topup(f) for f in self.formats)
             if not other:
+                if self.a.exit_when_done:
+                    log("all work done (queue finished, no pending rows at or above --min-prio, backfill done); exiting")
+                    break
                 if not idle_logged:
                     log("nothing to do; idling until the next top-up")
                     idle_logged = True
@@ -1070,6 +1073,8 @@ def main() -> int:
                    help="per-format override of --min-prio, e.g. gen4randombattle=2")
     c.add_argument("--queue", help="gzip text file of id<TAB>format<TAB>prio (priority-sorted) whose "
                    ".inputlog to fetch; see the `queue` subcommand")
+    c.add_argument("--exit-when-done", action="store_true",
+                   help="exit once the queue, the pending rows and the backfill are all done (no periodic top-ups)")
     c.add_argument("--record-queue", action="store_true",
                    help="also log every queue fetch in the state DB (grows ~100 B/fetch; off on the laptop)")
     c.add_argument("--queue-min-prio", type=int, default=0,
