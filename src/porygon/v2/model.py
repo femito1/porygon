@@ -442,17 +442,21 @@ class Net(nn.Module):
             return out
 
         # aux heads
-        opp_mvec = mvec[:, 6:]
-        aux_moves = self.aux_moves(torch.cat([opp_mvec, opp_t.unsqueeze(2).expand(-1, -1, KM, -1)], -1)).squeeze(-1)
+        # per-move-slot heads on the occupied slots only (k, as for the move vectors), zero-padded to KM: the padded
+        # slots are empty for every mon, so their targets are -1 and their opponent-action classes masked
+        opp_mvec = mvec[:, 6:, :k]
+        aux_moves = self.aux_moves(torch.cat([opp_mvec, opp_t.unsqueeze(2).expand(-1, -1, k, -1)], -1)).squeeze(-1)
         opp_act = active[:, 6:]
         opp_act_mv = torch.einsum("bk,bkjd->bjd", opp_act.to(opp_mvec.dtype), opp_mvec)
         # the opponent's view: [candidate, field, its active, our active]
         octx = torch.cat([field_t, opp_act_tok, own_act_tok], -1).unsqueeze(1)
         sw = self.aux_opp_switch(torch.cat([torch.cat([opp_t, self.aux_opp_unseen.expand(b, 1, -1).to(opp_t.dtype)], 1),
                                             octx.expand(-1, 7, -1)], -1)).squeeze(-1)
-        ctx = octx.expand(-1, KM, -1)
+        ctx = octx.expand(-1, k, -1)
         mv = self.aux_opp_move(torch.cat([opp_act_mv, ctx], -1)).squeeze(-1)
         tmv = self.aux_opp_move(torch.cat([opp_act_mv + self.aux_opp_tera.to(opp_act_mv.dtype), ctx], -1)).squeeze(-1)
+        if k < KM:
+            aux_moves, mv, tmv = (F.pad(t_, (0, KM - k)) for t_ in (aux_moves, mv, tmv))
         opp_raw = torch.cat([sw, mv, tmv], 1).float()
         # classes that can happen: switch to a seen, alive, inactive mon; an unseen mon; a move the active may have
         fnum = obs["field_num"].float()
