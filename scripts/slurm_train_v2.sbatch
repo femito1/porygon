@@ -65,11 +65,15 @@ for name in ${PREEMPT_NAMES:-}; do
 done
 
 # --- servers: one per ~3 cores, ports from the job id (nodes are shared) ---
-CORES=$(nproc)  # the job-submit plugin may reshape the request: size everything from what we got
-if [ "$CORES" -lt 6 ]; then  # some partitions' submit plugin hands a GPU job 1-2 CPUs whatever -c says (seen: a16, long)
-  echo "only $CORES CPUs on $(hostname -s) ($SLURM_JOB_PARTITION): not enough for self-play, giving up" >&2; exit 1
+# CPUs we really have: the cgroup's (OMP_NUM_THREADS unset — GNU nproc honours it, and we export 1 above, which once
+# made every job size itself for 1 core), cross-checked with Slurm's count; the submit plugin may reshape -c.
+CORES=$(env -u OMP_NUM_THREADS nproc)
+[ -n "${SLURM_CPUS_ON_NODE:-}" ] && [ "$SLURM_CPUS_ON_NODE" -lt "$CORES" ] && CORES=$SLURM_CPUS_ON_NODE
+echo "CPUs: nproc $(env -u OMP_NUM_THREADS nproc), SLURM_CPUS_ON_NODE ${SLURM_CPUS_ON_NODE:-?} -> using $CORES"
+MIN_CORES=${MIN_CORES:-24}
+if [ "$CORES" -lt "$MIN_CORES" ]; then
+  echo "ERROR: only $CORES CPUs on $(hostname -s) ($SLURM_JOB_PARTITION), need >= $MIN_CORES: not starting" >&2; exit 3
 fi
-[ "$CORES" -lt 24 ] && echo "warning: only $CORES CPUs; throughput will be ~$(( CORES * 70 )) steps/s" >&2
 N_SERVERS=$(( CORES / 3 )); SELFPLAY=$(( CORES * 2 )); POOL_BATTLES=$CORES
 BASE=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 )); LAST=$(( BASE + N_SERVERS - 1 ))
 # start_servers.sh writes the no-disk-writes training config only when there is none
@@ -126,9 +130,13 @@ trap cleanup EXIT
   ${TRAIN_ARGS:-} "$@" > "$LOCAL/run/stdout.log" 2>&1 &
 TRAIN=$!
 trap 'kill -TERM "$TRAIN" 2>/dev/null || true' TERM  # the trainer saves final_model.pt and exits
-while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" || true; done
+RC=0
+while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" && RC=0 || RC=$?; done
 trap cleanup EXIT
 kill "$MIRROR" 2>/dev/null || true; mirror || true
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 143 ]; then  # a crashed trainer must fail the job (not COMPLETED / exit 0)
+  echo "ERROR: trainer exited with $RC; tail of stdout.log:" >&2; tail -25 "$LOCAL/run/stdout.log" >&2 || true; exit "$RC"
+fi
 
 # --- continue in a new job (72 h walltime) unless the chain is used up or training is done ---
 STEPS=$({ grep -oE "steps [0-9,]+ \(" "$LOCAL/run/train.log" 2>/dev/null || true; } | tail -1 | tr -dc 0-9)
