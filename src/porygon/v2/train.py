@@ -510,7 +510,7 @@ class Trainer:
         assert self.net.gen == self.gen, f"model gen {self.net.gen} vs format {args.format}"
         self.net.to(self.device).train()
         self.opt = torch.optim.AdamW(self.net.param_groups(args.weight_decay), lr=args.lr, betas=(0.9, 0.999),
-                                     eps=1e-5)
+                                     eps=1e-5, fused=self.device.type == "cuda")
         if ck is not None and "optimizer" in ck and not args.reset_optimizer:
             self.opt.load_state_dict(ck["optimizer"])
         self.actor = copy.deepcopy(self.net).eval()

@@ -60,7 +60,7 @@ def main():
     net = Net(a.gen, **json.loads(a.model_json)).to(dev).train()
     if a.compile:
         net.compile_damage()
-    opt = torch.optim.AdamW(net.param_groups(args.weight_decay), lr=args.lr, eps=1e-5)
+    opt = torch.optim.AdamW(net.param_groups(args.weight_decay), lr=args.lr, eps=1e-5, fused=dev.type == "cuda")
     data = synthetic_rollout(a.fixture, a.n, a.gen, rng)
     occ = (data["move_p"] > 0).sum(-1)
     print(f"params {sum(p.numel() for p in net.parameters()):,}; move slots occupied per mon: max {occ.max()}, "
@@ -73,7 +73,7 @@ def main():
         sync()
         return time.time() - t, r
 
-    for u in range(a.updates):
+    for u in range(1 if a.profile else a.updates):
         s, st = timed(lambda: ppo_update(net, opt, data, args, dev, False, u == 1))
         print(f"update {u}: {s:.2f} s for {a.n} transitions x {a.epochs} epochs / batch {a.batch} "
               f"(damage {st.get('perf/damage_s', float('nan')):.2f} s)", flush=True)
