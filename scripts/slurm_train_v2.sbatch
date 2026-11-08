@@ -72,6 +72,12 @@ for name in ${PREEMPT_NAMES:-}; do
   done
 done
 
+# The shared disk can make imports crawl (page faults on big shared libraries: 18 min stuck in NFS reads once, on
+# triton / nvidia libs). One sequential read per library is fast and fills the page cache: do it up front.
+SITE=$(dirname "$("$PY" -c 'import torch, os; print(os.path.dirname(torch.__file__))')")
+( cd "$SITE" && timeout 900 find torch triton nvidia -name '*.so*' -size +1M -exec cat {} + > /dev/null ) || true
+echo "$(date -u +%T) pre-read the large shared libraries"
+
 # --- servers: one per ~3 cores, ports from the job id (nodes are shared) ---
 # CPUs we really have: the cgroup's (OMP_NUM_THREADS unset — GNU nproc honours it, and we export 1 above, which once
 # made every job size itself for 1 core), cross-checked with Slurm's count; the submit plugin may reshape -c.
