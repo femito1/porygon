@@ -23,6 +23,7 @@ const {SimBattle, Teams} = require('./battle');
 const {PRNG} = require('./ps');
 const aux = require('./aux');
 
+const MAX_RETRIES = 2;  // re-asks after rejected choices before playing 'default'
 const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 
 function parseArgs(argv) {
@@ -75,6 +76,7 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
     this.rejected = [false, false];
     this.first = [true, true];
     this.crashed = false;
+    this.retries = [0, 0];
     this.oppPrev = [[-1, 0, 0, 0], [-1, 0, 0, 0]];
     this.auxTeams = [aux.teamIds(teams[0], GEN), aux.teamIds(teams[1], GEN)];
     this.battle = new SimBattle(args.format, battleSeed, teams.map(t => JSON.parse(JSON.stringify(t))), {
@@ -83,13 +85,18 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
       onRequest: (n, req) => this.trackers[n].onRequest(req),
       onError: (n, text) => this.trackers[n].onError(text),
     });
-    this.battle.start();
     this.games++;
+    try {
+      this.battle.start();
+    } catch (e) {  // tracker (PokeEnvError) or simulator failure at battle start: void battle
+      stats.crashed++;
+      this.crashed = true;
+    }
   }
 }
 
-const slots = Array.from({length: args.battles}, (_, i) => new Slot(i));
 const stats = {decisions: 0, rejected: 0, games: 0, turns: 0, truncated: 0, crashed: 0};
+const slots = Array.from({length: args.battles}, (_, i) => new Slot(i));
 
 // --- output batch ----------------------------------------------------------------------------------
 // Columns: env columns, the encoder's observation fields, the encoder's aux fields (if any). Each column is
@@ -256,7 +263,8 @@ for (;;) {
     for (const side of [0, 1]) {
       const c = slot.choice[side];
       if (c === null) continue;
-      slot.trackers[side].decisionPending = false;
+      const t = slot.trackers[side];
+      if (t.markChosen) t.markChosen(); else t.decisionPending = false;
       stats.decisions++;
       let ok;
       try {
@@ -272,9 +280,15 @@ for (;;) {
         slot.rejected[side] = true;
         // [Unavailable choice] (hidden information, e.g. an unrevealed trapping ability) comes with an updated
         // request: the tracker wants a new decision, which goes back to the policy. Otherwise play 'default'.
-        if (!slot.trackers[side].decisionPending && !b.ended && b.pendingSides().includes(side)) {
-          b.choose(side, 'default');
+        // [Invalid choice] also asks the policy again (as poke-env does), at most MAX_RETRIES times in a row.
+        if (t.decisionPending && ++slot.retries[side] > MAX_RETRIES) {
+          if (t.markChosen) t.markChosen(); else t.decisionPending = false;
         }
+        if (!t.decisionPending && !b.ended && b.pendingSides().includes(side)) {
+          try { b.choose(side, 'default'); } catch (e) { stats.crashed++; slot.crashed = true; break; }
+        }
+      } else {
+        slot.retries[side] = 0;
       }
     }
     slot.choice[0] = slot.choice[1] = null;
