@@ -120,8 +120,8 @@ class Entity(nn.Module):
     def forward(self, ids: torch.Tensor, feats: torch.Tensor | None, drop: torch.Tensor | None) -> torch.Tensor:
         lookup = ids if drop is None else torch.where(drop & (ids > UNK), torch.full_like(ids, UNK), ids)
         x = self.emb(lookup)
-        if feats is not None:
-            x = x + feats[ids]
+        if feats is not None:  # F.embedding, not feats[ids]: advanced-index backward was 25% of the update's GPU time
+            x = x + F.embedding(ids, feats)
         return x * (ids != PAD).unsqueeze(-1).to(x.dtype)
 
 
