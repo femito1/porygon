@@ -57,6 +57,10 @@ THRESHOLDS = (1500, 1700, 1800, 1900, 2000)
 # Accounts whose games we never fetch or keep: Jaxcalibur (a bot we must not distil; orchestrator rule)
 # and our own bot-flagged ladder accounts. Matched on Showdown user ids (lowercase alphanumerics).
 EXCLUDE_PLAYERS = {"jaxcalibur", "porygonagent", "femito"}
+# Obvious bot accounts, by user-id pattern: Foul Play instances (playingfoul, bostonfoulplay,
+# fablefoulplay, foulplayjpbot, ...; we never model Foul Play), anything Jaxcalibur, and ids ending
+# in "bot"+digits. Suspected-but-unclear accounts (bigtest1237, *test<N>) are flagged in SOURCES.md, not excluded.
+EXCLUDE_PATTERN = re.compile(r"foulplay|playingfoul|jaxcalibur|bot\d*$")
 
 STOP = False
 
@@ -99,7 +103,7 @@ def toid(s: str) -> str:
 
 
 def excluded(players) -> bool:
-    return any(toid(p) in EXCLUDE_PLAYERS for p in (players or []))
+    return any(toid(p) in EXCLUDE_PLAYERS or EXCLUDE_PATTERN.search(toid(p)) for p in (players or []))
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -167,9 +171,9 @@ class State:
             self.db.execute(f"UPDATE rows SET prio = CASE WHEN rating IS NULL THEN 0 {case} ELSE 1 END")
             self.kv_set("prio_version", PRIO_VERSION)
         # fetched: 0 pending, 1 done, -1 failed (non-200), -3 excluded player
-        self.db.execute("UPDATE rows SET fetched=-3 WHERE fetched=0 AND (" + " OR ".join(
-            "lower(players) LIKE ?" for _ in EXCLUDE_PLAYERS) + ")",
-            [f'%"{p}"%' for p in EXCLUDE_PLAYERS])
+        bad = [(rid,) for rid, players in self.db.execute("SELECT id, players FROM rows WHERE fetched=0")
+               if excluded(json.loads(players or "null"))]
+        self.db.executemany("UPDATE rows SET fetched=-3 WHERE id=?", bad)
         self.db.commit()
 
     def kv_get(self, key, default=None):
@@ -413,8 +417,9 @@ class Crawler:
                 f"at line {self.qpos}")
             self.flush_queue()
             return False
-        if self.st.db.execute("SELECT 1 FROM replays WHERE id=? AND has_inputlog=1", (rid,)).fetchone():
-            return True  # already have it from a .json fetch
+        if self.st.db.execute("SELECT 1 FROM replays WHERE id=?", (rid,)).fetchone() or \
+                any(r["id"] == rid for r in self.qbuf.get(fmt, [])):
+            return True  # already fetched (as .json or .inputlog)
         url = f"{BASE}/{rid}.inputlog"
         status, body = self.http.get(url)
         if status < 0:
@@ -438,6 +443,11 @@ class Crawler:
                 fh.write(gzip.compress(data, 6))
                 fh.flush()
                 os.fsync(fh.fileno())
+            for r in recs:
+                il = int(r["status"] == 200 and r["inputlog"].startswith(">"))
+                self.st.db.execute("INSERT OR REPLACE INTO replays VALUES (?,?,?,?,?,?,?)",
+                                   (r["id"], fmt, r["fetched"], r["status"],
+                                    os.path.relpath(path, self.st.root), len(r["inputlog"]), il))
             ok = sum(r["status"] == 200 and r["inputlog"].startswith(">") for r in recs)
             self.st.kv_set("queue_ok", self.st.kv_get("queue_ok", 0) + ok)
             self.st.kv_set("queue_miss", self.st.kv_get("queue_miss", 0) + len(recs) - ok)
