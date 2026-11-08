@@ -51,6 +51,34 @@ def test_filters_and_mix():
     assert p["pw"][d["forced"][(p["vw"] > 0)].astype(bool)].sum() == 0
 
 
+def test_search_labels_soft_targets_root_value_and_visits():
+    d = bc.synth_shard(200, 26, 10, seed=2)
+    d["n"] = np.int64(200)
+    rng = np.random.default_rng(0)
+    soft = rng.random((200, 26)).astype(np.float32) * d["mask"]  # visit shares, legal actions only
+    soft[:, 0] += 0.5  # some mass on an illegal action (switch 0 is never legal here): must be dropped
+    d["target"] = soft.astype(np.float16)
+    d["action"][:] = -1  # search rows: no human action
+    d["root_value"][:5] = np.nan
+    p = bc.prepare(d, bc.Filters())
+    assert np.allclose(p["target"].sum(1), 1, atol=1e-3) and (p["target"][~p["mask"]] == 0).all()
+    assert (p["target"] > 0).sum(1).mean() > 2  # soft, not one-hot
+    zr = bc.Filters(value_target="result").value_targets(d)
+    zs = bc.Filters(value_target="search").value_targets(d)
+    zm = bc.Filters(value_target="mix", value_mix=0.25).value_targets(d)
+    assert np.allclose(zr, d["z"]) and np.allclose(zs[5:], 2 * d["root_value"][5:] - 1)
+    assert np.allclose(zs[:5], d["z"][:5])  # no root value -> game result
+    assert np.allclose(zm[5:], 0.25 * zs[5:] + 0.75 * zr[5:])
+    w = bc.Filters(visit_weight_power=1.0).row_weight(d)
+    big, small = d["visits"].argmax(), d["visits"].argmin()
+    assert w[big] > 1 > w[small] >= 0.1
+    logits = torch.zeros(200, 26)
+    b = {k: torch.as_tensor(v) for k, v in p.items() if k != "obs"}
+    pol, val = bc.losses(logits, torch.zeros(200), b)
+    uniform_ce = np.log(p["mask"].sum(1))[p["pw"] > 0].mean()
+    assert pol.item() == pytest.approx(uniform_ce, rel=1e-4)  # CE to a distribution under a uniform policy
+
+
 def test_game_level_split_is_deterministic():
     games = np.repeat(np.arange(2000), 7)
     v = bc.val_bucket(games, 0.1)
@@ -126,7 +154,8 @@ def test_overfit_and_checkpoints(gen9_data, tmp_path):
 def test_stream_loader_and_eval(gen9_data, tmp_path, capsys):
     out = tmp_path / "stream"
     bc.main(tiny_args(gen9_data, out, "--epochs", "1", "--batch-size", "128", "--loader", "stream",
-                      "--buffer-rows", "300", "--mix", "human=1,search=0.5", "--min-rating", "1200"))
+                      "--buffer-rows", "300", "--mix", "human=1,search=0.5", "--min-rating", "1200",
+                      "--value-target", "mix", "--visit-weight-power", "0.5"))
     assert (out / "final_model.zip").exists()
     capsys.readouterr()
     bc.main(["eval", str(out / "final_model.zip"), str(gen9_data), "--device", "cpu", "--all"])

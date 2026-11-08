@@ -10,7 +10,9 @@ Input (the data stream's supervised format): DATA is a directory `encoded/<forma
 `shard-NNNN.npz` files (np.savez_compressed), each with
     obs float16 [N, D]   mask int8 [N, A]   action int16 [N] (-1 unknown)   target float16 [N, A] (policy target)
     z float32 [N] (final result, decider's view, +-1/0)   rating, opp_rating int16 (-1 unknown)   game int32
-    turn int16   source uint8   forced uint8   n_legal uint8.
+    turn int16   source uint8   forced uint8   n_legal uint8
+    optional (search labels): root_value float32 [N] (search's win expectation in [0, 1]; NaN / -1 = none),
+    visits int32 [N] (root visits, for --visit-weight-power).
 The older expert-iteration shards (porygon.expert: obs, mask, prior, target, ret) load too: ret -> z, source
 "search", no rating; they carry no game id, so games are recovered as runs of non-decreasing turn (one player's
 side of one battle; the two sides of a battle can still land on different sides of the split).
@@ -26,8 +28,11 @@ may define `bc_forward(obs) -> (logits, values)`, otherwise the SB3 actor-critic
 Losses: soft cross-entropy of the masked policy to `target` (renormalised over legal actions; one-hot of
 `action` when the target is empty) on decisions with a policy target, n_legal >= --min-legal and (with
 --skip-forced) not forced; value loss (MSE of V to z, or --value-loss bce: BCE of (tanh V + 1)/2 to (z + 1)/2) on
-ALL kept decisions, times --vf-coef. Row weights: --mix source weights x optional rating weights. Use the
-default mse for checkpoints that search / PPO will read (they treat V as a value in [-1, 1]).
+ALL kept decisions, times --vf-coef; the value target is the game result z (--value-target result), the
+search's root value 2 rv - 1 (search; z where a decision has none) or a mix. Row weights: --mix source weights x
+optional rating weights x optional visit weights. Use the default mse for checkpoints that search / PPO will read
+(they treat V as a value in [-1, 1]). Arms: human only `--sources human`, search only `--sources search`, both
+`--mix human=1,search=W` (source names from meta.json "sources", or numeric codes).
 
 Split: by game, deterministic (a hash of the game id against --val-frac); the validation set is the val-bucket
 games of the shards in sorted order up to --val-max decisions (val-bucket games beyond the cap are not trained
@@ -192,6 +197,9 @@ class Filters:
     min_legal: int = 2
     label_smoothing: float = 0.0
     target_temperature: float = 1.0
+    value_target: str = "result"  # result | search | mix (search: 2 * root_value - 1 where present, else result)
+    value_mix: float = 0.5  # mix: value_mix * search + (1 - value_mix) * result
+    visit_weight_power: float = 0.0  # > 0: w *= clip((visits / shard mean) ^ power, 0.1, 10) where visits exist
 
     def row_weight(self, d: dict[str, np.ndarray]) -> np.ndarray:
         """Per-decision weight (0 = dropped) from the row-level filters."""
@@ -213,13 +221,31 @@ class Filters:
         if self.rating_weight_scale > 0:
             rw = np.clip(np.exp((r - self.rating_ref) / self.rating_weight_scale), 0.1, 10.0)
             w = np.where(known, w * rw, w).astype(np.float32)
+        if self.visit_weight_power > 0 and "visits" in d:
+            v = d["visits"].astype(np.float64)
+            has = v > 0
+            if has.any():
+                vw = np.clip((v / v[has].mean()) ** self.visit_weight_power, 0.1, 10.0)
+                w = np.where(has, w * vw, w).astype(np.float32)
         return w
+
+    def value_targets(self, d: dict[str, np.ndarray]) -> np.ndarray:
+        """The value-head target on the [-1, 1] scale: the game result z, the search's root value (stored in
+        [0, 1] as our win expectation -> 2 rv - 1) where a decision has one, or a mix."""
+        z = d["z"].astype(np.float32)
+        if self.value_target == "result" or "root_value" not in d:
+            return z
+        rv = d["root_value"].astype(np.float32)
+        ok = np.isfinite(rv) & (rv >= 0) & (rv <= 1)
+        s = 2 * rv - 1
+        lam = 1.0 if self.value_target == "search" else self.value_mix
+        return np.where(ok, lam * s + (1 - lam) * z, z).astype(np.float32)
 
 
 def prepare(d: dict[str, np.ndarray], filt: Filters, rows: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Training arrays for the kept rows (`rows`: boolean selection on top of the filters)."""
     w = filt.row_weight(d)
-    z = d["z"].astype(np.float32)
+    z = filt.value_targets(d)
     keep = (w > 0) & np.isfinite(z)
     if rows is not None:
         keep &= rows
@@ -243,7 +269,7 @@ def prepare(d: dict[str, np.ndarray], filt: Filters, rows: np.ndarray | None = N
     pol_sub = has_pol & (n_legal >= filt.min_legal) & ~(forced & filt.skip_forced)
     return {
         "obs": np.ascontiguousarray(d["obs"][ix], dtype=np.float16),
-        "mask": mask, "target": target, "z": np.nan_to_num(z[ix]),
+        "mask": mask, "target": target, "z": np.nan_to_num(z[ix]), "result": np.nan_to_num(d["z"][ix]).astype(np.float32),
         "pw": (w[ix] * pol_sub).astype(np.float32), "vw": w[ix].astype(np.float32),
         "has_pol": has_pol, "n_legal": n_legal,
     }
@@ -336,7 +362,7 @@ def ram_batches(data: dict, epoch: int, batch_size: int, seed: int):
         yield take(data, np.sort(perm[s:s + batch_size]))  # sorted gather is kinder to the cache
 
 
-TENSOR_KEYS = ("obs", "mask", "target", "z", "pw", "vw", "has_pol", "n_legal")
+TENSOR_KEYS = ("obs", "mask", "target", "z", "result", "pw", "vw", "has_pol", "n_legal")
 
 
 def to_torch(b: dict[str, np.ndarray], device: torch.device, pin: bool) -> dict[str, torch.Tensor]:
@@ -545,6 +571,7 @@ def evaluate(net: BCNet, data: dict[str, np.ndarray], device: torch.device, batc
         y = ((z + 1) / 2).clamp(0, 1)
         acc["vmse"] += ((torch.tanh(v) if value_loss == "bce" else v) - z).pow(2).sum().item()
         acc["vlog"] += F.binary_cross_entropy(p, y, reduction="sum").item()
+        acc["vlog_result"] += F.binary_cross_entropy(p, ((b["result"] + 1) / 2).clamp(0, 1), reduction="sum").item()
         acc["nv"] += len(z)
         k = (p * 10).long().clamp(0, 9).cpu().numpy()
         np.add.at(bins, k, np.stack([np.ones(len(k)), p.cpu().numpy(), y.cpu().numpy()], 1))
@@ -556,6 +583,7 @@ def evaluate(net: BCNet, data: dict[str, np.ndarray], device: torch.device, batc
         if acc[f"n{g}"]:
             out[f"val_top1{g}"] = acc[f"hit{g}"] / acc[f"n{g}"]
     out |= {"val_value_mse": acc["vmse"] / nz("nv"), "val_value_logloss": acc["vlog"] / nz("nv"),
+            "val_value_logloss_result": acc["vlog_result"] / nz("nv"),
             "val_ece": float(np.abs(bins[:, 1] - bins[:, 2]).sum() / max(bins[:, 0].sum(), 1)),
             "val_calibration": [[int(n), round(sp / n, 3), round(sy / n, 3)] for n, sp, sy in bins if n]}
     return out
@@ -614,7 +642,8 @@ def make_filters(args, sources: dict[str, int]) -> Filters:
                    sources={code(s) for s in args.sources.split(",")} if args.sources else None, mix=mix,
                    rating_weight_scale=args.rating_weight_scale, rating_ref=args.rating_ref,
                    skip_forced=args.skip_forced, min_legal=args.min_legal, label_smoothing=args.label_smoothing,
-                   target_temperature=args.target_temperature)
+                   target_temperature=args.target_temperature, value_target=args.value_target,
+                   value_mix=args.value_mix, visit_weight_power=args.visit_weight_power)
 
 
 def amp_dtype(args, device: torch.device) -> torch.dtype | None:
@@ -841,7 +870,9 @@ def synth_shard(n: int, n_actions: int = 26, n_games: int = 20, seed: int = 0) -
     return {"obs": obs.astype(np.float16), "mask": mask, "action": action, "target": target, "z": z,
             "rating": rating, "opp_rating": rating, "game": game, "turn": rng.integers(1, 40, n).astype(np.int16),
             "source": (rng.random(n) < 0.3).astype(np.uint8), "forced": forced.astype(np.uint8),
-            "n_legal": mask.sum(1).astype(np.uint8)}
+            "n_legal": mask.sum(1).astype(np.uint8),
+            "root_value": np.clip((z + 1) / 2 * 0.6 + 0.2 + rng.normal(0, 0.05, n), 0, 1).astype(np.float32),
+            "visits": rng.integers(100, 5000, n).astype(np.int32)}
 
 
 def synth_cmd(args) -> None:
@@ -909,6 +940,11 @@ def add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--label-smoothing", type=float, default=0.0)
     p.add_argument("--target-temperature", type=float, default=1.0, help="target ~ target^(1/T) (soft targets)")
     p.add_argument("--value-loss", choices=["mse", "bce"], default="mse")
+    p.add_argument("--value-target", choices=["result", "search", "mix"], default="result",
+                   help="value-head target: game result z, search root_value (2 rv - 1; z where absent), or a mix")
+    p.add_argument("--value-mix", type=float, default=0.5, help="mix: weight of the search root value")
+    p.add_argument("--visit-weight-power", type=float, default=0.0,
+                   help="> 0: weight decisions by clip((visits / shard mean)^p, 0.1, 10) where `visits` exists")
     p.add_argument("--max-shards", type=int)
     p.add_argument("--load-workers", type=int, default=max(1, min(6, (os.cpu_count() or 2) - 2)))
     p.add_argument("--eval-batch-size", type=int, default=4096)
