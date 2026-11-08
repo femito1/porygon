@@ -91,8 +91,23 @@ def code_commit() -> str:
 
 # ---------------------------------------------------------------- inputs
 
-def corpus_battles(files: list[Path], fmt: str) -> Iterator[dict[str, Any]]:
-    """F1 corpus records ({id, format, log, inputlog?, ...}) or crawler shards ({id, status, body: replay JSON})."""
+def load_inputlogs(files: list[Path]) -> dict[str, str]:
+    """id -> input log from the crawler's inputlog shards ({id, status, inputlog}) for corpus records without one
+    (mirror datasets such as HolidayOugi have the log only)."""
+    out = {}
+    for f in files:
+        for line in open_text(f):
+            if line.strip():
+                r = json.loads(line)
+                il = r.get("inputlog") or ""
+                if str(r.get("status", "200")) == "200" and il.startswith(">"):
+                    out[r["id"]] = il
+    return out
+
+
+def corpus_battles(files: list[Path], fmt: str, inputlogs: dict[str, str] | None = None) -> Iterator[dict[str, Any]]:
+    """F1 corpus records ({id, format, log, inputlog?, ...}) or crawler shards ({id, status, body: replay JSON});
+    `inputlogs`: id -> input log for records that lack one."""
     for f in files:
         for line in open_text(f):
             if not line.strip():
@@ -108,6 +123,8 @@ def corpus_battles(files: list[Path], fmt: str) -> Iterator[dict[str, Any]]:
             if replay.to_id(r.get("format") or str(r.get("id", "")).split("-")[0]) != fmt:
                 continue
             r["format"] = fmt
+            if not r.get("inputlog") and inputlogs:
+                r["inputlog"] = inputlogs.get(r["id"])
             yield r
 
 
@@ -494,6 +511,8 @@ def main() -> None:
     p.add_argument("--unit", type=int, default=500, help="battles per record part / encoded shard")
     p.add_argument("--start-unit", type=int, default=0, help="resume: skip the units before this one")
     p.add_argument("--min-rating", type=int, default=0)
+    p.add_argument("--inputlogs", nargs="*", type=Path, default=[],
+                   help="crawler inputlog shards to join by id (corpus records without an input log)")
     p.add_argument("--keep-inexact", action="store_true")
     p.add_argument("--no-compress", action="store_true", help="write shards with np.savez (faster to load)")
     a = p.parse_args()
@@ -505,7 +524,7 @@ def main() -> None:
             "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src,
             "no_compress": a.no_compress}
     if a.mode == "corpus":
-        items = corpus_battles(a.inputs, a.format)
+        items = corpus_battles(a.inputs, a.format, load_inputlogs(a.inputlogs) if a.inputlogs else None)
     else:
         items = (b for d in a.inputs for b in (run_battles(d) if a.mode == "runs" else logged_obs_battles(d)))
     total, sources, commits = Counter(), {}, Counter()
