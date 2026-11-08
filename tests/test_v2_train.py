@@ -128,6 +128,33 @@ def test_ppo_update_on_real_observations():
     assert 0 < st["loss/kl"] < 1 and st["loss/clip"] <= 1
 
 
+def test_ema_and_adv_clip():
+    from porygon.v2.train import EMA, ppo_losses
+    torch.manual_seed(0)
+    net = Net(4, use_damage=False, use_tables=False, d_model=16, n_layers=1, n_heads=2, ffn_mult=1, d_move=8,
+              d_species=8, d_move_emb=8, d_item=4, d_ability=4, d_type=4, pair_hidden=4, value_hidden=8)
+    ema = EMA(net, 0.5)
+    p0 = net.value_head[0].weight.detach().clone()
+    with torch.no_grad():
+        net.value_head[0].weight.add_(1.0)
+    ema.update(net)  # effective decay min(0.5, 2/11)
+    d = 2 / 11
+    assert torch.allclose(ema.net.value_head[0].weight, d * p0 + (1 - d) * (p0 + 1), atol=1e-6)
+    st = ema.state_dict()
+    ema2 = EMA(net, 0.5)
+    ema2.load_state_dict(st)
+    assert ema2.n == 1 and torch.equal(ema2.net.value_head[0].weight, ema.net.value_head[0].weight)
+    # advantage clipping: one huge advantage no longer dominates the surrogate
+    B, A = 8, 10
+    out = {"logits": torch.zeros(B, A, requires_grad=True), "win_logit": torch.zeros(B)}
+    mb = {"action_mask": torch.ones(B, A), "action": torch.zeros(B, dtype=torch.long), "logp": torch.full((B,), -2.3026),
+          "adv": torch.tensor([100.0] + [0.0] * 7), "ret": torch.zeros(B)}
+    a0, a1 = parse_args([]), parse_args(["--adv-clip", "1.0"])
+    g0 = torch.autograd.grad(ppo_losses(out, mb, a0)["pg"], out["logits"])[0]
+    g1 = torch.autograd.grad(ppo_losses(out, mb, a1)["pg"], out["logits"])[0]
+    assert g1.abs().max() < g0.abs().max()
+
+
 def _server_up(port=8000) -> bool:
     try:
         socket.create_connection(("localhost", port), timeout=2).close()
@@ -157,12 +184,15 @@ def test_end_to_end_and_resume(tmp_path):
         assert len(list((run / "pool").glob("*.pt"))) == 2
         ck = torch.load(run / "final_model.pt", weights_only=False)
         steps = ck["counters"]["steps"]
-        assert steps >= 400 and ck["counters"]["updates"] == 2 and "optimizer" in ck
+        assert steps >= 400 and ck["counters"]["updates"] == 2 and "optimizer" in ck and ck["ema"]["n"] == 2
+        from porygon.v2.model import load
+        ema = load(run / "ema_model.pt")
+        assert ema.cfg == load(run / "final_model.pt").cfg
         r = _train(run, "--max-updates", "1", "--resume", str(run / "final_model.pt"))
         assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
         ck2 = torch.load(run / "final_model.pt", weights_only=False)
         assert ck2["counters"]["updates"] == 3 and ck2["counters"]["steps"] >= steps + 200
-        assert ck2["cfg"] == ck["cfg"]
+        assert ck2["cfg"] == ck["cfg"] and ck2["ema"]["n"] == 3
         last = (run / "train.log").read_text().strip().splitlines()
         assert any(f"steps={steps:,}" in line for line in last), "resume did not restore the step counter"
         assert "upd 3 " in "\n".join(last)

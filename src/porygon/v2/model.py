@@ -41,10 +41,10 @@ FCOL = {n: i for i, n in enumerate(FIELD_NUM)}
 ENTITY_KINDS = ("species", "moves", "items", "abilities")
 
 DEFAULT_CFG = dict(
-    d_model=256, n_layers=4, n_heads=8, ffn_mult=4,
+    d_model=256, n_layers=6, n_heads=8, ffn_mult=2,
     d_move=128, d_species=128, d_move_emb=96, d_item=64, d_ability=64, d_type=32,
     pair_hidden=32, value_hidden=256, value_trunk_grad=1.0, id_dropout=0.1,
-    use_damage=True, use_tables=True,
+    use_damage=True, use_tables=True, qk_norm=True, mask_fainted=True,
 )
 
 # Modules outside the shared trunk (for the value/policy trunk-gradient ratio and nothing else).
@@ -126,11 +126,15 @@ class Entity(nn.Module):
 
 
 class Block(nn.Module):
-    """Pre-RMSNorm transformer block: shared attention (SDPA, optional additive bias), one FFN per token group."""
+    """Pre-RMSNorm transformer block: shared attention (SDPA, optional additive mask/bias), one FFN per token group.
+    `qk_norm`: RMSNorm (learnable per-dim scale) on each head's queries and keys, which bounds the attention logits
+    at init (a v1 head grew into a 29-nat one-hot selector)."""
 
-    def __init__(self, d: int, n_heads: int, ffn_mult: int, groups: list[tuple[int, int]]):
+    def __init__(self, d: int, n_heads: int, ffn_mult: int, groups: list[tuple[int, int]], qk_norm: bool = True):
         super().__init__()
         self.n_heads, self.groups = n_heads, groups
+        self.q_norm = nn.RMSNorm(d // n_heads) if qk_norm else None
+        self.k_norm = nn.RMSNorm(d // n_heads) if qk_norm else None
         self.norm1 = nn.RMSNorm(d)
         self.qkv = nn.Linear(d, 3 * d)
         self.proj = nn.Linear(d, d)
@@ -141,6 +145,8 @@ class Block(nn.Module):
     def forward(self, x: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
         b, t, d = x.shape
         q, k, v = self.qkv(self.norm1(x)).view(b, t, 3, self.n_heads, d // self.n_heads).permute(2, 0, 3, 1, 4)
+        if self.q_norm is not None:
+            q, k = self.q_norm(q), self.k_norm(k)
         a = F.scaled_dot_product_attention(q, k, v, attn_mask=None if bias is None else bias.to(q.dtype))
         x = x + self.proj(a.transpose(1, 2).reshape(b, t, d))
         h = self.norm2(x)
@@ -209,13 +215,14 @@ class Net(nn.Module):
         self.token_type_emb = nn.Embedding(5, D)
         nn.init.normal_(self.token_type_emb.weight, std=0.02)
         groups = [(0, 1), (1, 7), (7, 13), (13, self.n_tokens)]
-        self.blocks = nn.ModuleList([Block(D, c["n_heads"], c["ffn_mult"], groups) for _ in range(c["n_layers"])])
+        self.blocks = nn.ModuleList([Block(D, c["n_heads"], c["ffn_mult"], groups, c["qk_norm"])
+                                     for _ in range(c["n_layers"])])
         self.norm = nn.RMSNorm(D)
         if n_pair:
             self.pair_mlp = mlp(n_pair, c["pair_hidden"], c["n_layers"] * c["n_heads"], zero_last=True)
 
         # heads
-        self.policy_head = mlp(2 * D, D, 1, zero_last=True)
+        self.policy_head = mlp(4 * D, D, 1, zero_last=True)  # [candidate, field, our active, their active]
         vh = c["value_hidden"]
         self.value_head = nn.Sequential(nn.Linear(2 * D, vh), nn.GELU(), nn.Linear(vh, vh), nn.GELU(),
                                         nn.Linear(vh, 1))
@@ -225,9 +232,9 @@ class Net(nn.Module):
         self.aux_moves = mlp(dm + D, D, 1)
         self.aux_unseen = nn.Linear(D, VOCAB_SIZES["species"])
         nn.init.constant_(self.aux_unseen.bias, -5.5)  # ~ 6 of 1520 species positive: start near the base rate
-        self.aux_opp_switch = mlp(2 * D, D, 1)
+        self.aux_opp_switch = mlp(4 * D, D, 1)  # [candidate, field, their active, our active]
         self.aux_opp_unseen = nn.Parameter(torch.randn(D) * 0.02)
-        self.aux_opp_move = mlp(dm + 2 * D, D, 1)
+        self.aux_opp_move = mlp(dm + 3 * D, D, 1)
         self.aux_opp_tera = nn.Parameter(torch.randn(dm) * 0.02)
 
     # ------------------------------------------------------------ helpers
@@ -290,9 +297,18 @@ class Net(nn.Module):
             return {k: v.float() for k, v in self.damage(obs).items()}
 
     def compile_damage(self, **kwargs) -> None:
-        """torch.compile the damage layer (it is ~8.7k small ops per call, i.e. launch-bound on GPU)."""
-        if self.damage is not None:
-            object.__setattr__(self, "_damage_compiled", torch.compile(self.damage, dynamic=True, **kwargs))
+        """torch.compile the damage layer (many small ops: launch-bound on GPU). The compiled instance does not trim
+        unused move slots (`trim` reads a count on the host, which would break the graph / recompile per call)."""
+        if self.damage is None:
+            return
+        layer = self.damage
+        try:
+            from porygon.v2.damage import DamageFeatures
+            layer = DamageFeatures(self.gen, trim=False).to(next(self.damage.buffers()).device)
+        except TypeError:  # an older damage layer without `trim`
+            pass
+        object.__setattr__(self, "_damage_layer_untrimmed", layer)
+        object.__setattr__(self, "_damage_compiled", torch.compile(layer, dynamic=True, **kwargs))
 
     def forward(self, obs: dict[str, torch.Tensor], dmg: dict[str, torch.Tensor] | None = None,
                 aux: bool = True) -> dict:
@@ -355,7 +371,7 @@ class Net(nn.Module):
         field = self.field_mlp(torch.cat([obs["field_num"].float(), obs["side_num"].float().flatten(1)], -1))
 
         # action tokens: our active's move slots 0-3 (and their tera versions)
-        own_act = active[:, :6]
+        own_act = (active * alive)[:, :6]  # a fainted active (force switch): empty action tokens
         act_mvec = torch.einsum("bi,bijd->bjd", own_act, mvec[:, :6, :4])
         tokens = [field.unsqueeze(1), mons, self.move_token(act_mvec)]
         if self.tera:
@@ -370,6 +386,13 @@ class Net(nn.Module):
         x = torch.cat(tokens, 1) + self.token_type_emb(self.token_type)
 
         bias = None
+        if c["mask_fainted"]:  # nobody attends to fainted mons (their own tokens still update); unseen slots stay
+            fainted = (present * mon_num[..., COL["fainted"]]) > 0
+            keymask = torch.zeros(b, self.n_tokens, device=x.device, dtype=torch.float32)
+            keymask[:, 1:1 + N_MONS] = keymask[:, 1:1 + N_MONS].masked_fill(fainted, float("-inf"))
+            keymask = keymask[:, None, None, :]  # [B, 1, 1, T]
+        else:
+            keymask = None
         if dmg is not None:
             pres = present > 0
             pb = self.pair_mlp(dmg["pair"].float())  # [B, 12, 12, L*H]
@@ -378,16 +401,24 @@ class Net(nn.Module):
             t = self.n_tokens
             bias = F.pad(pb, (1, t - 1 - N_MONS, 1, t - 1 - N_MONS))  # [L, B, H, T, T]
         for i, blk in enumerate(self.blocks):
-            x = blk(x, None if bias is None else bias[i])
+            m = None if bias is None else bias[i]
+            if keymask is not None:
+                m = keymask if m is None else m + keymask
+            x = blk(x, m)
         x = self.norm(x)
 
         field_t, own_t, opp_t = x[:, 0], x[:, 1:7], x[:, 7:13]
         mons_t = x[:, 1:13]
 
-        # policy: pointer logits
+        live_act = (active * alive).to(x.dtype)  # a fainted active (force switch) gives no context: zeros
+        own_act_tok = torch.einsum("bi,bid->bd", live_act[:, :6], own_t)
+        opp_act_tok = torch.einsum("bk,bkd->bd", live_act[:, 6:], opp_t)
+
+        # policy: pointer logits from [candidate, field, our active, their active]
         cand = [own_t, x[:, 13:17]] + ([x[:, 17:21]] if self.tera else [])
         cand = torch.cat(cand, 1)
-        scores = self.policy_head(torch.cat([cand, field_t.unsqueeze(1).expand_as(cand)], -1)).squeeze(-1).float()
+        ctx = torch.cat([field_t, own_act_tok, opp_act_tok], -1).unsqueeze(1).expand(-1, cand.shape[1], -1)
+        scores = self.policy_head(torch.cat([cand, ctx], -1)).squeeze(-1).float()
         logits = torch.zeros(b, self.n_actions, device=scores.device, dtype=torch.float32)
         logits[:, :10] = scores[:, :10]
         if self.tera:
@@ -406,12 +437,12 @@ class Net(nn.Module):
         opp_mvec = mvec[:, 6:]
         aux_moves = self.aux_moves(torch.cat([opp_mvec, opp_t.unsqueeze(2).expand(-1, -1, KM, -1)], -1)).squeeze(-1)
         opp_act = active[:, 6:]
-        opp_act_tok = torch.einsum("bk,bkd->bd", opp_act, opp_t)
-        opp_act_mv = torch.einsum("bk,bkjd->bjd", opp_act, opp_mvec)
-        f1 = field_t.unsqueeze(1)
+        opp_act_mv = torch.einsum("bk,bkjd->bjd", opp_act.to(opp_mvec.dtype), opp_mvec)
+        # the opponent's view: [candidate, field, its active, our active]
+        octx = torch.cat([field_t, opp_act_tok, own_act_tok], -1).unsqueeze(1)
         sw = self.aux_opp_switch(torch.cat([torch.cat([opp_t, self.aux_opp_unseen.expand(b, 1, -1).to(opp_t.dtype)], 1),
-                                            f1.expand(-1, 7, -1)], -1)).squeeze(-1)
-        ctx = torch.cat([opp_act_tok.unsqueeze(1), f1], -1).expand(-1, KM, -1)
+                                            octx.expand(-1, 7, -1)], -1)).squeeze(-1)
+        ctx = octx.expand(-1, KM, -1)
         mv = self.aux_opp_move(torch.cat([opp_act_mv, ctx], -1)).squeeze(-1)
         tmv = self.aux_opp_move(torch.cat([opp_act_mv + self.aux_opp_tera.to(opp_act_mv.dtype), ctx], -1)).squeeze(-1)
         opp_raw = torch.cat([sw, mv, tmv], 1).float()

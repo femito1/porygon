@@ -215,6 +215,8 @@ def ppo_losses(out: dict, mb: dict, args) -> dict[str, torch.Tensor]:
     ratio = log_ratio.exp()
     adv = mb["adv"]
     adv = (adv - adv.mean()) / (adv.std() + 1e-8) if adv.numel() > 1 else adv
+    if args.adv_clip > 0:  # heavy-tailed per-sample advantages: cap the normalised value
+        adv = adv.clamp(-args.adv_clip, args.adv_clip)
     pg = -torch.min(ratio * adv, ratio.clamp(1 - args.clip_range, 1 + args.clip_range) * adv).mean()
     ent = -(probs * logp_safe).sum(-1).mean()
     za = -(logp_safe.sum(-1) / mask.sum(-1).clamp(min=1)).mean()
@@ -384,6 +386,9 @@ def parse_args(argv=None):
     a("--cooldown-start", type=int, default=None, help="start of the cosine cooldown (env steps); none by default")
     a("--final-lr-frac", type=float, default=0.1)
     a("--weight-decay", type=float, default=0.01)
+    a("--adv-clip", type=float, default=0.0, help="clip per-sample normalised advantages to ±C (0 = off)")
+    a("--ema-decay", type=float, default=0.999,
+      help="EMA of the weights per update (0 = off); written to ema_model.pt with every checkpoint and at the end")
     a("--shaping", type=float, nargs=3, metavar=("FAINTED", "HP", "STATUS"), default=(0.0, 0.0, 0.0),
       help="potential-based shaping weights (v1 used 0.05 0.05 0); default sparse ±1 only")
     a("--eval-every", type=int, default=2_500_000)
@@ -424,6 +429,32 @@ def model_cfg(args) -> dict:
     return dict(d_model=args.d_model, n_layers=args.n_layers, n_heads=args.n_heads, ffn_mult=args.ffn_mult,
                 d_move=args.d_move, value_trunk_grad=args.value_trunk_grad, id_dropout=args.id_dropout,
                 use_damage=not args.no_damage, use_tables=not args.no_tables, **json.loads(args.model_json or "{}"))
+
+
+class EMA:
+    """Exponential moving average of the parameters (buffers copied), updated once per PPO update. The effective
+    decay is min(decay, (1 + n) / (10 + n)) so early averages are not dominated by the random init."""
+
+    def __init__(self, net: Net, decay: float):
+        self.decay, self.n = decay, 0
+        self.net = copy.deepcopy(net).eval()
+        for p in self.net.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, net: Net) -> None:
+        self.n += 1
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        torch._foreach_lerp_(list(self.net.parameters()), [p.detach() for p in net.parameters()], 1.0 - d)
+        for b, src in zip(self.net.buffers(), net.buffers()):
+            b.copy_(src)
+
+    def state_dict(self) -> dict:
+        return {"n": self.n, "decay": self.decay, "state_dict": self.net.state_dict()}
+
+    def load_state_dict(self, st: dict) -> None:
+        self.n = st["n"]
+        self.net.load_state_dict(st["state_dict"], strict=False)
 
 
 class Trainer:
@@ -467,6 +498,9 @@ class Trainer:
             self.opt.load_state_dict(ck["optimizer"])
         self.actor = copy.deepcopy(self.net).eval()
         self.actor_lock = threading.Lock()
+        self.ema = EMA(self.net, args.ema_decay) if args.ema_decay > 0 else None
+        if self.ema is not None and ck is not None and "ema" in ck:
+            self.ema.load_state_dict(ck["ema"])
         self.packer = Packer(self.gen)
         self.compile = (self.device.type == "cuda") if args.compile is None else args.compile
         if self.compile:
@@ -547,7 +581,11 @@ class Trainer:
 
     def checkpoint(self, path: Path) -> None:
         args = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(self.args).items()}
-        save(self.net, path, optimizer=self.opt.state_dict(), counters=dict(self.counters), args=args)
+        extra = {} if self.ema is None else {"ema": self.ema.state_dict()}
+        save(self.net, path, optimizer=self.opt.state_dict(), counters=dict(self.counters), args=args, **extra)
+        if self.ema is not None:  # deployable average (live net still drives play, eval and the pool)
+            save(self.ema.net, self.run_dir / "ema_model.pt", counters=dict(self.counters), ema_updates=self.ema.n,
+                 ema_decay=self.ema.decay)
 
     def evaluate(self) -> None:
         a = self.args
@@ -609,6 +647,8 @@ class Trainer:
                     g["lr"] = lr
                 measure = a.grad_ratio_every > 0 and c["updates"] % a.grad_ratio_every == 0
                 st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure)
+                if self.ema is not None:
+                    self.ema.update(self.net)
                 c["updates"] += 1
                 updates_here += 1
                 st.update(self._episode_stats(eps, wall))

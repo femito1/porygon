@@ -190,7 +190,7 @@ def test_default_param_count():
     n = sum(p.numel() for p in net.parameters())
     print(f"default v2 params (no damage layer): {n:,}")
     assert net.cfg == {**DEFAULT_CFG, "use_damage": False}
-    assert 10_000_000 < n < 13_000_000  # 8.4M of it: the four per-token-type 4x FFNs in 4 layers
+    assert 9_500_000 < n < 11_500_000  # 6.3M of it: the four per-token-type 2x FFNs in 6 layers
     if True in DAMAGE:
         n_d = sum(p.numel() for p in Net(9).parameters())
         print(f"default v2 params (with damage layer): {n_d:,}")
@@ -226,3 +226,48 @@ def test_feature_cache_follows_parameters(batch):
     assert not torch.allclose(a, b)
     assert torch.allclose(b, net(t, aux=False)["win_logit"])
     assert torch.allclose(b, net(t)["win_logit"].detach())  # grad-enabled path (no cache) agrees
+
+
+def test_fainted_mons_are_not_attended(batch):
+    """Legal-action logits do not depend on a fainted mon's inputs (its own switch is illegal anyway)."""
+    g, obs, _ = batch
+    from porygon.v2.model import COL
+    torch.manual_seed(0)
+    net = Net(g, use_damage=False, **TINY).eval()
+    with torch.no_grad():
+        for blk in net.blocks:  # make attention matter
+            blk.qkv.weight.normal_(std=0.5)
+        net.policy_head[-1].weight.normal_()
+    hits = 0
+    for o in obs:
+        fainted = np.flatnonzero((o["mon_num"][:, COL["present"]] > 0) & (o["mon_num"][:, COL["fainted"]] > 0))
+        if not len(fainted):
+            continue
+        hits += 1
+        o2 = {k: v.copy() for k, v in o.items()}
+        i = fainted[0]
+        o2["species"][i] = 5
+        o2["moves"][i, :4] = [7, 8, 9, 10]
+        o2["stats"][i] *= 2
+        with torch.no_grad():
+            a, b = net(obs_to_tensors([o], "cpu")), net(obs_to_tensors([o2], "cpu"))
+        legal = o["action_mask"] > 0
+        if i < 6:
+            legal[i] = False  # its own switch logit (legal only in poke-env's "wait" mask, action 0)
+        assert torch.allclose(a["logits"][0][legal], b["logits"][0][legal], atol=1e-5)
+        assert not torch.allclose(a["win_logit"], b["win_logit"])  # its own token still updates (pooled value)
+    if not hits:
+        pytest.skip("no fainted mon in the sample")
+
+
+def test_qk_norm_bounds_attention_logits():
+    from porygon.v2.model import Block
+    torch.manual_seed(0)
+    blk = Block(32, 4, 2, [(0, 3)], qk_norm=True)
+    x = torch.randn(2, 3, 32) * 100
+    with torch.no_grad():
+        blk.qkv.weight.mul_(100)
+        q, k, _ = blk.qkv(blk.norm1(x)).view(2, 3, 3, 4, 8).permute(2, 0, 3, 1, 4)
+        q, k = blk.q_norm(q), blk.k_norm(k)
+        logits = (q @ k.transpose(-1, -2)) / 8 ** 0.5
+    assert logits.abs().max() <= 8 ** 0.5 + 1e-4  # |q|, |k| = sqrt(d_head) at unit scale
