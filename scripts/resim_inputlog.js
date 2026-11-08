@@ -41,6 +41,7 @@ function parseArgs(argv) {
     else if (x === "--git-dir") a.gitDir = argv[++i];
     else if (x === "--no-streams") a.streams = false;
     else if (x === "--exclude-own") a.excludeOwn = true; // fidelity test: never use the battle's own commit
+    else if (x === "--worker") a.worker = true; // internal: one simulator per process (see main)
     else a.files.push(x);
   }
   if (!a.builds || a.files.length < 1) {
@@ -283,17 +284,59 @@ async function main() {
     output = gz;
   }
   const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  const write = async text => { if (!output.write(text)) await new Promise(r => output.once("drain", r)); };
+  if (args.worker) {  // a child: simulate everything it is given in this process
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      let rec, res;
+      try {
+        rec = JSON.parse(line);
+        res = resim(args, rec);
+      } catch (e) {
+        res = { id: rec ? rec.id : null, ok: false, error: `${e.name}: ${String(e.message).slice(0, 300)}` };
+      }
+      await write(JSON.stringify(res) + "\n");
+    }
+    output.end();
+    return;
+  }
+  // Unloading a simulator does not give its memory back (one process grew past 4 GB over ~400 commits), so
+  // consecutive battles that use the same build go to a fresh child process each. Input grouped by commit
+  // (score_reconstruction.py resim-input sorts it) keeps the number of children small.
+  let group = [], groupSim = null;
+  const flush = async () => {
+    if (!group.length) return;
+    const childArgs = [__filename, "--worker", "--builds", args.builds, "--no-streams"].filter(
+      x => x !== "--no-streams" || !args.streams);
+    if (args.gitDir) childArgs.push("--git-dir", args.gitDir);
+    if (args.fallback) childArgs.push("--fallback", args.fallback);
+    if (args.excludeOwn) childArgs.push("--exclude-own");
+    childArgs.push("-");
+    const out = child_process.spawnSync(process.execPath, childArgs, { input: group.join("\n") + "\n",
+      maxBuffer: 8 * 1024 ** 3, stdio: ["pipe", "pipe", "inherit"] });
+    let text = out.stdout ? out.stdout.toString() : "";
+    const done = new Set(text.split("\n").filter(Boolean).map(l => { try { return JSON.parse(l).id; } catch (e) { return null; } }));
+    for (const l of group) {  // a crashed child: its unfinished battles are reported as errors
+      let id = null;
+      try { id = JSON.parse(l).id; } catch (e) {}
+      if (!done.has(id)) text += JSON.stringify({ id, ok: false, error: `ChildError: status ${out.status} ${out.signal || ""}` }) + "\n";
+    }
+    await write(text);
+    group = [];
+  };
   for await (const line of rl) {
     if (!line.trim()) continue;
-    let rec, res;
+    let sim = null;
     try {
-      rec = JSON.parse(line);
-      res = resim(args, rec);
-    } catch (e) {
-      res = { id: rec ? rec.id : null, ok: false, error: `${e.name}: ${String(e.message).slice(0, 300)}` };
-    }
-    if (!output.write(JSON.stringify(res) + "\n")) await new Promise(r => output.once("drain", r));
+      const il = JSON.parse(line).inputlog || "";
+      const v = il.startsWith(">version ") ? il.slice(9, 49) : null;
+      sim = pickSim(args, v);
+    } catch (e) { sim = null; }
+    if (group.length && (sim !== groupSim || group.length >= (args.streams ? 300 : 2000))) await flush();
+    groupSim = sim;
+    group.push(line);
   }
+  await flush();
   output.end();
 }
 
