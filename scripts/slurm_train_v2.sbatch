@@ -82,7 +82,7 @@ MIN_CORES=${MIN_CORES:-24}
 if [ "$CORES" -lt "$MIN_CORES" ]; then
   echo "ERROR: only $CORES CPUs on $(hostname -s) ($SLURM_JOB_PARTITION), need >= $MIN_CORES: not starting" >&2; exit 3
 fi
-N_SERVERS=$(( CORES / 3 )); SELFPLAY=$(( CORES * 2 )); POOL_BATTLES=$CORES
+N_SERVERS=$(( CORES / 3 )); SELFPLAY=${N_SELFPLAY:-$(( CORES * 2 ))}; POOL_BATTLES=${N_POOL:-$CORES}  # netv2.env may cap them (memory)
 BASE=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 )); LAST=$(( BASE + N_SERVERS - 1 ))
 # start_servers.sh writes the no-disk-writes training config only when there is none
 CFG=pokemon-showdown/config/config.js
