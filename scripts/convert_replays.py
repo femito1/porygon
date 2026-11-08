@@ -76,8 +76,70 @@ def load_encoder(spec: str, extra_src: list[str] | None = None):
     return getattr(importlib.import_module(mod), fn)
 
 
+class V2PreEncoder:
+    """netv2's v2 observation plus its auxiliary targets (`porygon.v2.encoder.aux_targets_from_team`): the
+    opponent's true sets and its actual action at the same turn request (the "v2 supervised shards" format,
+    CONTRACTS.md). Needs per-side context: `set_context(opp_team, opp_actions)` before each replay."""
+
+    def __init__(self, extra_src: list[str] | None):
+        load_encoder("porygon.v2.encoder:encode", extra_src)
+        from porygon.v2 import encoder as v2, spec
+        self.encode, self.aux, self.spec = v2.encode, v2.aux_targets_from_team, spec
+        self.opp_team: list[dict] = []
+        self.opp_actions: dict[int, tuple[str, str, bool]] = {}
+
+    def set_context(self, opp_team: list[dict], opp_actions: dict[int, tuple[str, str, bool]]) -> None:
+        self.opp_team, self.opp_actions = opp_team, opp_actions
+
+    def __call__(self, battle) -> dict:
+        obs = self.encode(battle)
+        act = None if battle.force_switch else self.opp_actions.get(battle.turn)
+        return {"obs": obs, "aux": self.aux(battle, self.opp_team, obs, act)}
+
+
+class MultiEncoder:
+    """Several encoders over the same replay: battle -> {spec: output}."""
+
+    def __init__(self, fns: dict):
+        self.fns = fns
+        self.needs_context = any(hasattr(f, "set_context") for f in fns.values())
+
+    def set_context(self, **kw) -> None:
+        for f in self.fns.values():
+            if hasattr(f, "set_context"):
+                f.set_context(**kw)
+
+    def __call__(self, battle) -> dict:
+        return {spec: fn(battle) for spec, fn in self.fns.items()}
+
+
+def opp_actions_of(decisions: list) -> dict[int, tuple[str, str, bool]]:
+    """turn -> (kind, move id / species, tera) of a side's turn decisions (its action at each turn request)."""
+    out = {}
+    for d in decisions:
+        if d.kind == "turn" and not d.retry and d.desc:
+            out[d.turn] = (d.desc["type"], d.desc.get("move") or replay.to_id(d.desc.get("species", "")),
+                           bool(d.desc.get("tera")))
+    return out
+
+
 def encoder_name(spec: str) -> str:
     return {"porygon.encoder:embed_battle": "v1"}.get(spec, spec.replace(":", ".").replace("/", "_"))
+
+
+def netv2_commit(extra_src: list[str]) -> str:
+    for d in extra_src:
+        for f in (Path(d).parent / "COMMIT", Path(d).parent / "GIT_COMMIT"):
+            if f.exists():
+                return f.read_text().strip()[:12]
+        try:
+            out = subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                                 timeout=10).stdout.strip()
+            if out:
+                return out
+        except Exception:
+            pass
+    return "unknown"
 
 
 def code_commit() -> str:
@@ -174,7 +236,18 @@ def human_unit(battles: list[dict], builds: Path, gen: int, encoder, keep_inexac
             yield r, [], "resim: not exact"
             continue
         try:
-            sides = replay.resim_sides(r, gen, encoder)
+            if getattr(encoder, "needs_context", False):  # pass 1: both sides' actions; pass 2: encode
+                first = replay.resim_sides(r, gen, None)
+                sides = {}
+                for side in ("p1", "p2"):
+                    other = "p2" if side == "p1" else "p1"
+                    encoder.set_context(opp_team=true_team(r["teams"][other], gen),
+                                        opp_actions=opp_actions_of(first[other].decisions))
+                    choices = {c["chunk"]: c["choice"] for c in r["choices"][side]}
+                    sides[side] = replay.replay_stream(r["streams"][side], r["players"][side], gen, side, choices,
+                                                       encoder, f"battle-{r['id']}")
+            else:
+                sides = replay.resim_sides(r, gen, encoder)
         except Exception as e:
             yield r, [], f"replay: {type(e).__name__}"
             continue
@@ -268,47 +341,57 @@ SEARCH_FIELDS = ("shares", "probs", "value", "q", "root_value", "visits")  # dec
 
 def run_unit(battles: list[dict], gen: int, encoder, counts: Counter
              ) -> Iterator[tuple[dict | None, list[dict], str | None]]:
+    def one_side(b: dict, stream: list, enc, count: bool) -> dict:
+        player = next((json.loads(m[2]).get("side", {}).get("name") for msg in stream for m in msg
+                       if len(m) > 2 and m[1] == "request" and m[2]), None)
+        side = "p1" if player == b["p1"] else "p2"
+        sr = replay.replay_stream(stream, player, gen, side, encoder=enc, battle_tag=b["roomid"])
+        logged = b["logged"].get((b["roomid"], player), [])
+        if count:
+            counts["logged decisions"] += len(logged)
+        for ours, rec in replay.align_logged(sr.decisions, logged):
+            if count:
+                counts["paired with logged"] += 1
+                counts["mask equal to logged"] += ours.mask.tolist() == list(rec["mask"])
+            ours.action = int(rec["action"])
+            ours.legal = bool(ours.mask[ours.action])
+            ours.desc = ours.describe(ours.action)
+            ours.choice = "logged"
+            ours.search = {k: rec[k] for k in SEARCH_FIELDS if k in rec}
+        for d in sr.decisions:  # unlogged decisions with a single legal action
+            if d.action < 0 and d.n_legal == 1:
+                d.action, d.legal = int(np.argmax(d.mask)), True
+                d.desc = d.describe(d.action)
+        winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
+        other = "p2" if side == "p1" else "p1"
+        rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player,
+               "rating": -1, "opp_rating": -1, "result": result_of(winner, side), "end": "normal",
+               "source": f"run:{b['run']}", "team": true_team(b[f"{side}team"], gen),
+               "true_team": true_team(b[f"{side}team"], gen), "opp_team": true_team(b[f"{other}team"], gen),
+               "log": None, "stream": stream, "seed": replay.seed_of(b["roomid"]), "_decisions": sr.decisions}
+        rec["decisions"] = []
+        for d in sr.decisions:
+            j = decision_json(d)
+            if d.search:
+                j["search"] = d.search
+            rec["decisions"].append(j)
+        return rec
+
     for b in battles:
         if not b["streams"]:
             yield None, [], "run: no stream"
             continue
-        sides = []
         try:
-            for path in b["streams"]:
-                stream = [json.loads(line) for line in gzip.open(path, "rt")]
-                player = next((json.loads(m[2]).get("side", {}).get("name") for msg in stream for m in msg
-                               if len(m) > 2 and m[1] == "request" and m[2]), None)
-                side = "p1" if player == b["p1"] else "p2"
-                sr = replay.replay_stream(stream, player, gen, side, encoder=encoder, battle_tag=b["roomid"])
-                logged = b["logged"].get((b["roomid"], player), [])
-                counts["logged decisions"] += len(logged)
-                for ours, rec in replay.align_logged(sr.decisions, logged):
-                    counts["paired with logged"] += 1
-                    counts["mask equal to logged"] += ours.mask.tolist() == list(rec["mask"])
-                    ours.action = int(rec["action"])
-                    ours.legal = bool(ours.mask[ours.action])
-                    ours.desc = ours.describe(ours.action)
-                    ours.choice = "logged"
-                    ours.search = {k: rec[k] for k in SEARCH_FIELDS if k in rec}
-                for d in sr.decisions:  # unlogged decisions with a single legal action
-                    if d.action < 0 and d.n_legal == 1:
-                        d.action, d.legal = int(np.argmax(d.mask)), True
-                        d.desc = d.describe(d.action)
-                winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
-                other = "p2" if side == "p1" else "p1"
-                rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player,
-                       "rating": -1, "opp_rating": -1, "result": result_of(winner, side), "end": "normal",
-                       "source": f"run:{b['run']}", "team": true_team(b[f"{side}team"], gen),
-                       "true_team": true_team(b[f"{side}team"], gen), "opp_team": true_team(b[f"{other}team"], gen),
-                       "log": None, "stream": [msg for msg in stream], "seed": replay.seed_of(b["roomid"]),
-                       "_decisions": sr.decisions}
-                rec["decisions"] = []
-                for d in sr.decisions:
-                    j = decision_json(d)
-                    if d.search:
-                        j["search"] = d.search
-                    rec["decisions"].append(j)
-                sides.append(rec)
+            streams = [[json.loads(line) for line in gzip.open(path, "rt")] for path in b["streams"]]
+            if getattr(encoder, "needs_context", False) and len(streams) == 2:
+                first = [one_side(b, st, None, True) for st in streams]
+                sides = []
+                for k, st in enumerate(streams):
+                    encoder.set_context(opp_team=first[k]["opp_team"],
+                                        opp_actions=opp_actions_of(first[1 - k]["_decisions"]))
+                    sides.append(one_side(b, st, encoder, False))
+            else:
+                sides = [one_side(b, st, encoder, True) for st in streams]
         except Exception as e:
             yield None, [], f"replay: {type(e).__name__}"
             continue
@@ -424,8 +507,9 @@ def do_unit(job: tuple) -> dict:
     (unit, base, battles, mode, a) = job
     fmt, gen = a["format"], a["gen"]
     specs = a["encoders"]
-    fns = {spec: load_encoder(spec, a["extra_src"]) for spec in specs}
-    encoder = lambda battle: {spec: fn(battle) for spec, fn in fns.items()}  # noqa: E731
+    fns = {spec: V2PreEncoder(a["extra_src"]) if spec == "v2pre" else load_encoder(spec, a["extra_src"])
+           for spec in specs}
+    encoder = MultiEncoder(fns)
     from poke_env.environment import SinglesEnv
     n_actions = SinglesEnv.get_action_space_size(gen)
     rec_dir = Path(a["rec_dir"])
@@ -460,6 +544,8 @@ def do_unit(job: tuple) -> dict:
                     sources[rec["source"]] = source_id(rec["source"])
                     for spec in specs:
                         rows = encode_rows(rec, base + i, sources[rec["source"]], n_actions, spec)
+                        if spec == "v2pre":  # a stable game id (pretrain splits by crc32 of it)
+                            rows["game"] = [replay.seed_of(rec["id"])] * len(rows["game"])
                         for k, v in rows.items():
                             cols[spec][k].extend(v)
                     for d in rec["_decisions"]:
@@ -470,6 +556,9 @@ def do_unit(job: tuple) -> dict:
                         for spec in specs:
                             if spec not in obs_dim and d.obs is not None:
                                 x = d.obs[spec]
+                                if spec == "v2pre":
+                                    x = {**{f"obs/{k}": v for k, v in x["obs"].items()},
+                                         **{f"aux/{k}": v for k, v in x["aux"].items()}}
                                 obs_dim[spec] = ({k: [list(v.shape), str(v.dtype)] for k, v in x.items()}
                                                  if isinstance(x, dict) else int(np.asarray(x).shape[0]))
                     rec.pop("_decisions")
@@ -484,7 +573,12 @@ def do_unit(job: tuple) -> dict:
             obs = c.pop("obs")
             arrays = {k: (np.stack(v) if k in ("mask", "target", "q") else np.asarray(v)).astype(DTYPES[k])
                       for k, v in c.items()}
-            if isinstance(obs[0], dict):  # a structured encoder (netv2's v2): one array per field, own dtypes
+            if spec == "v2pre":  # CONTRACTS.md "v2 supervised shards": obs/<field>, aux/<field>, f32 target, i64 game
+                arrays["target"] = arrays["target"].astype(np.float32)
+                arrays["game"] = np.asarray(c["game"], dtype=np.int64)
+                arrays.update({f"obs/{k}": np.stack([o["obs"][k] for o in obs]) for k in obs[0]["obs"]})
+                arrays.update({f"aux/{k}": np.stack([o["aux"][k] for o in obs]) for k in obs[0]["aux"]})
+            elif isinstance(obs[0], dict):  # a structured encoder (netv2's v2): one array per field, own dtypes
                 arrays.update({f"obs_{k}": np.stack([o[k] for o in obs]) for k in obs[0]})
             else:
                 arrays["obs"] = np.stack(obs).astype(np.float16)
@@ -522,6 +616,8 @@ def main() -> None:
     p.add_argument("--encoder", action="append", default=None,
                    help="module:function; repeat to encode the same decisions with several encoders in one pass")
     p.add_argument("--extra-src", action="append", default=[], help="another src tree for porygon.* encoders")
+    p.add_argument("--v2pre-out", type=Path, default=None,
+                   help="final path of the `--encoder v2pre` shards (default OUT/encoded/<format>/v2pre)")
     p.add_argument("--workers", type=int, default=3)
     p.add_argument("--unit", type=int, default=500, help="battles per record part / encoded shard")
     p.add_argument("--start-unit", type=int, default=0, help="resume: skip the units before this one")
@@ -547,7 +643,8 @@ def main() -> None:
     # then swaps symlinks onto them (rename is atomic), keeping the previous version for readers mid-read.
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     rec_final = a.out / "records" / a.format
-    enc_finals = {spec: a.out / "encoded" / a.format / encoder_name(spec) for spec in a.encoder}
+    enc_finals = {spec: (a.v2pre_out if spec == "v2pre" and a.v2pre_out else
+                         a.out / "encoded" / a.format / encoder_name(spec)) for spec in a.encoder}
     args["rec_dir"] = str(rec_final) + f".v{stamp}"
     args["enc_dirs"] = {spec: str(d) + f".v{stamp}" for spec, d in enc_finals.items()}
     total, sources, commits = Counter(), {}, Counter()
@@ -578,8 +675,18 @@ def main() -> None:
                     " every encoder dir of one version holds the same decisions"}
     for spec, d in args["enc_dirs"].items():  # per-encoder meta keeps the old single-encoder keys too
         Path(d).mkdir(parents=True, exist_ok=True)
+        extra = {}
+        if spec == "v2pre":
+            load_encoder("porygon.v2.encoder:encode", a.extra_src)
+            from porygon.v2 import spec as v2spec
+            extra = {"spec_version": v2spec.SPEC_VERSION, "gen": gen, "format_name": "v2 supervised shards",
+                     "netv2_commit": netv2_commit(a.extra_src), "data_commit": meta["code_commit"],
+                     "game_id": "crc32 of the battle id (`game`), shared by all of a game's decisions",
+                     "extras": "q f16[N,A], root_value f16, visits f32, searched u8, action i16, mask i8, turn, "
+                               "forced, n_legal (ignored by porygon.v2.pretrain)"}
         (Path(d) / "meta.json").write_text(json.dumps(
-            {**meta, "encoder": spec, "encoder_name": encoder_name(spec), "obs_dim": obs_dim.get(spec)}, indent=1))
+            {**meta, **extra, "encoder": spec, "encoder_name": encoder_name(spec), "obs_dim": obs_dim.get(spec)},
+            indent=1))
     Path(args["rec_dir"]).mkdir(parents=True, exist_ok=True)
     (Path(args["rec_dir"]) / "meta.json").write_text(json.dumps(meta, indent=1))
     swap_in(rec_final, Path(args["rec_dir"]))

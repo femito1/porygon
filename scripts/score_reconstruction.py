@@ -10,6 +10,12 @@
     # 2. re-simulation fidelity of human replays (scripts/resim_inputlog.js output): exact reproduction of the stored
     #    log by commit grouping, failure classes, decisions per game, legality of the mapped human actions
     python scripts/score_reconstruction.py resim RESIM.jsonl[.gz] [...] [--encode]
+    #    inputs for it: {id, inputlog, log} from the corpus (+ crawler inputlog shards joined by id) and crawl shards
+    python scripts/score_reconstruction.py resim-input --format gen9randombattle --out IN.jsonl.gz FILES... \
+        [--inputlogs SHARDS...]
+    #    fallback fidelity: battles whose own commit is built, re-simulated on the nearest OLDER build instead
+    #    (resim_inputlog.js --exclude-own), exactness by commit gap (commits / days between the two)
+    python scripts/score_reconstruction.py fallback OWN.jsonl FALLBACK.jsonl --git-dir PS.git
 
 Numbers go to .orchestra/data/RECONSTRUCTION.md.
 """
@@ -228,6 +234,60 @@ def resim_report(files: list[Path], encode: bool, encoder_spec: str) -> dict:
     return {"counts": dict(c), "by commit": {k: dict(v) for k, v in by_group.items()}, "errors": dict(errors)}
 
 
+def resim_input(files: list[Path], fmt: str, out: Path, inputlogs: list[Path]) -> None:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import convert_replays as cr
+    logs = cr.load_inputlogs(inputlogs) if inputlogs else None
+    seen, n = set(), 0
+    with gzip.open(out, "wt") as f:
+        for b in cr.corpus_battles(files, fmt, logs):
+            if b["id"] in seen or not b.get("inputlog") or not b.get("log"):
+                continue
+            if any(s in str(p).lower() for p in b.get("players") or [] for s in cr.SKIP_PLAYERS):
+                continue
+            seen.add(b["id"])
+            f.write(json.dumps({"id": b["id"], "inputlog": b["inputlog"], "log": b["log"],
+                                "uploadtime": b.get("uploadtime")}) + "\n")
+            n += 1
+    print(f"{n} battles with input log and stored log -> {out}")
+
+
+def fallback_report(own: Path, fb: Path, git_dir: Path) -> dict:
+    """Exactness on the battle's own build vs on the nearest older build, by gap between the two commits."""
+    import subprocess
+    a = {r["id"]: r for r in map(json.loads, open_text(own))}
+    gaps: dict[tuple[str, str], tuple[int, float]] = {}
+
+    def gap(old: str, new: str) -> tuple[int, float]:
+        if (old, new) not in gaps:
+            git = ["git", "--git-dir", str(git_dir)]
+            n = subprocess.run(git + ["rev-list", "--count", f"{old}..{new}"], capture_output=True, text=True).stdout
+            t = [int(subprocess.run(git + ["log", "-1", "--format=%ct", x], capture_output=True, text=True).stdout
+                     or 0) for x in (old, new)]
+            gaps[(old, new)] = (int(n or -1), (t[1] - t[0]) / 86400)
+        return gaps[(old, new)]
+    by_bucket, by_commit = defaultdict(Counter), defaultdict(Counter)
+    for r in map(json.loads, open_text(fb)):
+        o = a.get(r.get("id"))
+        if not o or not o.get("ok") or o.get("sim") != o.get("version") or not o.get("exact"):
+            continue  # only battles reproduced exactly on their own build
+        if not r.get("ok"):
+            bucket = "fallback error"
+        else:
+            n, days = gap(r["sim"], r["version"])
+            bucket = ("same tree" if n == 0 else "1-5 commits" if n <= 5 else "6-20 commits" if n <= 20
+                      else "21-100 commits" if n <= 100 else ">100 commits")
+            by_commit[r["version"]]["battles"] += 1
+            by_commit[r["version"]]["exact"] += bool(r.get("exact"))
+            by_commit[r["version"]]["gap"] = n
+        by_bucket[bucket]["battles"] += 1
+        by_bucket[bucket]["exact"] += bool(r.get("ok") and r.get("exact"))
+    commits_exact = sum(c["exact"] == c["battles"] for c in by_commit.values())
+    return {"by gap": {k: dict(v) for k, v in sorted(by_bucket.items())},
+            "commits": len(by_commit), "commits all exact on fallback": commits_exact,
+            "commits mostly exact (>=90%)": sum(c["exact"] >= 0.9 * c["battles"] for c in by_commit.values())}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -244,8 +304,21 @@ def main() -> None:
     rs.add_argument("files", nargs="+", type=Path)
     rs.add_argument("--encode", action="store_true", help="also encode every decision (throughput)")
     rs.add_argument("--encoder", default="porygon.encoder:embed_battle")
+    ri = sub.add_parser("resim-input")
+    ri.add_argument("files", nargs="+", type=Path)
+    ri.add_argument("--format", required=True)
+    ri.add_argument("--out", type=Path, required=True)
+    ri.add_argument("--inputlogs", nargs="*", type=Path, default=[])
+    fb = sub.add_parser("fallback")
+    fb.add_argument("own", type=Path)
+    fb.add_argument("fallback", type=Path)
+    fb.add_argument("--git-dir", type=Path, default=Path("/vol/bitbucket/fr1226/porygon-ws-data/showdown/ps.git"))
     a = p.parse_args()
-    if a.cmd == "record-live":
+    if a.cmd == "resim-input":
+        resim_input(a.files, a.format, a.out, a.inputlogs)
+    elif a.cmd == "fallback":
+        print(json.dumps(fallback_report(a.own, a.fallback, a.git_dir), indent=1))
+    elif a.cmd == "record-live":
         record_live(a.format, a.battles, a.port, a.out, a.encoder)
     elif a.cmd == "live-parity":
         print(json.dumps(live_parity(a.dirs, a.encoder), indent=1))

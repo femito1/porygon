@@ -2,7 +2,8 @@
 /**
  * Re-simulate Showdown random battles from their input logs: exact first-person views.
  *
- *   node scripts/resim_inputlog.js --builds DIR [--fallback SHA] [--git-dir PS.git] [--no-streams] IN.jsonl[.gz] [OUT]
+ *   node scripts/resim_inputlog.js --builds DIR [--fallback SHA] [--git-dir PS.git] [--no-streams] [--exclude-own]
+ *       IN.jsonl[.gz] [OUT]
  *
  * Input: JSONL (optionally gzipped, or `-` for stdin), one battle per line: {id, inputlog, log?} (`log`: the stored
  * replay log, used to validate the re-simulation). The input log of a random battle holds the Showdown commit
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (x === "--fallback") a.fallback = argv[++i];
     else if (x === "--git-dir") a.gitDir = argv[++i];
     else if (x === "--no-streams") a.streams = false;
+    else if (x === "--exclude-own") a.excludeOwn = true; // fidelity test: never use the battle's own commit
     else a.files.push(x);
   }
   if (!a.builds || a.files.length < 1) {
@@ -123,7 +125,7 @@ function builtShas(builds) {
 }
 
 function pickSim(args, version) {
-  const built = builtShas(args.builds);
+  const built = builtShas(args.builds).filter(s => !(args.excludeOwn && s === version));
   if (version && built.includes(version)) return version;
   if (args.fallback) return args.fallback;
   const t = version ? commitTime(args, version) : null;
