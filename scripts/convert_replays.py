@@ -364,11 +364,13 @@ def run_unit(battles: list[dict], gen: int, encoder, counts: Counter
                 d.desc = d.describe(d.action)
         winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
         other = "p2" if side == "p1" else "p1"
-        rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player,
+        # room ids restart with every local server: the run name makes the id unique
+        rec = {"id": f"{b['run']}/{b['roomid']}", "battle": b["roomid"], "format": f"gen{gen}randombattle",
+               "side": side, "player": player,
                "rating": -1, "opp_rating": -1, "result": result_of(winner, side), "end": "normal",
                "source": f"run:{b['run']}", "team": true_team(b[f"{side}team"], gen),
                "true_team": true_team(b[f"{side}team"], gen), "opp_team": true_team(b[f"{other}team"], gen),
-               "log": None, "stream": stream, "seed": replay.seed_of(b["roomid"]), "_decisions": sr.decisions}
+               "log": None, "stream": stream, "seed": replay.seed_of(f"{b['run']}/{b['roomid']}"), "_decisions": sr.decisions}
         rec["decisions"] = []
         for d in sr.decisions:
             j = decision_json(d)
@@ -445,12 +447,13 @@ def logged_obs_unit(battles: list[dict], gen: int) -> Iterator[tuple[dict | None
         if len(decs[0].obs[V1]) != OBS_DIM:
             yield None, [], "logged-obs: unexpected obs size"
             continue
-        rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player, "rating": -1,
+        rec = {"id": f"{b['run']}/{b['roomid']}", "battle": b["roomid"], "format": f"gen{gen}randombattle",
+               "side": side, "player": player, "rating": -1,
                "opp_rating": -1, "result": result_of(winner, side), "end": "normal", "source": f"run:{b['run']}",
                "view": "logged v1 obs, no requests (v1 encoder only; search with the PPO network prior)",
                "team": true_team(b[f"{side}team"], gen), "true_team": true_team(b[f"{side}team"], gen),
                "opp_team": true_team(b[f"{other}team"], gen), "stream": None,
-               "log": b["replay"].read_text() if b["replay"].exists() else None, "seed": replay.seed_of(b["roomid"]),
+               "log": b["replay"].read_text() if b["replay"].exists() else None, "seed": replay.seed_of(f"{b['run']}/{b['roomid']}"),
                "decisions": [{"turn": d.turn, "kind": d.kind, "a": d.action, "n_legal": d.n_legal,
                               "legal": d.legal, "mask": d.mask.tolist(), "search": d.search} for d in decs],
                "_decisions": decs}
