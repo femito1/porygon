@@ -12,10 +12,12 @@
 #   versions.tsv            battles per commit (with --corpus / --count)
 # Run inside a job (esbuild uses every core it gets; -j N parallel builds), never on the login node.
 # NODE_MODULES: node_modules with esbuild + ts-chacha20 (default: gloria's pokemon-showdown, used read-only).
+# FULL=1 keeps data/text (move / ability descriptions; the simulator does not read them).
 set -euo pipefail
 ROOT=${SHOWDOWN_ROOT:-/vol/bitbucket/fr1226/porygon-ws-data/showdown}
 NODE_MODULES=${NODE_MODULES:-/vol/bitbucket/fr1226/gloria/pokemon-showdown/node_modules}
 NODE=${NODE:-node}
+FULL=${FULL:-0}
 JOBS=4
 MODE=shas
 ARGS=()
@@ -66,13 +68,17 @@ build_one() {
   ln -sfn "$NODE_MODULES" "$tmp/node_modules"
   (cd "$tmp" && "$NODE" -e '
     const esbuild = require("esbuild"), fs = require("fs"), path = require("path");
+    const full = process.env.FULL === "1";
+    const skip = p => !full && (p === "./data/text" || p === "data/text");  // formats need every mod
     const walk = (d, out) => { for (const f of fs.readdirSync(d)) { const p = d + "/" + f;
+      if (skip(p)) continue;
       if (fs.statSync(p).isDirectory()) walk(p, out);
       else if ((p.endsWith(".ts") && !p.endsWith(".d.ts")) || p.endsWith(".tsx")) out.push(p); } return out; };
     const files = []; for (const d of ["sim", "lib", "data", "config"]) if (fs.existsSync(d)) walk("./" + d, files);
     esbuild.buildSync({entryPoints: files, outdir: "./dist", outbase: ".", format: "cjs", platform: "node",
       tsconfig: "./tsconfig.json", logLevel: "error"});
     const cp = d => { for (const f of fs.readdirSync(d)) { const p = d + "/" + f;
+      if (skip(p)) continue;
       if (fs.statSync(p).isDirectory()) cp(p);
       else if (p.endsWith(".json") || p.endsWith(".js")) { fs.mkdirSync(path.dirname("dist/" + p), {recursive: true});
         if (!fs.existsSync("dist/" + p)) fs.copyFileSync(p, "dist/" + p); } } };
@@ -83,7 +89,7 @@ build_one() {
   echo "built $sha"
 }
 export -f build_one
-export ROOT NODE_MODULES NODE
+export ROOT NODE_MODULES NODE FULL
 printf '%s\n' "${ARGS[@]}" | xargs -r -P "$JOBS" -I{} bash -c 'build_one {}'
 
 # sha -> commit time for every build
