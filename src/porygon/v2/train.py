@@ -205,7 +205,7 @@ def aux_losses(out: dict, mb: dict, m: Meter | None) -> torch.Tensor:
     return torch.stack(losses).sum()
 
 
-def ppo_losses(out: dict, mb: dict, args) -> dict[str, torch.Tensor]:
+def ppo_losses(out: dict, mb: dict, args, normalized: bool = False) -> dict[str, torch.Tensor]:
     mask = mb["action_mask"] > 0
     logp_all = torch.log_softmax(out["logits"].float(), -1)
     logp_safe = torch.where(mask, logp_all, torch.zeros_like(logp_all))
@@ -214,7 +214,8 @@ def ppo_losses(out: dict, mb: dict, args) -> dict[str, torch.Tensor]:
     log_ratio = logp - mb["logp"]
     ratio = log_ratio.exp()
     adv = mb["adv"]
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8) if adv.numel() > 1 else adv
+    if not normalized:
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8) if adv.numel() > 1 else adv
     if args.adv_clip > 0:  # heavy-tailed per-sample advantages: cap the normalised value
         adv = adv.clamp(-args.adv_clip, args.adv_clip)
     pg = -torch.min(ratio * adv, ratio.clamp(1 - args.clip_range, 1 + args.clip_range) * adv).mean()
@@ -297,21 +298,35 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
             idx = perm[s:s + args.batch_size]
             if len(idx) < 2:
                 continue
-            obs, dmg, mb = minibatch(idx)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                out = net(obs, dmg=dmg)
-            L = ppo_losses(out, mb, args)
-            aux = aux_losses(out, mb, m if epoch == 0 else None)
-            total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"] + args.vf_coef * L["vf"]
-                     + args.aux_coef * aux)
+            # gradient accumulation over --micro-batch chunks (same update as one big minibatch; advantages are
+            # normalised over the whole minibatch first): lets 4096-sample minibatches fit a 16 GB GPU
+            adv_all = tensors["adv"][idx]
+            adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8) if len(idx) > 1 else adv_all
+            mbs = args.micro_batch if args.micro_batch and args.micro_batch < len(idx) else len(idx)
             opt.zero_grad(set_to_none=True)
-            total.backward()
+            sums: dict[str, float] = {}
+            for c0 in range(0, len(idx), mbs):
+                sub = idx[c0:c0 + mbs]
+                w = len(sub) / len(idx)
+                obs, dmg, mb = minibatch(sub)
+                mb["adv"] = adv_all[c0:c0 + mbs]
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                    out = net(obs, dmg=dmg)
+                L = ppo_losses(out, mb, args, normalized=True)
+                aux = aux_losses(out, mb, m if epoch == 0 else None)
+                total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"] + args.vf_coef * L["vf"]
+                         + args.aux_coef * aux)
+                (total * w).backward()
+                for k in ("pg", "ent", "za", "vf", "kl", "clip"):
+                    sums[k] = sums.get(k, 0.0) + w * L[k].detach()
+                sums["aux"] = sums.get("aux", 0.0) + w * aux.detach()
+                sums["total"] = sums.get("total", 0.0) + w * total.detach()
             gn = torch.nn.utils.clip_grad_norm_(net.parameters(), args.max_grad_norm)
             opt.step()
             for k in ("pg", "ent", "za", "vf", "kl", "clip"):
-                m.add(f"loss/{k}", L[k].item())
-            m.add("loss/aux", aux.item())
-            m.add("loss/total", total.item())
+                m.add(f"loss/{k}", float(sums[k]))
+            m.add("loss/aux", float(sums["aux"]))
+            m.add("loss/total", float(sums["total"]))
             m.add("diag/grad_norm", gn.item())
     st = m.means()
     v, ret = data["value"], data["ret"]
@@ -372,6 +387,7 @@ def parse_args(argv=None):
     a("--total-steps", type=int, default=300_000_000)
     a("--rollout", type=int, default=40_960, help="transitions per PPO update")
     a("--batch-size", type=int, default=1024)
+    a("--micro-batch", type=int, default=2048, help="gradient-accumulation chunk of a minibatch (GPU memory)")
     a("--n-epochs", type=int, default=7)
     a("--gamma", type=float, default=0.9999)
     a("--gae-lambda", type=float, default=0.754)
