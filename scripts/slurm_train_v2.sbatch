@@ -47,6 +47,23 @@ if ! "$PY" -c "import torch, porygon.v2.train; assert torch.cuda.is_available();
 fi
 [ -f pokemon-showdown/package.json ] || { echo "no Showdown checkout at $ROOT/pokemon-showdown" >&2; exit 1; }
 
+# Take over from a stand-in job of the same run (e.g. the run parked on the long partition while this job waited for
+# its GPU): PREEMPT_NAMES (netv2.env) lists job names; any of ours still running gets SIGTERM (the trainer saves
+# final_model.pt, the job mirrors and exits) and we wait until it has left the queue, so the two never write the
+# same run at once; then the usual newest-checkpoint resume below picks up where it stopped.
+for name in ${PREEMPT_NAMES:-}; do
+  [ "$name" = "$SLURM_JOB_NAME" ] && continue
+  for j in $(squeue -h -u "$USER" -n "$name" -t RUNNING -o %i 2>/dev/null || true); do
+    echo "$(date -u +%T) stopping stand-in job $j ($name) before resuming $RUN_NAME"
+    scancel --signal=TERM --batch "$j" || true
+    for ((t = 0; t < 60; t++)); do
+      [ -z "$(squeue -h -j "$j" -o %i 2>/dev/null || true)" ] && break
+      sleep 30
+    done
+    [ -n "$(squeue -h -j "$j" -o %i 2>/dev/null || true)" ] && { echo "stand-in $j still running after 30 min: cancelling" >&2; scancel "$j" || true; sleep 60; }
+  done
+done
+
 # --- servers: one per ~3 cores, ports from the job id (nodes are shared) ---
 CORES=$(nproc)  # the job-submit plugin may reshape the request: size everything from what we got
 N_SERVERS=$(( CORES / 3 )); SELFPLAY=$(( CORES * 2 )); POOL_BATTLES=$CORES
