@@ -108,6 +108,32 @@ def excluded(players) -> bool:
 
 
 # --------------------------------------------------------------------------- HTTP
+import socket as _socket
+
+_orig_getaddrinfo = _socket.getaddrinfo
+_dns_cache: dict = {}
+
+
+def _cached_getaddrinfo(host, *args, **kw):
+    """Resolve each host at most every 10 min and reuse the last good answer when the resolver
+    flakes (the laptop's stub resolver drops ~20% of lookups; 2 lookups/s made that our bottleneck)."""
+    key = (host, args, tuple(sorted(kw.items())))
+    hit = _dns_cache.get(key)
+    if hit and time.monotonic() - hit[0] < 600:
+        return hit[1]
+    try:
+        res = _orig_getaddrinfo(host, *args, **kw)
+    except OSError:
+        if hit:
+            return hit[1]
+        raise
+    _dns_cache[key] = (time.monotonic(), res)
+    return res
+
+
+_socket.getaddrinfo = _cached_getaddrinfo
+
+
 class Client:
     def __init__(self, min_interval: float = 1.0):
         self.min_interval = max(0.5, min_interval)  # never more than 2 requests/s, one in flight
