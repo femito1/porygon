@@ -613,7 +613,7 @@ def do_unit(job: tuple) -> dict:
                     counts[f"error: {err}"] += 1
                     continue
                 counts["games"] += 1
-                games.append(sides[0]["id"] if sides else None)
+                games.append(sides[0]["id"] if sides else (r or {}).get("id"))  # also when bc-exclude dropped both
                 for rec in sides:
                     sources[rec["source"]] = source_id(rec["source"])
                     for spec in specs:
@@ -763,7 +763,12 @@ def main() -> None:
         done = set(prev.get("games", []))
         game_ids = list(prev.get("games", []))
         dropped = list((prev.get("bc_exclude") or {}).get("dropped_sides", []))
-        total.update(prev.get("counts", {}))
+        # failed battles are retried every refresh: carry over the converted games' counts, not the old failures
+        pc = dict(prev.get("counts", {}))
+        failed = sum(v for k, v in pc.items() if k.startswith("error:"))
+        pc["battles"] = pc.get("battles", 0) - failed
+        pc["resim validated"] = pc.get("resim validated", 0) - pc.get("error: resim: not exact", 0)
+        total.update({k: v for k, v in pc.items() if not k.startswith("error:") and v})
         sources.update(prev.get("sources", {}))
         first_game = prev.get("next_game", len(game_ids) * 100)
         first_unit = 1 + max([int(f.name[5:10]) for f in rec_final.glob("part-*.jsonl.gz")] + [-1])
