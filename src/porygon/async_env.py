@@ -236,6 +236,13 @@ class AsyncPPO(PPO):
     `overlap_update = True` to keep battles running during the PPO update (see the module doc)."""
 
     overlap_update = False
+    autocast: str | None = None  # "bf16": run the PPO update under torch.autocast (porygon.train --autocast)
+
+    def train(self) -> None:
+        if self.autocast == "bf16":
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                return super().train()
+        return super().train()
 
     def _excluded_save_params(self) -> list[str]:
         return super()._excluded_save_params() + ["_actor", "_actor_lock", "_rollouts", "_collector", "_stop"]

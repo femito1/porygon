@@ -150,6 +150,7 @@ def main():
     p.add_argument("--fastenv", metavar="WORKERSxBATTLES",
                    help="in-process Showdown battles (porygon.fastenv), e.g. 28x64; no servers; self-play only")
     p.add_argument("--seed", type=int, default=0, help="--fastenv team/battle seed")
+    p.add_argument("--autocast", choices=["bf16"], help="async PPO: bf16 autocast in the update (~1.4x on A16)")
     p.add_argument("--overlap-update", action="store_true",
                    help="with --async-envs: keep battles running during the PPO update (data <= 1 update old)")
     p.add_argument("--total-steps", type=int, default=150_000_000)
@@ -246,6 +247,9 @@ def main():
             verbose=1,
         )
     boost_embedding_steps(model.policy, args.embedding_lr_mult)
+    if args.autocast:
+        assert args.async_envs, "--autocast needs --async-envs or --fastenv"
+        model.autocast = args.autocast
     if args.overlap_update:
         assert args.async_envs, "--overlap-update needs --async-envs"
         model.overlap_update = True

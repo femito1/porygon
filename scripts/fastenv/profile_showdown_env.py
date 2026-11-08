@@ -88,6 +88,7 @@ def worker(i, port, fmt, seconds, q, prof):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8300)
+    p.add_argument("--servers", type=int, default=1, help="servers on ports PORT..PORT+N-1, worker i uses i % N")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seconds", type=float, default=60)
     p.add_argument("--format", default="gen9randombattle")
@@ -96,7 +97,7 @@ def main():
     ctx = mp.get_context("fork")
     q = ctx.Queue()
     n0, w0 = node_cpu(), time.time()
-    procs = [ctx.Process(target=worker, args=(i, a.port, a.format, a.seconds, q, a.profile and i == 0))
+    procs = [ctx.Process(target=worker, args=(i, a.port + i % a.servers, a.format, a.seconds, q, a.profile and i == 0))
              for i in range(a.workers)]
     for pr in procs:
         pr.start()
