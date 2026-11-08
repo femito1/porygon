@@ -16,6 +16,7 @@
 //   battle, 8 the previous action of this slot was rejected by Showdown and replaced by 'default'.
 // --duplicate 1: every slot plays duplicate pairs (game 2k+1 replays game 2k's seed with the teams swapped), so
 //   side 0 plays both teams of each pair: for head-to-head evaluation (porygon.fastenv_eval).
+// --bot max_power|random --bot-battles K: side two of battles 0..K-1 is an env-side baseline bot (no rows).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -28,13 +29,13 @@ const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 
 function parseArgs(argv) {
   const a = {format: 'gen9randombattle', battles: 64, seed: 1, encoder: 'v1', fdIn: 0, fdOut: 1,
-    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0};
+    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0};
   for (let i = 2; i < argv.length; i += 2) {
     const k = argv[i].replace(/^--/, '').replace(/-(.)/g, (_, c) => c.toUpperCase());
     a[k] = argv[i + 1];
   }
   a.battles = +a.battles; a.seed = +a.seed; a.fdIn = +a.fdIn; a.fdOut = +a.fdOut;
-  a.victory = +a.victory; a.maxTurns = +a.maxTurns; a.duplicate = +a.duplicate;
+  a.victory = +a.victory; a.maxTurns = +a.maxTurns; a.duplicate = +a.duplicate; a.botBattles = +a.botBattles;
   const [f, h, s] = String(a.shaping).split(',').map(Number);
   a.shapingW = {fainted: f, hp: h, status: s, victory: a.victory};
   return a;
@@ -167,7 +168,42 @@ function row(slot, side, needsAction, done) {
   n++;
 }
 
+// --- env-side baseline bots (--bot NAME --bot-battles K: side two of battles 0..K-1; their rows are not emitted)
+const BOTS = {
+  // poke-env MaxBasePowerPlayer: the available move with the highest base power (first of equals), else random
+  max_power(t) {
+    let best = null;
+    for (const m of t.availableMoves) if (best === null || m.basePower > best.basePower) best = m;
+    if (best !== null) return `move ${best.id}`;
+    const v = E.validChoices(t);
+    return v.length ? v[prng.random(v.length)] : 'default';
+  },
+  random(t) {
+    const v = E.validChoices(t);
+    return v.length ? v[prng.random(v.length)] : 'default';
+  },
+};
+const BOT = args.bot ? BOTS[args.bot] : null;
+if (args.bot && !BOT) throw new Error(`unknown --bot ${args.bot} (have ${Object.keys(BOTS)})`);
+const isBot = slot => BOT !== null && slot.i < args.botBattles;
+
+function botAct(slot) {  // the bot answers every pending request of its side (several when the learner waits)
+  const t = slot.trackers[1], b = slot.battle;
+  for (let guard = 0; guard < 20 && t.decisionPending && !b.ended && !slot.crashed; guard++) {
+    const c = BOT(t);
+    if (t.markChosen) t.markChosen(); else t.decisionPending = false;
+    try {
+      if (!b.choose(1, c) && !t.decisionPending && !b.ended && b.pendingSides().includes(1)) b.choose(1, 'default');
+    } catch (e) {
+      stats.crashed++;
+      slot.crashed = true;
+    }
+  }
+}
+
 function emitSlot(slot) {
+  const bot = isBot(slot);
+  if (bot) botAct(slot);
   const b = slot.battle;
   if (!b.ended && !slot.crashed && b.turn >= args.maxTurns) {  // endless battle: call it a tie
     b.battle.tie();
@@ -177,10 +213,11 @@ function emitSlot(slot) {
     stats.games++;
     stats.turns += b.turn;
     row(slot, 0, false, true);
-    row(slot, 1, false, true);
+    if (!bot) row(slot, 1, false, true);
     slot.newBattle();
+    if (bot) botAct(slot);
   }
-  for (const side of [0, 1]) if (slot.trackers[side].decisionPending) row(slot, side, true, false);
+  for (const side of bot ? [0] : [0, 1]) if (slot.trackers[side].decisionPending) row(slot, side, true, false);
 }
 
 function flush() {

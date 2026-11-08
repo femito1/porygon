@@ -4,7 +4,8 @@
 
 Side one (p1) is always A, side two B; each slot plays duplicate pairs (same battle seed, teams swapped), so a
 pair's team luck cancels. Reports A's win rate (ties count half) with a 95% interval from pair means. A policy is
-an SB3 checkpoint (.zip) / pool snapshot (.pt) acting stochastically, or `random` (uniform over legal actions).
+an SB3 checkpoint (.zip) / pool snapshot (.pt) acting stochastically, `random` (uniform over legal actions), or
+(B only) `max_power` (poke-env's MaxBasePowerPlayer, played inside the env).
 Fast and exact Showdown mechanics, but strength claims still go through real Showdown benchmarks (README).
 """
 
@@ -36,11 +37,15 @@ def make_actor(spec: str, device: str):
     return act
 
 
+ENV_BOTS = ("max_power",)  # played inside the env (porygon.fastenv bot=...)
+
+
 def evaluate(fmt: str, a: str, b: str, games: int, workers: int, battles: int, seed: int, device: str) -> dict:
-    act = [make_actor(a, device), make_actor(b, device)]
+    act = [make_actor(a, device), None if b in ENV_BOTS else make_actor(b, device)]
+    bot = dict(bot=b, bot_battles=battles) if b in ENV_BOTS else {}
     pairs: dict[tuple[int, int], list[float]] = {}  # (slot, pair index) -> A's scores
     played = np.zeros(workers * battles, dtype=np.int64)  # games finished per battle position
-    with FastEnv(fmt, workers, battles, seed=seed, duplicate=True) as env:
+    with FastEnv(fmt, workers, battles, seed=seed, duplicate=True, **bot) as env:
         batch = env.reset()
         t0 = time.time()
         while sum(len(v) for v in pairs.values()) < games:

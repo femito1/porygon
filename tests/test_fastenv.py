@@ -74,3 +74,14 @@ def test_v2_rows_consistent(fmt):
             cls = b.aux["aux_opp_class"][na]
             assert cls.shape[1] == b.mask.shape[1] and (cls >= -1).all()
             b = env.step(random_actions(b.mask[na], rng))
+
+
+def test_env_side_bot_battles():
+    rng = np.random.default_rng(5)
+    with FastEnv("gen9randombattle", n_workers=1, battles_per_worker=4, seed=6, bot="max_power", bot_battles=2) as env:
+        b = env.reset()
+        sides = set()
+        for _ in range(200):
+            sides |= {(int(s) // 2, int(s) % 2) for s in b.slot}
+            b = env.step(random_actions(b.mask[b.needs_action], rng))
+        assert {(0, 1), (1, 1)}.isdisjoint(sides) and {(2, 1), (3, 1), (0, 0)} <= sides

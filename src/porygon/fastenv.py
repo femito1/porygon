@@ -99,14 +99,14 @@ def node_binary() -> str:
 
 class Worker:
     def __init__(self, index: int, fmt: str, battles: int, seed: int, encoder: str, shaping, node: str,
-                 max_turns: int, duplicate: bool):
+                 max_turns: int, duplicate: bool, bot: str, bot_battles: int):
         self.index, self.battles = index, battles
         to_child_r, self.to_child = os.pipe()
         self.from_child, from_child_w = os.pipe()
         cmd = [node, "--max-old-space-size=2048", str(JS / "host.js"), "--format", fmt, "--battles", str(battles),
                "--seed", str(seed), "--encoder", encoder, "--fd-in", str(to_child_r), "--fd-out", str(from_child_w),
                "--shaping", ",".join(map(str, shaping[:3])), "--max-turns", str(max_turns),
-               "--duplicate", str(int(duplicate))]
+               "--duplicate", str(int(duplicate))] + (["--bot", bot, "--bot-battles", str(bot_battles)] if bot else [])
         self.proc = subprocess.Popen(cmd, pass_fds=(to_child_r, from_child_w), stdin=subprocess.DEVNULL)
         os.close(to_child_r)
         os.close(from_child_w)
@@ -188,12 +188,14 @@ class FastEnv:
 
     def __init__(self, battle_format: str = "gen9randombattle", n_workers: int = 4, battles_per_worker: int = 64,
                  seed: int = 0, encoder: str | None = None, shaping=SHAPING, node: str | None = None,
-                 max_turns: int = 1000, duplicate: bool = False):
+                 max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0):
+        """bot: an env-side baseline ('max_power' = poke-env MaxBasePowerPlayer, 'random') playing side two of
+        the first bot_battles battles of every worker (those sides emit no rows)."""
         encoder = encoder or os.environ.get("PORYGON_FASTENV_ENCODER", "v1")
         self.format, self.n_workers, self.battles_per_worker = battle_format, n_workers, battles_per_worker
         node = node or node_binary()
         self.workers = [Worker(i, battle_format, battles_per_worker, seed * 1000 + i, encoder, shaping, node,
-                               max_turns, duplicate) for i in range(n_workers)]
+                               max_turns, duplicate, bot, bot_battles) for i in range(n_workers)]
         self.span = 2 * battles_per_worker
         self._pending: dict[int, Batch] = {}  # worker -> batch whose decisions are not answered yet
 
