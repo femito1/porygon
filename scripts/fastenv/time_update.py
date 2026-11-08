@@ -39,10 +39,13 @@ def main():
     p.add_argument("--n-actions", type=int, default=26)
     p.add_argument("--rollout", type=int, default=78 * 512)
     p.add_argument("--updates", type=int, default=2)
+    p.add_argument("--epochs", type=int, default=7)
+    p.add_argument("--batch", type=int, default=1024)
+    p.add_argument("--autocast", choices=["none", "bf16"], default="none")
     a = p.parse_args()
     torch.set_float32_matmul_precision("high")
-    model = AsyncPPO(MaskedPolicy, Facade(a.n_actions), learning_rate=thesis_lr, n_steps=a.rollout, batch_size=1024,
-                     n_epochs=7, gamma=0.9999, gae_lambda=0.754, clip_range=0.0829, clip_range_vf=0.0184,
+    model = AsyncPPO(MaskedPolicy, Facade(a.n_actions), learning_rate=thesis_lr, n_steps=a.rollout, batch_size=a.batch,
+                     n_epochs=a.epochs, gamma=0.9999, gae_lambda=0.754, clip_range=0.0829, clip_range_vf=0.0184,
                      ent_coef=0.01, vf_coef=0.4375, max_grad_norm=0.543, device="cuda", verbose=0,
                      policy_kwargs=dict(features_extractor_kwargs=dict(d_model=256, n_layers=3)))
     model._setup_learn(10**9, None)
@@ -58,11 +61,14 @@ def main():
     buf.advantages[:] = rng.standard_normal(buf.advantages.shape)
     buf.returns[:] = rng.standard_normal(buf.returns.shape)
     buf.pos, buf.full = a.rollout, True
-    print(torch.cuda.get_device_name(), f"rollout {a.rollout}")
+    print(torch.cuda.get_device_name(), f"rollout {a.rollout} epochs {a.epochs} batch {a.batch} autocast {a.autocast}")
+    import contextlib
+    ctx = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if a.autocast == "bf16" else contextlib.nullcontext
     for i in range(a.updates):
         torch.cuda.synchronize()
         t = time.time()
-        model.train()
+        with ctx():
+            model.train()
         torch.cuda.synchronize()
         dt = time.time() - t
         print(f"update {i}: {dt:.1f} s -> learner ceiling {a.rollout / dt:,.0f} steps/s")
