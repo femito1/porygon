@@ -2,8 +2,10 @@
 # Search-distillation data (scripts/gen_search_labels.py): our search vs itself on the duplicate-battle server,
 # both sides' decisions + replays + true teams logged. CPU-only job (the data stream's CPU budget); submit from
 # the data stream's code dir (scripts/setup_ws_data.sh makes it a working submit dir).
-#   sbatch -c 8 scripts/slurm_searchlabels.sbatch GEN CHUNKS N_PER_CHUNK [gen_search_labels.py args]
+#   sbatch -c 8 scripts/slurm_searchlabels.sbatch GEN CHUNKS N_PER_CHUNK [--model CKPT] [gen_search_labels.py args]
 #   e.g. sbatch -c 8 scripts/slurm_searchlabels.sbatch 9 200 50 --ms 250 --samples 4
+#   gen4 full search (fitted eval default, prior 0.25 default with a model):
+#   sbatch -p long -c 24 scripts/slurm_searchlabels.sbatch 4 100 50 --model /vol/bitbucket/fr1226/gloria/runs/20261025-195826-301040/final_model.zip --device cuda --ms 500
 #SBATCH --job-name=ws-data-searchlabels
 #SBATCH --partition=a40
 #SBATCH --cpus-per-task=8
@@ -13,6 +15,8 @@
 set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 GEN=$1 CHUNKS=$2 N=$3; shift 3
+MODEL=none
+if [ "${1:-}" = --model ]; then MODEL=$2; shift 2; fi
 DATA=/vol/bitbucket/fr1226/porygon-ws-data
 export PATH=$ROOT/.node/bin:$PATH PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH=$ROOT/src${PYTHONPATH:+:$PYTHONPATH}
@@ -24,6 +28,6 @@ export PORYGON_DUPLICATE_TEAMS=$OUT/teams PORYGON_DUPLICATE_GROUP='^sla'
 find .venv/lib/python3.12/site-packages/{websockets,poke_env} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
 scripts/start_servers.sh 1 "$PORT"
 trap 'pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $PORT\$" || true' EXIT
-echo "gen$GEN search labels: $CHUNKS x $N battles, $* -> $OUT"
-.venv/bin/python scripts/gen_search_labels.py none --out "$OUT" --port "$PORT" --chunks "$CHUNKS" --n-battles "$N" \
+echo "gen$GEN search labels ($MODEL): $CHUNKS x $N battles, $* -> $OUT"
+.venv/bin/python scripts/gen_search_labels.py "$MODEL" --out "$OUT" --port "$PORT" --chunks "$CHUNKS" --n-battles "$N" \
   --workers $(( $(nproc) - 1 )) --format "gen${GEN}randombattle" "$@" 2>&1 | tee "$OUT/gen.log" || true
