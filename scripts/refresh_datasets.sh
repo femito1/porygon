@@ -49,6 +49,15 @@ while true; do
         --out "$D/datasets/human-prep" --inputlogs "$D"/raw/inputlogs/gen9randombattle/part-*.jsonl.gz \
         "$D"/raw/showdown-replays/inputlogs/gen9randombattle/*.jsonl.gz 2>&1) || ok=0
   echo "$out" | tail -1
+  # New Showdown commits the crawl brought in: build those with >= MIN_BUILD battles (fail-soft: a failed build
+  # only means those battles stay unconverted, retried next round).
+  new=$(zcat "$D"/datasets/human-prep/*.jsonl.gz 2>/dev/null | grep -o '>version [0-9a-f]\{40\}' | cut -c10- \
+        | sort | uniq -c | awk -v m="${MIN_BUILD:-50}" '$1 >= m {print $2}' \
+        | while read -r sha; do [[ -f $D/showdown/builds/$sha/dist/sim/battle-stream.js ]] || echo "$sha"; done)
+  if [[ -n $new ]]; then
+    echo "=== $(date -Is) building $(echo $new | wc -w) new Showdown commits"
+    nice -n 19 bash scripts/build_showdown_versions.sh -j 1 $new 2>&1 | grep -E "^built|failed|missing|indexed" || true
+  fi
   for f in hi rest; do
     out=$(nice -n 10 bash scripts/slurm_convert.sbatch corpus gen9randombattle "$D/datasets/human" \
           "$D/datasets/human-prep/$f.jsonl.gz" -- --workers 2 --incremental --bc-exclude "$CORPUS/bc-exclude.json" \
