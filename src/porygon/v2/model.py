@@ -44,7 +44,7 @@ DEFAULT_CFG = dict(
     d_model=256, n_layers=6, n_heads=8, ffn_mult=2,
     d_move=128, d_species=128, d_move_emb=96, d_item=64, d_ability=64, d_type=32,
     pair_hidden=32, value_hidden=256, value_trunk_grad=1.0, id_dropout=0.1,
-    use_damage=True, use_tables=True, qk_norm=True, mask_fainted=True,
+    use_damage=True, use_tables=True, qk_norm=True, mask_fainted=True, trim_moves=True,
 )
 
 # Modules outside the shared trunk (for the value/policy trunk-gradient ratio and nothing else).
@@ -332,15 +332,23 @@ class Net(nn.Module):
                                       "abilities": (N_MONS, KA)})
         feats = {k: getattr(self, f"ent_{k}").all_features() for k in ENTITY_KINDS}
 
-        # move vectors [B, 12, 24, d_move]
-        mv_emb = self.ent_moves(ids["moves"], feats["moves"], drop["moves"])
-        move_parts = [mv_emb, self.type_emb(ids["move_type"]), obs["move_num"].float(),
-                      obs["move_p"].float().unsqueeze(-1)]
-        if dmg is not None:
-            move_parts.append(self._summary(dmg["move_vs"].float(), w_act[:, :, None], w_alive[:, :, None]))
-        move_in = torch.cat(move_parts, -1)
+        # move vectors [B, 12, 24, d_move]; computed only for the first k slots any mon of the batch occupies (slots
+        # are filled in order, real data uses <= 10 of 24) and zero-padded back: identical output, ~2.5x less work
         valid_move = ids["moves"] != PAD
-        mvec = self.move_mlp(move_in) * valid_move.unsqueeze(-1).to(move_in.dtype)
+        k = KM
+        if c.get("trim_moves", True):
+            used = valid_move.flatten(0, 1).any(0)
+            k = max(4, int(used.nonzero().max().item()) + 1) if bool(used.any()) else 4
+        mdrop = None if drop["moves"] is None else drop["moves"][:, :, :k]
+        mv_emb = self.ent_moves(ids["moves"][:, :, :k], feats["moves"], mdrop)
+        move_parts = [mv_emb, self.type_emb(ids["move_type"][:, :, :k]), obs["move_num"][:, :, :k].float(),
+                      obs["move_p"][:, :, :k].float().unsqueeze(-1)]
+        if dmg is not None:
+            move_parts.append(self._summary(dmg["move_vs"][:, :, :k].float(), w_act[:, :, None], w_alive[:, :, None]))
+        move_in = torch.cat(move_parts, -1)
+        mvec = self.move_mlp(move_in) * valid_move[:, :, :k].unsqueeze(-1).to(move_in.dtype)
+        if k < KM:
+            mvec = F.pad(mvec, (0, 0, 0, KM - k))
 
         # mon tokens
         move_p = obs["move_p"].float().unsqueeze(-1)
