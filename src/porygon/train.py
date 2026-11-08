@@ -147,6 +147,9 @@ def main():
     p.add_argument("--ports", default="8000", help="Showdown server ports, e.g. 8000-8007")
     p.add_argument("--async-envs", action="store_true",
                    help="battles step independently (porygon.async_env) instead of in lockstep")
+    p.add_argument("--fastenv", metavar="WORKERSxBATTLES",
+                   help="in-process Showdown battles (porygon.fastenv), e.g. 28x64; no servers; self-play only")
+    p.add_argument("--seed", type=int, default=0, help="--fastenv team/battle seed")
     p.add_argument("--overlap-update", action="store_true",
                    help="with --async-envs: keep battles running during the PPO update (data <= 1 update old)")
     p.add_argument("--total-steps", type=int, default=150_000_000)
@@ -189,7 +192,16 @@ def main():
     pool_dir = args.pool_dir or args.run_dir / "pool"
     if args.pool_battles:
         pool_dir.mkdir(parents=True, exist_ok=True)
-    if args.async_envs:  # same battles and ports as the lockstep envs below, one worker process each
+    if args.fastenv:
+        from porygon.fastenv import FastEnv
+        from porygon.fastenv_sb3 import FastBattles
+        assert not args.pool_battles, "--fastenv is self-play only (pool opponents: not yet)"
+        n_workers, per_worker = map(int, args.fastenv.lower().split("x"))
+        env = FastBattles(FastEnv(args.format, n_workers, per_worker, seed=args.seed,
+                                  shaping=tuple(args.shaping)))
+        algo = AsyncPPO
+        args.async_envs, args.n_battles = True, n_workers * per_worker  # --ports: only for --eval-every
+    elif args.async_envs:  # same battles and ports as the lockstep envs below, one worker process each
         env = AsyncBattles(
             [(partial(selfplay_battle, ports[i % len(ports)], args.format, shaping), "fork")
              for i in range(args.n_battles)]
@@ -238,15 +250,15 @@ def main():
         assert args.async_envs, "--overlap-update needs --async-envs"
         model.overlap_update = True
     n_params = sum(p.numel() for p in model.policy.parameters())
-    print(f"{'async' if args.async_envs else 'lockstep'}{' + overlapped update' if args.overlap_update else ''}: {args.n_battles} self-play + {args.pool_battles} pool battles "
+    print(f"{'fastenv ' + args.fastenv + ' ' if args.fastenv else ''}{'async' if args.async_envs else 'lockstep'}{' + overlapped update' if args.overlap_update else ''}: {args.n_battles} self-play + {args.pool_battles} pool battles "
           f"on ports {ports}, n_steps={model.n_steps} x {env.num_envs} envs, params={n_params:,}, device={model.device}")
 
     callbacks = CallbackList([
         CheckpointCallback(max(1, args.checkpoint_every // env.num_envs), str(args.run_dir / "checkpoints"),
                            name_prefix="ppo"),
-        EvalCallback(args.format, ports[0], args.eval_every, args.eval_battles, ("heuristic", "max_power"),
-                     args.run_dir, args.anchor),
-    ] + ([WallClockLimit(args.max_hours)] if args.max_hours else [])
+    ] + ([EvalCallback(args.format, ports[0], args.eval_every, args.eval_battles, ("heuristic", "max_power"),
+                       args.run_dir, args.anchor)] if args.eval_every > 0 else [])
+      + ([WallClockLimit(args.max_hours)] if args.max_hours else [])
       + ([SnapshotCallback(pool_dir, args.snapshot_every)] if args.pool_battles else []))
     try:
         model.learn(
