@@ -226,7 +226,8 @@ def ppo_losses(out: dict, mb: dict, args, normalized: bool = False) -> dict[str,
     with torch.no_grad():
         kl = ((ratio - 1) - log_ratio).mean()
         clip = ((ratio - 1).abs() > args.clip_range).float().mean()
-    return {"pg": pg, "ent": ent, "za": za, "vf": vf, "kl": kl, "clip": clip}
+        r_mean, r_std = ratio.mean(), ratio.std() if ratio.numel() > 1 else torch.zeros_like(ratio.mean())
+    return {"pg": pg, "ent": ent, "za": za, "vf": vf, "kl": kl, "clip": clip, "ratio_mean": r_mean, "ratio_std": r_std}
 
 
 def _trunk_grad(loss: torch.Tensor, params: list) -> torch.Tensor:
@@ -313,6 +314,11 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
                     out = net(obs, dmg=dmg)
                 L = ppo_losses(out, mb, args, normalized=True)
+                if epoch == 0 and s == 0 and c0 == 0:  # before any gradient step: how off-policy is the data?
+                    m.add("diag/first_ratio_mean", L["ratio_mean"].item())
+                    m.add("diag/first_ratio_std", L["ratio_std"].item())
+                    m.add("diag/first_clip", L["clip"].item())
+                    m.add("diag/first_kl", L["kl"].item())
                 aux = aux_losses(out, mb, m if epoch == 0 else None)
                 total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"] + args.vf_coef * L["vf"]
                          + args.aux_coef * aux)
@@ -547,6 +553,10 @@ class Trainer:
         t = batch_to_tensors(batch, self.device, keys=model_keys(self.gen) + ["drop_seed"])
         with self.actor_lock, torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
             out = self.actor(t, aux=False)
+            v = getattr(self, "actor_version", 0)
+            if not hasattr(self, "version_counts"):
+                self.version_counts = {}
+            self.version_counts[v] = self.version_counts.get(v, 0) + len(batch["action_mask"])
         logp_all = torch.log_softmax(out["logits"].float(), -1)
         probs = logp_all.exp()
         a = torch.multinomial(probs, 1).squeeze(1)
@@ -584,6 +594,13 @@ class Trainer:
     def _refresh_actor(self) -> None:
         with self.actor_lock:
             self.actor.load_state_dict(self.net.state_dict())
+            self.actor_version = self.counters["updates"]  # the acting weights = the learner after this many updates
+
+    def _take_versions(self) -> dict[int, int]:
+        """Decisions acted per actor version since the last call (≈ the rollout just taken)."""
+        with self.actor_lock:
+            vc, self.version_counts = getattr(self, "version_counts", {}), {}
+        return vc
 
     def _get_rollout(self):
         while not self.stop.is_set():
@@ -652,6 +669,10 @@ class Trainer:
                 if overlap:
                     self.requests.release()
                 segs, eps, collect_s = item
+                vc = self._take_versions()  # policy lag: learner updates done minus the version that acted
+                lag_n = sum(vc.values())
+                lag_mean = sum((c["updates"] - v) * k for v, k in vc.items()) / lag_n if lag_n else float("nan")
+                lag_max = max((c["updates"] - v for v in vc), default=-1)
                 now = time.time()
                 wall, last = now - last, now
                 t0 = time.time()
@@ -669,6 +690,7 @@ class Trainer:
                 c["updates"] += 1
                 updates_here += 1
                 st.update(self._episode_stats(eps, wall))
+                st["diag/policy_lag_mean"], st["diag/policy_lag_max"] = lag_mean, float(lag_max)
                 st["perf/steps_per_s"] = n / max(wall, 1e-9)
                 st["perf/collect_steps_per_s"] = n / max(collect_s, 1e-9)  # while collecting (overlaps updates)
                 st["perf/update_s"] = time.time() - t0
@@ -721,7 +743,9 @@ class Trainer:
                 f"vf {g('loss/vf', '{:.4f}')} ent {g('loss/ent')} za {g('loss/za')} kl {g('loss/kl', '{:.4f}')} "
                 f"clip {g('loss/clip')} ev {g('diag/explained_variance')} gn {g('diag/grad_norm')} "
                 f"ratio {g('diag/trunk_grad_ratio')} cos_pg {g('diag/grad_cos_policy')} "
-                f"cos_vf {g('diag/grad_cos_value')} len {g('episode/decisions', '{:.1f}')} "
+                f"cos_vf {g('diag/grad_cos_value')} r0 {g('diag/first_ratio_mean')}±{g('diag/first_ratio_std')} "
+                f"clip0 {g('diag/first_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
+                f"len {g('episode/decisions', '{:.1f}')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
 
