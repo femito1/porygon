@@ -289,7 +289,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
 
     if measure_ratio:
         perm = torch.randperm(n, device=device)
-        bs = min(args.batch_size, n // 2)
+        bs = min(args.micro_batch or args.batch_size, args.batch_size, n // 2)  # GPU memory: one chunk each
         if bs >= 2:
             gradient_diagnostics(net, [minibatch(perm[:bs]), minibatch(perm[bs:2 * bs])], args, amp, m)
     for epoch in range(args.n_epochs):
