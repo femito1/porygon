@@ -47,6 +47,14 @@ if ! "$PY" -c "import torch, porygon.v2.train; assert torch.cuda.is_available();
 fi
 [ -f pokemon-showdown/package.json ] || { echo "no Showdown checkout at $ROOT/pokemon-showdown" >&2; exit 1; }
 
+# A stand-in job (e.g. the run parked on another partition) never runs alongside the real one: YIELD_TO (netv2.env)
+# names the job it gives way to; if one of ours by that name is already running, do nothing.
+for name in ${YIELD_TO:-}; do
+  if [ -n "$(squeue -h -u "$USER" -n "$name" -t RUNNING -o %i 2>/dev/null || true)" ]; then
+    echo "$name is running: stand-in $SLURM_JOB_ID ($SLURM_JOB_NAME) exits without training"; exit 0
+  fi
+done
+
 # Take over from a stand-in job of the same run (e.g. the run parked on the long partition while this job waited for
 # its GPU): PREEMPT_NAMES (netv2.env) lists job names; any of ours still running gets SIGTERM (the trainer saves
 # final_model.pt, the job mirrors and exits) and we wait until it has left the queue, so the two never write the
