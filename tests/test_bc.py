@@ -90,6 +90,19 @@ def test_meta_with_null_n_actions_is_inferred(tmp_path):
     assert m["n_actions"] == 26 and m["obs_dim"] == d["obs"].shape[1]
 
 
+def test_val_mask_replaces_hash_split(tmp_path):
+    d = bc.synth_shard(300, 26, 10, seed=3)
+    data = tmp_path / "data"; data.mkdir()
+    np.savez(data / "shard-00000.npz", **d)
+    (data / "meta.json").write_text(json.dumps({"format": "gen9randombattle"}))
+    m = np.isin(d["game"], [1, 4])
+    (tmp_path / "mask").mkdir()
+    np.save(tmp_path / "mask" / "shard-00000.npy", m)
+    s = bc.ShardSet([data], bc.Filters(), 0.5, 10_000, workers=1, val_mask=tmp_path / "mask")
+    assert s.n_val == m.sum() and s.n_train == (~m).sum()
+    assert len(s.val_set()["z"]) == m.sum() and len(s.load(0, "train")["z"]) == (~m).sum()
+
+
 def test_game_level_split_is_deterministic():
     games = np.repeat(np.arange(2000), 7)
     v = bc.val_bucket(games, 0.1)

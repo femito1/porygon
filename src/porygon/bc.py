@@ -298,9 +298,10 @@ class ShardSet:
     """Shards + split + filters: counts in a cheap first pass (small fields only), then train / val rows."""
 
     def __init__(self, paths: list[Path], filt: Filters, val_frac: float, val_max: int, seed: int = 0,
-                 workers: int = 4, max_shards: int | None = None):
+                 workers: int = 4, max_shards: int | None = None, val_mask: Path | None = None):
         self.shards = list_shards(paths)[:max_shards]
         self.filt, self.val_frac, self.val_max, self.seed, self.workers = filt, val_frac, val_max, seed, workers
+        self.val_mask = Path(val_mask) if val_mask else None
         meta = read_meta(paths)
         self.sources = source_table(meta)
         with ThreadPoolExecutor(workers) as ex:
@@ -309,7 +310,7 @@ class ShardSet:
         self.counts = []  # (train rows, val rows) per shard after the row filters
         for d in small:
             keep = (filt.row_weight(d) > 0) & np.isfinite(d["z"])
-            v = val_bucket(d["game"], val_frac, seed)
+            v = self.is_val(len(self.counts), d)
             self.counts.append((int((keep & ~v).sum()), int((keep & v).sum())))
         self.n_total = sum(int(d["n"]) for d in small)
         # the val set: val-bucket games of the shards in order until val_max decisions
@@ -323,9 +324,18 @@ class ShardSet:
         self.n_train = sum(t for t, _ in self.counts)
         self.n_val = min(acc, val_max)
 
+    def is_val(self, i: int, d: dict[str, np.ndarray]) -> np.ndarray:
+        """Row-level val selection: the hash split of the game id, or --val-mask DIR/<shard stem>.npy (bool per
+        row, e.g. another model's held-out games mapped onto these shards; scripts/paired_val_mask.py)."""
+        if self.val_mask is None:
+            return val_bucket(d["game"], self.val_frac, self.seed)
+        m = np.load(self.val_mask / f"{Path(self.shards[i]).stem}.npy").astype(bool)
+        assert len(m) == int(d["n"]), f"val mask of {self.shards[i]}: {len(m)} rows vs {int(d['n'])}"
+        return m
+
     def load(self, i: int, part: str) -> dict[str, np.ndarray]:
         d = load_shard(self.shards[i], i, sources=self.sources)
-        v = val_bucket(d["game"], self.val_frac, self.seed)
+        v = self.is_val(i, d)
         return prepare(d, self.filt, ~v if part == "train" else v)
 
     def val_set(self) -> dict[str, np.ndarray]:
@@ -689,7 +699,8 @@ def train(args) -> dict:
     meta = read_meta(args.data)
     filt = make_filters(args, source_table(meta))
     t0 = time.time()
-    data = ShardSet(args.data, filt, args.val_frac, args.val_max, args.seed, args.load_workers, args.max_shards)
+    data = ShardSet(args.data, filt, args.val_frac, args.val_max, args.seed, args.load_workers, args.max_shards,
+                    args.val_mask)
     print(f"{len(data.shards)} shards, {data.n_total:,} decisions: {data.n_train:,} train / {data.n_val:,} val "
           f"after filters ({time.time() - t0:.0f}s); obs_dim {meta['obs_dim']}, {meta['n_actions']} actions",
           flush=True)
@@ -847,7 +858,7 @@ def eval_cmd(args) -> None:
     meta = read_meta(args.data)
     filt = make_filters(args, source_table(meta))
     data = ShardSet(args.data, filt, 1.0 if args.all else args.val_frac, args.val_max, args.seed,
-                    args.load_workers, args.max_shards)
+                    args.load_workers, args.max_shards, None if args.all else args.val_mask)
     model = load_model(args.model, args.device)
     m = evaluate(BCNet(model.policy), data.val_set(), device, args.eval_batch_size, amp_dtype(args, device),
                  args.value_loss)
@@ -946,6 +957,8 @@ def add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("data", nargs="+", type=Path, help="dataset directories (meta.json + shard-*.npz) or shards")
     p.add_argument("--val-frac", type=float, default=0.02, help="share of games in the validation bucket")
     p.add_argument("--val-max", type=int, default=200_000, help="validation decisions kept")
+    p.add_argument("--val-mask", type=Path, help="DIR of <shard stem>.npy bool row masks: the held-out set "
+                   "(replaces the hash split; --val-frac is then unused)")
     p.add_argument("--min-rating", type=int)
     p.add_argument("--max-rating", type=int)
     p.add_argument("--drop-unrated", action="store_true", help="drop decisions with unknown rating (-1)")
