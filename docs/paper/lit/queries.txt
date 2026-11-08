@@ -1,0 +1,31 @@
+P|Pokemon battle artificial intelligence
+P|Pokemon Showdown
+P|Pokemon battle agent
+P|Pokemon reinforcement learning battle
+P|Pokemon Monte Carlo tree search
+P|Pokemon minimax search
+P|Pokemon VGC AI competition
+P|Pokemon random battles
+P|competitive Pokemon language model agent
+P|Pokemon team building artificial intelligence
+P|Pokemon game theory battle
+E|evaluation function tuning game outcomes logistic regression
+E|statistical feature combination evaluation of game positions
+E|learning evaluation function self-play game tree search
+E|bootstrapping from game tree search
+E|evaluation function learning Monte Carlo tree search
+E|state evaluation real-time strategy game logistic regression
+E|learning heuristic evaluation function MCTS without rollouts
+E|tuning evaluation function parameters chess engine
+G|simultaneous move Monte Carlo tree search
+G|determinization Monte Carlo tree search card game evaluation
+G|Hearthstone Monte Carlo tree search evaluation function
+G|Skat state evaluation inference search
+G|Dou Di Zhu search
+G|information set Monte Carlo tree search
+G|microRTS evaluation function
+G|StarCraft combat state evaluation
+S|decoupled UCT simultaneous move games
+S|regret matching simultaneous move Monte Carlo tree search
+S|policy prior PUCT imperfect information search
+S|strategy fusion determinization perfect information Monte Carlo
