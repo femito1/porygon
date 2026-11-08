@@ -46,13 +46,14 @@ def main() -> None:
                     n_skip += 1
                     continue
                 tag = rec["battle"]
-                if tag not in gidx:
+                key = (r, tag)  # battle tags repeat across runs: key games by (run, tag)
+                if key not in gidx:
                     w = winners.get(tag)
-                    gidx[tag] = len(games)
+                    gidx[key] = len(games)
                     games.append({"tag": tag, "run": run.name, "player": rec["player"],
                                   "winner": w[0] if w else None, "pair": w[3] if w else None,
                                   "pair_game": w[4] if w else None})
-                g = games[gidx[tag]]
+                g = games[gidx[key]]
                 won = np.nan if g["winner"] is None and tag not in winners else (
                     0.5 if not g["winner"] else float(g["winner"] == rec["player"]))
                 x = np.frombuffer(base64.b64decode(rec["obs"]), dtype=np.float16)
@@ -64,7 +65,7 @@ def main() -> None:
                 cols["action"].append(rec["action"])
                 cols["value"].append(np.nan if rec["value"] is None else rec["value"])
                 cols["turn"].append(rec["turn"])
-                cols["game"].append(gidx[tag])
+                cols["game"].append(gidx[key])
                 cols["won"].append(won)
                 cols["run"].append(r)
                 cols["src_line"].append(i)
