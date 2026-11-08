@@ -20,6 +20,7 @@ const {SimBattle, Teams} = require(path.join(JS, 'battle.js'));
 const {SideTracker, PokeEnvError} = require(path.join(JS, 'tracker.js'));
 const E = require(path.join(JS, 'encoder_v1.js'));
 const E2 = require(path.join(JS, 'encoder_v2.js'));
+const BOTS = require(path.join(JS, 'bots.js'));
 let V2 = false;  // --v2: record encoder_v2 fields + aux (sparse per field) instead of v1 obs / choices
 
 function sparseTyped(a) {  // [b64 uint16 indices, b64 values in the array's own dtype]
@@ -82,6 +83,7 @@ function playBattle(format, id, seed, record) {
     const S = sides[s], O = sides[1 - s], t = S.t;
     E.actionMask(t, S.mask, 0);
     const d = {e, k: O.ev.length, mask: Array.from(S.mask), v: E.stateValue(t, SHAPING), a: null, done: false};
+    if (!V2) { try { d.h = BOTS.heuristic(t); } catch (err) { d.h = `error ${err.message}`; } }
     let t0 = process.hrtime.bigint();
     if (V2) {
       E2.encodeFields(t, S.o2, 0);

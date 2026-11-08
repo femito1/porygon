@@ -11,8 +11,8 @@ a few lines:
 
 Needs the v2 JS encoder (`fastenv/js/encoder_v2.js`: obs/<field> and aux/<field> columns named as
 `porygon.v2.spec.fields` / `aux_fields`). Self-play, plus snapshot pool battles (`pool_per_worker`, `pool_dir`,
-opp_fn as in Collector); baseline-bot opponents (SimpleHeuristics / MaxBasePower are poke-env Python) are not
-available. Transitions close as in Collector: at the side's next decision (bootstrap = its
+opp_fn as in Collector), plus baseline bots inside the env (`FastEnv(bot="heuristic", bot_battles=k)`: poke-env's
+SimpleHeuristicsPlayer / MaxBasePowerPlayer ported to JS, episodes reported as kind "pool", opp = the bot). Transitions close as in Collector: at the side's next decision (bootstrap = its
 value) or at the end of the battle (done, bootstrap 0); open transitions carry over between rollouts.
 """
 
@@ -72,8 +72,12 @@ class FastCollector:
         for b in self.ready.values():
             self._receive(b)  # first decisions: picks the pool battles' opponents
 
-    def _is_pool(self, battle: int) -> bool:
-        return battle % self.env.battles_per_worker < self.pool_per_worker
+    def _is_bot(self, battle: int) -> bool:  # side two played inside the env (FastEnv(bot=..., bot_battles=k))
+        return battle % self.env.battles_per_worker < self.env.bot_battles
+
+    def _is_pool(self, battle: int) -> bool:  # snapshot battles come after the env-side bot battles
+        k = battle % self.env.battles_per_worker - self.env.bot_battles
+        return 0 <= k < self.pool_per_worker
 
     def _pick_snapshot(self) -> str | None:
         if self.pool_dir is None or self.opp_fn is None:
@@ -116,7 +120,12 @@ class FastCollector:
                 r = pending_result.setdefault(s // 2, [None, None, 0])
                 r[s % 2] = int(b.win[i])
                 r[2] = int(b.turn[i])
-                if None not in r[:2]:
+                if self._is_bot(s // 2) and s % 2 == 0:  # env-side baseline bot battle: only the learner side
+                    self.episodes.append({"kind": "pool", "opp": self.env.bot, "turns": r[2],
+                                          "decisions": [self.decisions.pop(s, 0)], "result": [r[0]]})
+                    self.decisions.pop(s + 1, None)
+                    pending_result.pop(s // 2)
+                elif None not in r[:2]:
                     base = (s // 2) * 2
                     snap = self.snapshot.pop(s // 2, None)
                     dec = [self.decisions.pop(base, 0), self.decisions.pop(base + 1, 0)]

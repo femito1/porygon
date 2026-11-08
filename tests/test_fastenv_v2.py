@@ -74,3 +74,31 @@ def test_collector_pool_snapshots(tmp_path):
         assert all(s % 2 == 0 for s in segs if (s // 2) % 4 < 2), "pool battles: only the learner side has transitions"
     finally:
         workers.close()
+
+
+def test_collector_env_bots():
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    from porygon.v2.workers import Packer
+
+    rng = np.random.default_rng(2)
+
+    def act(batch):
+        mask = batch["action_mask"] > 0
+        probs = mask / mask.sum(1, keepdims=True)
+        acts = (rng.random(mask.shape) * mask).argmax(1)
+        n = len(acts)
+        return acts, np.log(probs[np.arange(n), acts]), np.zeros(n, np.float32), probs.astype(np.float32)
+
+    workers = FastWorkers(FastEnv("gen4randombattle", 1, 3, seed=8, encoder="v2", shaping=(0, 0, 0),
+                                  bot="heuristic", bot_battles=1))
+    try:
+        col = FastCollector(workers.env, Packer(4), act, seed=0)
+        while len(col.episodes) < 8:
+            col.step()
+        segs, eps = col.take()
+        bot_eps = [e for e in eps if e["kind"] == "pool"]
+        assert bot_eps and all(e["opp"] == "heuristic" and len(e["result"]) == 1 for e in bot_eps)
+        assert 1 not in segs, "the bot's side has no transitions"
+    finally:
+        workers.close()

@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import orjson  # noqa: E402
 from poke_env.battle import Battle  # noqa: E402
 from poke_env.data import GenData  # noqa: E402
+from poke_env.player import SimpleHeuristicsPlayer  # noqa: E402
 from poke_env.environment import SinglesEnv  # noqa: E402
 from poke_env.environment.env import PokeEnv  # noqa: E402
 from poke_env.player import Player  # noqa: E402
@@ -153,6 +154,7 @@ def choice_of(battle, a: int) -> str:
 class Stats:
     def __init__(self):
         self.battles = self.decisions = self.obs_bad = self.mask_bad = self.choice_bad = self.value_bad = 0
+        self.heur = self.heur_bad = 0
         self.final_bad = self.align_bad = self.crash_both = self.crash_bad = 0
         self.slots = Counter()
         self.kinds = Counter()  # protocol coverage: message kinds (and a few effect/ability markers) seen
@@ -223,6 +225,12 @@ def check_side(rec, s, side, st: Stats, limit: int):
             st.choice_bad += 1
             diff = [(a, x, y) for a, (x, y) in enumerate(zip(ch, d["ch"])) if x != y]
             st.note(f"{tag} p{s + 1} ev {i}: choices (action, py, js) {diff[:4]}", limit)
+        if "h" in d and d["h"] is not None:  # JS SimpleHeuristicsPlayer port (bots.js); None = poke-env goes random
+            py = SimpleHeuristicsPlayer.choose_singles_move(battle)[0].message.removeprefix("/choose ")
+            st.heur += 1
+            if py != d["h"]:
+                st.heur_bad += 1
+                st.note(f"{tag} p{s + 1} ev {i}: heuristic py={py!r} js={d['h']!r}", limit)
         v = state_value(battle)
         if abs(v - d["v"]) > 1e-9:
             st.value_bad += 1
@@ -257,7 +265,7 @@ def report(st: Stats, label: str) -> bool:
     print(f"{label}: {st.battles} battles, {st.decisions} decisions compared")
     print(f"  obs mismatching decisions {st.obs_bad}, mask {st.mask_bad}, action->choice {st.choice_bad}, "
           f"state value {st.value_bad}, final value {st.final_bad}, alignment {st.align_bad}, "
-          f"crash mismatches {st.crash_bad} (both-raise {st.crash_both})")
+          f"crash mismatches {st.crash_bad} (both-raise {st.crash_both}); heuristic bot {st.heur_bad} of {st.heur}")
     if st.slots:
         print("  mismatching obs slots (count over decisions x tokens):")
         for k, v in st.slots.most_common(30):
@@ -269,7 +277,7 @@ def report(st: Stats, label: str) -> bool:
     for e in st.examples:
         print("  -", e)
     return not (st.obs_bad or st.mask_bad or st.choice_bad or st.value_bad or st.final_bad or st.align_bad
-                or st.crash_bad)
+                or st.crash_bad or st.heur_bad)
 
 
 def main():

@@ -16,7 +16,8 @@
 //   battle, 8 the previous action of this slot was rejected by Showdown and replaced by 'default'.
 // --duplicate 1: every slot plays duplicate pairs (game 2k+1 replays game 2k's seed with the teams swapped), so
 //   side 0 plays both teams of each pair: for head-to-head evaluation (porygon.fastenv_eval).
-// --bot max_power|random --bot-battles K: side two of battles 0..K-1 is an env-side baseline bot (no rows).
+// --bot heuristic|max_power|random --bot-battles K: side two of battles 0..K-1 is an env-side baseline bot
+//   (poke-env SimpleHeuristicsPlayer / MaxBasePowerPlayer ports, fastenv/js/bots.js; those sides emit no rows).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -169,19 +170,12 @@ function row(slot, side, needsAction, done) {
 }
 
 // --- env-side baseline bots (--bot NAME --bot-battles K: side two of battles 0..K-1; their rows are not emitted)
-const BOTS = {
-  // poke-env MaxBasePowerPlayer: the available move with the highest base power (first of equals), else random
-  max_power(t) {
-    let best = null;
-    for (const m of t.availableMoves) if (best === null || m.basePower > best.basePower) best = m;
-    if (best !== null) return `move ${best.id}`;
-    const v = E.validChoices(t);
-    return v.length ? v[prng.random(v.length)] : 'default';
-  },
-  random(t) {
-    const v = E.validChoices(t);
-    return v.length ? v[prng.random(v.length)] : 'default';
-  },
+const BOT_IMPL = require('./bots');
+const randomValid = t => { const v = E.validChoices(t); return v.length ? v[prng.random(v.length)] : 'default'; };
+const BOTS = {  // poke-env baselines (bots.js, parity-tested); null from a bot = poke-env's random valid order
+  heuristic: t => BOT_IMPL.heuristic(t) ?? randomValid(t),
+  max_power: t => BOT_IMPL.maxPower(t) ?? randomValid(t),
+  random: randomValid,
 };
 const BOT = args.bot ? BOTS[args.bot] : null;
 if (args.bot && !BOT) throw new Error(`unknown --bot ${args.bot} (have ${Object.keys(BOTS)})`);

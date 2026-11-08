@@ -5,7 +5,8 @@
 Side one (p1) is always A, side two B; each slot plays duplicate pairs (same battle seed, teams swapped), so a
 pair's team luck cancels. Reports A's win rate (ties count half) with a 95% interval from pair means. A policy is
 an SB3 checkpoint (.zip) / pool snapshot (.pt) acting stochastically, `random` (uniform over legal actions), or
-(B only) `max_power` (poke-env's MaxBasePowerPlayer, played inside the env).
+(B only) `heuristic` / `max_power` (poke-env's SimpleHeuristicsPlayer / MaxBasePowerPlayer, ported to JS with
+0 mismatches on 11.8k decisions, played inside the env).
 Fast and exact Showdown mechanics, but strength claims still go through real Showdown benchmarks (README).
 """
 
@@ -37,7 +38,7 @@ def make_actor(spec: str, device: str):
     return act
 
 
-ENV_BOTS = ("max_power",)  # played inside the env (porygon.fastenv bot=...)
+ENV_BOTS = ("heuristic", "max_power")  # played inside the env (porygon.fastenv bot=...)
 
 
 def evaluate(fmt: str, a: str, b: str, games: int, workers: int, battles: int, seed: int, device: str) -> dict:

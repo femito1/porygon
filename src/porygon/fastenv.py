@@ -189,9 +189,11 @@ class FastEnv:
     def __init__(self, battle_format: str = "gen9randombattle", n_workers: int = 4, battles_per_worker: int = 64,
                  seed: int = 0, encoder: str | None = None, shaping=SHAPING, node: str | None = None,
                  max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0):
-        """bot: an env-side baseline ('max_power' = poke-env MaxBasePowerPlayer, 'random') playing side two of
+        """bot: an env-side baseline ('heuristic' / 'max_power' = poke-env SimpleHeuristicsPlayer /
+        MaxBasePowerPlayer, 'random') playing side two of
         the first bot_battles battles of every worker (those sides emit no rows)."""
         encoder = encoder or os.environ.get("PORYGON_FASTENV_ENCODER", "v1")
+        self.bot, self.bot_battles = bot, (bot_battles if bot else 0)
         self.format, self.n_workers, self.battles_per_worker = battle_format, n_workers, battles_per_worker
         node = node or node_binary()
         self.workers = [Worker(i, battle_format, battles_per_worker, seed * 1000 + i, encoder, shaping, node,
