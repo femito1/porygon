@@ -148,8 +148,10 @@ def test_overfit_and_checkpoints(gen9_data, tmp_path):
     assert policy.action_space.n == 26 and policy.observation_space["observation"].shape == (OBS_DIM,)
 
     # --resume continues from last_state.pt
-    bc.main(tiny_args(gen9_data, out, "--max-steps", "70", "--batch-size", "64", "--loader", "ram",
-                      "--max-rows", "256", "--resume", str(out)))
+    args = tiny_args(gen9_data, out, "--max-steps", "70", "--batch-size", "64", "--loader", "ram",
+                     "--max-rows", "256", "--resume", str(out))
+    i = args.index("--out")
+    bc.main(args[:i] + args[i + 2:])  # no --out: continues in the resumed directory
     logs = [json.loads(line) for line in (out / "train_log.jsonl").open()]
     assert max(r["step"] for r in logs) == 70
 

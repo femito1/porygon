@@ -684,7 +684,8 @@ def train(args) -> dict:
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
-    out = Path(args.out)
+    out = Path(args.out or args.resume or Path("runs") / time.strftime("bc-%Y%m%d-%H%M%S"))
+    args.out = out
     out.mkdir(parents=True, exist_ok=True)
     meta = read_meta(args.data)
     filt = make_filters(args, source_table(meta))
@@ -977,7 +978,7 @@ def main(argv: list[str] | None = None):
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("train", help="supervised training on shards")
     add_data_args(t)
-    t.add_argument("--out", type=Path, default=Path("runs") / time.strftime("bc-%Y%m%d-%H%M%S"))
+    t.add_argument("--out", type=Path, help="run directory (default: the --resume dir, else runs/bc-<date>)")
     t.add_argument("--init", help="initialise from this PPO checkpoint (.zip) instead of from scratch")
     t.add_argument("--resume", help="continue the run in this directory (last_model.zip + last_state.pt)")
     t.add_argument("--policy", default="porygon.model:MaskedPolicy", help="policy class, module:Class")
