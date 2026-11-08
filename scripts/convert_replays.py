@@ -422,11 +422,11 @@ def do_unit(job: tuple) -> dict:
     encoder = load_encoder(a["encoder"], a["extra_src"])
     from poke_env.environment import SinglesEnv
     n_actions = SinglesEnv.get_action_space_size(gen)
-    rec_dir = Path(a["out"]) / "records" / fmt
-    enc_dir = Path(a["out"]) / "encoded" / fmt / encoder_name(a["encoder"])
+    rec_dir, enc_dir = Path(a["rec_dir"]), Path(a["enc_dir"])
     rec_dir.mkdir(parents=True, exist_ok=True)
     enc_dir.mkdir(parents=True, exist_ok=True)
     counts, sources, commits = Counter(), {}, Counter()
+    games: list[str | None] = []
     cols: dict[str, list] = {k: [] for k in DTYPES}
     obs_dim = None
     t0 = time.time()
@@ -450,6 +450,7 @@ def do_unit(job: tuple) -> dict:
                     counts[f"error: {err}"] += 1
                     continue
                 counts["games"] += 1
+                games.append(sides[0]["id"] if sides else None)
                 for rec in sides:
                     sources[rec["source"]] = source_id(rec["source"])
                     rows = encode_rows(rec, base + i, sources[rec["source"]], n_actions)
@@ -481,7 +482,7 @@ def do_unit(job: tuple) -> dict:
         counts[f"unit error: {type(e).__name__}"] += 1
         traceback.print_exc()
     return {"unit": unit, "counts": dict(counts), "sources": sources, "commits": dict(commits),
-            "obs_dim": obs_dim, "n_actions": n_actions, "seconds": time.time() - t0}
+            "obs_dim": obs_dim, "n_actions": n_actions, "seconds": time.time() - t0, "games": games}
 
 
 def units(items: Iterator[dict], size: int, mode: str, a: dict, start: int = 0) -> Iterator[tuple]:
@@ -527,7 +528,15 @@ def main() -> None:
         items = corpus_battles(a.inputs, a.format, load_inputlogs(a.inputlogs) if a.inputlogs else None)
     else:
         items = (b for d in a.inputs for b in (run_battles(d) if a.mode == "runs" else logged_obs_battles(d)))
+    # Readers may be using OUT while it is refreshed: each run writes new version dirs next to the final paths and
+    # then swaps symlinks onto them (rename is atomic), keeping the previous version for readers mid-read.
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+    rec_final = a.out / "records" / a.format
+    enc_final = a.out / "encoded" / a.format / encoder_name(a.encoder)
+    args["rec_dir"] = str(rec_final) + f".v{stamp}"
+    args["enc_dir"] = str(enc_final) + f".v{stamp}"
     total, sources, commits = Counter(), {}, Counter()
+    game_ids: list[str] = []
     obs_dim = n_actions = None
     t0 = time.time()
     jobs = units(items, a.unit, a.mode, args, a.start_unit)
@@ -538,6 +547,7 @@ def main() -> None:
             sources.update(res["sources"])
             obs_dim = obs_dim or res["obs_dim"]
             n_actions = res["n_actions"]
+            game_ids += [g for g in res["games"] if g]
             el = time.time() - t0
             print(f"unit {res['unit']}: {res['counts'].get('games', 0)} games, {res['counts'].get('decisions', 0)} "
                   f"decisions in {res['seconds']:.0f} s; total {total['games']} games / {total['battles']} battles, "
@@ -545,13 +555,31 @@ def main() -> None:
     meta = {"encoder": a.encoder, "encoder_name": encoder_name(a.encoder), "obs_dim": obs_dim, "n_actions": n_actions,
             "format": a.format, "PORYGON_GEN": os.environ.get("PORYGON_GEN", "4"), "counts": dict(total),
             "sources": sources, "source_ids": SOURCE_IDS, "showdown_commits": len(commits), "code_commit": code_commit(),
-            "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1), "workers": a.workers}
-    enc_dir = a.out / "encoded" / a.format / encoder_name(a.encoder)
-    enc_dir.mkdir(parents=True, exist_ok=True)
-    (enc_dir / "meta.json").write_text(json.dumps(meta, indent=1))
-    (a.out / "records" / a.format).mkdir(parents=True, exist_ok=True)
-    (a.out / "records" / a.format / "meta.json").write_text(json.dumps(meta, indent=1))
+            "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1), "workers": a.workers,
+            "version": stamp, "n_games": len(game_ids), "games": game_ids,
+            "note": "game index g in a shard = position of the battle in input order; `games` lists the converted ids"}
+    for d in (args["rec_dir"], args["enc_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
+        (Path(d) / "meta.json").write_text(json.dumps(meta, indent=1))
+    for final, new in ((rec_final, Path(args["rec_dir"])), (enc_final, Path(args["enc_dir"]))):
+        swap_in(final, new)
     print(json.dumps(meta["counts"], indent=1))
+
+
+def swap_in(final: Path, new: Path, keep: int = 2) -> None:
+    """Point `final` (a symlink) at version dir `new` atomically; keep the newest `keep` versions."""
+    if final.exists() and not final.is_symlink():  # an old plain dir: becomes a version itself (one-time)
+        final.rename(final.parent / f"{final.name}.v00000000-000000")
+    tmp = final.parent / f".{final.name}.lnk-{os.getpid()}"
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    tmp.symlink_to(new.name)
+    os.replace(tmp, final)
+    versions = sorted(p for p in final.parent.glob(f"{final.name}.v*") if p.is_dir())
+    for old in versions[:-keep]:
+        if old.resolve() != new.resolve():
+            import shutil
+            shutil.rmtree(old, ignore_errors=True)
 
 
 if __name__ == "__main__":
