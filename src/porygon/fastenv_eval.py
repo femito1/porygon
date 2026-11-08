@@ -6,7 +6,7 @@ Side one (p1) is always A, side two B; each slot plays duplicate pairs (same bat
 pair's team luck cancels. Reports A's win rate (ties count half) with a 95% interval from pair means. A policy is
 an SB3 checkpoint (.zip) / pool snapshot (.pt) acting stochastically, `random` (uniform over legal actions), or
 (B only) `heuristic` / `max_power` (poke-env's SimpleHeuristicsPlayer / MaxBasePowerPlayer, ported to JS with
-0 mismatches on 11.8k decisions, played inside the env).
+0 mismatches on 22.8k decisions, played inside the env).
 Fast and exact Showdown mechanics, but strength claims still go through real Showdown benchmarks (README).
 """
 
