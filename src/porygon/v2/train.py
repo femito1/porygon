@@ -490,6 +490,7 @@ class Trainer:
             self.counters.update(ck.get("counters", {}))
         else:
             self.net = Net(self.gen, **model_cfg(args))
+            save(self.net, self.run_dir / "init_model.pt", counters=dict(self.counters))  # step-0 weights (drift analyses)
         assert self.net.gen == self.gen, f"model gen {self.net.gen} vs format {args.format}"
         self.net.to(self.device).train()
         self.opt = torch.optim.AdamW(self.net.param_groups(args.weight_decay), lr=args.lr, betas=(0.9, 0.999),

@@ -21,8 +21,9 @@ def _device(net: Net) -> torch.device:
 
 
 @torch.no_grad()
-def policy_probs(net: Net, battle: AbstractBattle) -> tuple[np.ndarray, np.ndarray]:
-    """(probabilities [A] over poke-env actions, legal mask [A]); probabilities are 0 off the mask."""
+def policy_probs(net: Net, battle: AbstractBattle, temperature: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """(probabilities [A] over poke-env actions, legal mask [A]); probabilities are 0 off the mask.
+    `temperature` < 1 sharpens (softmax of logits / T)."""
     obs = encode(battle)
     out = net(obs_to_tensors([obs], _device(net)), aux=False)
     mask = obs["action_mask"]
@@ -30,7 +31,8 @@ def policy_probs(net: Net, battle: AbstractBattle) -> tuple[np.ndarray, np.ndarr
     probs = np.zeros_like(mask, dtype=np.float64)
     legal = mask > 0
     if legal.any():
-        z = logits[legal] - logits[legal].max()
+        z = logits[legal] / temperature
+        z = z - z.max()
         e = np.exp(z)
         probs[legal] = e / e.sum()
     return probs, mask
@@ -39,16 +41,17 @@ def policy_probs(net: Net, battle: AbstractBattle) -> tuple[np.ndarray, np.ndarr
 class NetPlayer(Player):
     """Plays a v2 Net. `deterministic` = argmax instead of sampling."""
 
-    def __init__(self, net: Net, *args: Any, deterministic: bool = False, **kwargs: Any):
+    def __init__(self, net: Net, *args: Any, deterministic: bool = False, temperature: float = 1.0, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.net = net
         self.deterministic = deterministic
+        self.temperature = temperature
         self.rng = np.random.default_rng()
 
     def choose_move(self, battle: AbstractBattle) -> BattleOrder:
         if battle.wait:
             return DefaultBattleOrder()
-        probs, mask = policy_probs(self.net, battle)
+        probs, mask = policy_probs(self.net, battle, self.temperature)
         if not (mask > 0).any():
             return self.choose_random_move(battle)
         a = int(np.argmax(probs)) if self.deterministic else int(self.rng.choice(len(probs), p=probs))

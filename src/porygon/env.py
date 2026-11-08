@@ -127,10 +127,12 @@ class PolicyPlayer(Player):
     """Plays any SB3 policy trained on SelfPlayEnv observations (eval, ladder, challenges)."""
 
     def __init__(self, policy: ActorCriticPolicy, *args: Any, deterministic: bool = False,
-                 **kwargs: Any):
+                 temperature: float = 1.0, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.policy = policy
         self.deterministic = deterministic
+        self.temperature = temperature  # sample from p^(1/T) (T < 1: sharper); 1 = the policy as trained
+        self.rng = np.random.default_rng()
 
     def choose_move(self, battle: AbstractBattle) -> BattleOrder:
         if battle.wait:
@@ -141,5 +143,11 @@ class PolicyPlayer(Player):
         }
         obs = {k: v.to(self.policy.device) for k, v in obs.items()}
         with torch.no_grad():
-            action = self.policy._predict(obs, deterministic=self.deterministic)
-        return SinglesEnv.action_to_order(np.int64(action.item()), battle, strict=False)
+            if self.temperature == 1.0 or self.deterministic:
+                action = self.policy._predict(obs, deterministic=self.deterministic).item()
+            else:
+                logp = self.policy.get_distribution(obs).distribution.logits[0].double().cpu().numpy()
+                z = logp / self.temperature
+                p = np.exp(z - z.max())
+                action = int(self.rng.choice(len(p), p=p / p.sum()))
+        return SinglesEnv.action_to_order(np.int64(action), battle, strict=False)

@@ -4,7 +4,8 @@ head-to-heads with 95% intervals from pair means.
 Player specs (`load_player`): BASE[,key=value...]
     runs/x/final_model.zip, pool/123.pt  v1 SB3 checkpoint / opponent-pool snapshot -> PolicyPlayer
     net.pt                               v2 checkpoint (dict with "cfg", "gen", "state_dict") -> v2 NetPlayer
-        options: deterministic=1 (argmax; default 0 = sample, as training and slurm_h2h_nets play), device=cuda
+        options: deterministic=1 (argmax; default 0 = sample, as training and slurm_h2h_nets play), temperature=T
+        (sample from softmax(logits / T); netv2's evaluation default from 2026-11-08 is T = 0.5), device=cuda
     search:MODEL|none                    SearchPlayer (gen from PORYGON_GEN), MODEL = v1 or v2 checkpoint as the
                                          prior, none = pure engine search (prior_weight 0)
         options: any porygon.search CONFIG key (ms, samples, prior_weight, top_k, c_puct, root_game, rm_gamma,
@@ -134,6 +135,7 @@ def load_player(spec: str, **player_kwargs: Any):
     base, opts = parse_spec(spec)
     device = opts.pop("device", player_kwargs.pop("device", None)) or "cpu"
     deterministic = _flag(opts.pop("deterministic", opts.pop("det", player_kwargs.pop("deterministic", False))))
+    temperature = float(opts.pop("temperature", opts.pop("t", player_kwargs.pop("temperature", 1.0))))
     workers = player_kwargs.pop("workers", None)
     fmt = player_kwargs.get("battle_format", "gen4randombattle")
     if base in BASELINE_NAMES:
@@ -160,14 +162,14 @@ def load_player(spec: str, **player_kwargs: Any):
             return LoggedSearchPlayer(policy, **cfg, **extra, out=log_dir, **player_kwargs)
         return SearchPlayer(policy, **cfg, **extra, **player_kwargs)
     if opts:
-        raise ValueError(f"unknown network options {sorted(opts)} (known: deterministic, device)")
+        raise ValueError(f"unknown network options {sorted(opts)} (known: deterministic, temperature, device)")
     net = load_net(base, device)
     check_net_gen(net, fmt, spec)
     if is_v2_net(net):
         from porygon.v2.player import NetPlayer
-        return NetPlayer(net, deterministic=deterministic, **player_kwargs)
+        return NetPlayer(net, deterministic=deterministic, temperature=temperature, **player_kwargs)
     from porygon.env import PolicyPlayer
-    return PolicyPlayer(net, deterministic=deterministic, **player_kwargs)
+    return PolicyPlayer(net, deterministic=deterministic, temperature=temperature, **player_kwargs)
 
 
 # ---------------------------------------------------------------- scoring

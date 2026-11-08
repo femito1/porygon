@@ -124,6 +124,7 @@ async def main():
     p.add_argument("model")
     p.add_argument("--player", choices=["policy", "search"], default="policy")
     p.add_argument("--deterministic", action="store_true", help="policy: play the network's argmax (default: sample)")
+    p.add_argument("--temperature", type=float, default=1.0, help="policy: sample from softmax(logits / T)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--opponents", nargs="+", required=True, help="usernames of running Foul Play instances")
     p.add_argument("--n", type=int, default=1, help="battles per opponent")
@@ -158,7 +159,7 @@ async def main():
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)
     cfg = {k: getattr(a, k) for k in CONFIG}
-    raw = partial(NetPlayer, deterministic=a.deterministic) if v2 else partial(PolicyPlayer, deterministic=a.deterministic)
+    raw = partial(NetPlayer if v2 else PolicyPlayer, deterministic=a.deterministic, temperature=a.temperature)
     players = []
     for i, _ in enumerate(a.opponents):
         acc = AccountConfiguration(f"{a.player[:3]}{tag}x{i}", None)
@@ -171,7 +172,7 @@ async def main():
             guard_pool(pl.pool, a.search_timeout)
     desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())}, oracle={a.oracle})"
             if a.player == "search" else
-            f"{'NetPlayer' if v2 else 'PolicyPlayer'}({'deterministic' if a.deterministic else 'sampling'})")
+            f"{'NetPlayer' if v2 else 'PolicyPlayer'}({'deterministic' if a.deterministic else f'sampling T={a.temperature}'})")
     start = time.time()
     with open(a.results, "a") as out:
         results = await asyncio.gather(*(series(pl, o, a, out) for pl, o in zip(players, a.opponents)))
