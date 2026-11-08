@@ -123,18 +123,32 @@ cleanup() {  # also on scancel / time limit (SIGTERM; Slurm allows ~30 s before 
 }
 trap cleanup EXIT
 
-# shellcheck disable=SC2086
-"$PY" -u -m porygon.v2.train --format "$FORMAT" --ports "$BASE-$LAST" --n-battles "$SELFPLAY" \
-  --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
-  ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "$TOTAL" --max-hours 70.5 \
-  ${TRAIN_ARGS:-} "$@" > "$LOCAL/run/stdout.log" 2>&1 &
-TRAIN=$!
-trap 'kill -TERM "$TRAIN" 2>/dev/null || true' TERM  # the trainer saves final_model.pt and exits
-RC=0
-while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" && RC=0 || RC=$?; done
+# Restart in place (new flags, same allocation): edit netv2.env, `touch runs/RUN_NAME/restart`, then
+#   srun --jobid=J --overlap --ntasks=1 pkill -INT -f '^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train'
+# The trainer saves final_model.pt and exits; this loop re-reads netv2.env and relaunches it from that checkpoint.
+STOPPED=0
+trap 'STOPPED=1; kill -TERM "$TRAIN" 2>/dev/null || true' TERM  # the trainer saves final_model.pt and exits
+while true; do
+  # shellcheck disable=SC2086
+  "$PY" -u -m porygon.v2.train --format "$FORMAT" --ports "$BASE-$LAST" --n-battles "$SELFPLAY" \
+    --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
+    ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "$TOTAL" --max-hours 70.5 \
+    ${TRAIN_ARGS:-} "$@" >> "$LOCAL/run/stdout.log" 2>&1 &
+  TRAIN=$!
+  RC=0
+  while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" && RC=0 || RC=$?; done
+  if [ "$STOPPED" = 0 ] && [ -f "$RUNS/restart" ] && [ -f "$LOCAL/run/final_model.pt" ]; then
+    rm -f "$RUNS/restart"
+    [ -f netv2.env ] && source netv2.env
+    LATEST=$LOCAL/run/final_model.pt
+    echo "$(date -u +%T) restart in place from $LATEST with TRAIN_ARGS='${TRAIN_ARGS:-}'" | tee -a "$LOCAL/run/train.log"
+    continue
+  fi
+  break
+done
 trap cleanup EXIT
 kill "$MIRROR" 2>/dev/null || true; mirror || true
-if [ "$RC" -ne 0 ] && [ "$RC" -ne 143 ]; then  # a crashed trainer must fail the job (not COMPLETED / exit 0)
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 143 ] && [ "$RC" -ne 130 ]; then  # a crashed trainer must fail the job (not COMPLETED / exit 0)
   echo "ERROR: trainer exited with $RC; tail of stdout.log:" >&2; tail -25 "$LOCAL/run/stdout.log" >&2 || true; exit "$RC"
 fi
 
