@@ -171,6 +171,7 @@ class Move {
     this.fromMimic = fromMimic;
     this.fromTransform = fromTransform;
     this.gen = G.gen;
+    this.vidx = -1;  // encoder cache: vocab index of this.id
     if (moveId.startsWith('hiddenpower') && rawId !== null) {
       let digits = '', id = '';
       for (const ch of rawId) if (ch >= '0' && ch <= '9') digits += ch;
@@ -403,12 +404,16 @@ class Mon {
       hp = hpStatus;
       this.status = null;
     }
-    let clean = '';
-    for (const ch of hp) if ((ch >= '0' && ch <= '9') || ch === '/') clean += ch;
-    const p = clean.split('/');
-    if (p.length !== 2 || p[0] === '' || p[1] === '') fail(`ValueError hp ${hpStatus}`);
-    this.hp = parseInt(p[0], 10);
-    this.maxHp = parseInt(p[1], 10);
+    // keep only digits and '/', then split on '/' into exactly two non-empty ints (Python semantics)
+    let a = 0, b = 0, nA = 0, nB = 0, slashes = 0;
+    for (let i = 0; i < hp.length; i++) {
+      const c = hp.charCodeAt(i);
+      if (c >= 48 && c <= 57) { if (slashes === 0) { a = a * 10 + c - 48; nA++; } else { b = b * 10 + c - 48; nB++; } }
+      else if (c === 47) slashes++;
+    }
+    if (slashes !== 1 || !nA || !nB) fail(`ValueError hp ${hpStatus}`);
+    this.hp = a;
+    this.maxHp = b;
     if (store) this.stats.hp = this.maxHp;
   }
   startEffect(effectStr, details = null) {

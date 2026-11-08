@@ -2,7 +2,7 @@
 // records per side the exact message stream (logs, request JSON, errors) plus, at every decision point, the JS
 // encode() (sparse), actionMask(), actionToChoice() for every action and stateValue(), for scripts/fastenv/parity_v1.py.
 //
-//   node scripts/fastenv/record_battles.js N FORMAT OUT.jsonl [SEED=1] [--bench]
+//   node scripts/fastenv/record_battles.js N FORMAT OUT.jsonl [SEED=1] [--bench]     (OUT '-' = stdout)
 //
 // Player policy (deterministic given SEED): uniform over legal actions, except 15% "switch if any switch is
 // legal" and 30% "terastallize if tera is legal".  One JSON line per battle:
@@ -37,7 +37,7 @@ function sparse(obs) {
   return [Buffer.from(ix.buffer).toString('base64'), Buffer.from(vs.buffer).toString('base64')];
 }
 
-const timing = {trackNs: 0n, trackCalls: 0, encNs: 0n, encCalls: 0, turns: 0, decisions: 0};
+const timing = {trackNs: 0n, trackCalls: 0, encNs: 0n, encCalls: 0, turns: 0, decisions: 0, errors: 0};
 
 function pickAction(rng, mask, gen) {
   const legal = [];
@@ -61,7 +61,7 @@ function playBattle(format, id, seed, record) {
   const b = new SimBattle(format, s4(), teams, {
     onLog: (s, text) => queue.push([s, 'L', text, null]),
     onRequest: (s, req, json) => queue.push([s, 'R', json, req]),
-    onError: (s, text) => queue.push([s, 'E', text, null]),
+    onError: (s, text) => { timing.errors++; queue.push([s, 'E', text, null]); },
   });
   let crashed = false;
   const decide = (S) => {
@@ -134,7 +134,7 @@ function main() {
   const pos = args.filter(a => !a.startsWith('--'));
   const n = parseInt(pos[0] || '10', 10), format = pos[1] || 'gen9randombattle';
   const out = bench ? null : pos[2], seed = parseInt(pos[3] || '1', 10);
-  const fd = out ? fs.openSync(out, 'w') : null;
+  const fd = out ? (out === '-' ? 1 : fs.openSync(out, 'w')) : null;
   let crashes = 0, defaults = 0;
   const t0 = Date.now();
   for (let i = 0; i < n; i++) {
@@ -143,10 +143,10 @@ function main() {
     defaults += r.defaults;
     if (fd !== null) fs.writeSync(fd, JSON.stringify(r) + '\n');
   }
-  if (fd !== null) fs.closeSync(fd);
+  if (fd !== null && fd !== 1) fs.closeSync(fd);
   const us = (ns, c) => (Number(ns) / 1e3 / Math.max(c, 1)).toFixed(2);
   console.error(`${format}: ${n} battles in ${((Date.now() - t0) / 1e3).toFixed(1)}s, ${timing.decisions} decisions, ` +
-    `${crashes} battles with a PokeEnvError, ${defaults} 'default' fallbacks`);
+    `${crashes} battles with a PokeEnvError, ${defaults} 'default' fallbacks, ${timing.errors} Showdown choice errors`);
   console.error(`tracker: ${us(timing.trackNs, timing.trackCalls)} us/message-chunk, ` +
     `${us(timing.trackNs, timing.turns * 2)} us per side-turn; encode: ${us(timing.encNs, timing.encCalls)} us/call`);
 }

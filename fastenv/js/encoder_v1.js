@@ -101,7 +101,8 @@ function encodeMove(out, o, move, user, defender, chart, avail) {
   const e = move.e;
   if (e.s === null) throw new PokeEnvError(`encode_move failed for ${move.id}`);
   const s = e.s;
-  for (let i = 0; i < MOVE_DIM; i++) out[o + i] = s[i];
+  if (e.s32 === undefined) e.s32 = Float32Array.from(s);
+  out.set(e.s32, o);
   if (move.bpOverride !== null) out[o + MV_BP] = move.bpOverride / 150;
   out[o + MV_PP] = move.pp / Math.max(move.maxPP, 1);
   let a = 0;
@@ -116,13 +117,14 @@ function encodeMove(out, o, move, user, defender, chart, avail) {
 }
 
 const EMPTY = [];
-function encodeMon(out, o, mon, t, mine, sets) {
+const moveIdx = m => (m.vidx >= 0 ? m.vidx : (m.vidx = idx('moves', m.id)));
+// ctx: {act, oppAct, avail (own available move ids)} computed once per encode()
+function encodeMon(out, o, mon, t, mine, sets, ctx) {
   if (mon === null) { out[o + NUM0 + MON_NUM_DIM - 1] = 1; return; }
   const G = t.G;
-  const defender = mine ? t.oppActivePokemon : t.activePokemon;
+  const defender = mine ? ctx.oppAct : ctx.act;
   const mm = mon.movesMap();
-  let avail = EMPTY;
-  if (mine && mon.active) { avail = []; for (const m of t.availableMoves) avail.push(m.id); }
+  const avail = mine && mon.active ? ctx.avail : EMPTY;
   let ability = mon.abilityP;
   if (ability === null && mon.possibleAbilities.length === 1) ability = mon.possibleAbilities[0];
   const item = mon.item === C.unknownItem ? null : mon.item;
@@ -132,10 +134,12 @@ function encodeMon(out, o, mon, t, mine, sets) {
   out[o + 2] = idx('abilities', ability);
   // first 4 moves (categorical + features) and own movepool
   let i = 0;
-  const moves = [];
   for (const m of mm.values()) {
-    if (i < N_MOVES) { moves.push(m); out[o + 3 + i] = idx('moves', m.id); }
-    if (mine && i < MOVEPOOL) out[o + N_CAT + i] = idx('moves', m.id);
+    if (i < N_MOVES) {
+      out[o + 3 + i] = moveIdx(m);
+      encodeMove(out, o + MOVE0 + i * MOVE_DIM, m, mon, defender, G.chart, avail);
+    } else if (!mine) break;
+    if (mine && i < MOVEPOOL) out[o + N_CAT + i] = moveIdx(m);
     i++;
   }
   if (!mine) {
@@ -173,9 +177,8 @@ function encodeMon(out, o, mon, t, mine, sets) {
   out[tl + 5] = mon.preparing ? 1 : 0;
   out[tl + 6] = Math.log10(Math.max(mon.weight, 0.1)) / 3;
   out[tl + 7] = (mine && mon.active && t.trapped) ? 1 : 0;
-  out[tl + 8] = t.oppActivePokemon === mon ? 1 : 0;
+  out[tl + 8] = ctx.oppAct === mon ? 1 : 0;
   out[tl + 9] = 0;
-  for (let k = 0; k < moves.length; k++) encodeMove(out, o + MOVE0 + k * MOVE_DIM, moves[k], mon, defender, G.chart, avail);
 }
 
 function encodeSide(out, o, conds, turn) {
@@ -190,7 +193,7 @@ function encodeSide(out, o, conds, turn) {
   return o + 2 * NS + C.hazards.length;
 }
 
-function encodeField(out, o, t) {
+function encodeField(out, o, t, ctx) {
   const turn = t.turn;
   for (const [w, st] of t.weather) {
     const wi = WEATHER_IDX.get(w);
@@ -219,23 +222,28 @@ function encodeField(out, o, t) {
   out[p++] = t.usedTera ? 1 : 0;
   out[p++] = t.oppUsedTera ? 1 : 0;
   out[p++] = t.wait ? 1 : 0;
-  out[p++] = t.activePokemon === null ? 1 : 0;
+  out[p++] = ctx.act === null ? 1 : 0;
   out[p++] = t.availableSwitches.length / 5;
   out[p++] = t.availableMoves.length / 4;
   if (p - o !== FIELD_DIM) throw new Error('encoder_v1 layout mismatch (field)');
 }
 
 /** embed_battle(battle) -> out[off .. off+OBS_DIM) */
+const CTX = {act: null, oppAct: null, avail: []};
 function encode(t, out, off = 0) {
   out.fill(0, off, off + OBS_DIM);
-  encodeField(out, off, t);
+  const ctx = CTX;
+  ctx.act = t.activePokemon; ctx.oppAct = t.oppActivePokemon;
+  ctx.avail.length = 0;
+  for (const m of t.availableMoves) ctx.avail.push(m.id);
+  encodeField(out, off, t, ctx);
   const sets = loadSets(t.format || '');
   let o = off + FIELD_DIM, i = 0;
-  for (const m of t.team.values()) { if (i++ >= 6) break; encodeMon(out, o, m, t, true, sets); o += MON_DIM; }
-  for (; i < 6; i++) { encodeMon(out, o, null, t, true, sets); o += MON_DIM; }
+  for (const m of t.team.values()) { if (i++ >= 6) break; encodeMon(out, o, m, t, true, sets, ctx); o += MON_DIM; }
+  for (; i < 6; i++) { encodeMon(out, o, null, t, true, sets, ctx); o += MON_DIM; }
   i = 0;
-  for (const m of t.oppTeam.values()) { if (i++ >= 6) break; encodeMon(out, o, m, t, false, sets); o += MON_DIM; }
-  for (; i < 6; i++) { encodeMon(out, o, null, t, false, sets); o += MON_DIM; }
+  for (const m of t.oppTeam.values()) { if (i++ >= 6) break; encodeMon(out, o, m, t, false, sets, ctx); o += MON_DIM; }
+  for (; i < 6; i++) { encodeMon(out, o, null, t, false, sets, ctx); o += MON_DIM; }
   return out;
 }
 

@@ -18,7 +18,6 @@ import json
 import logging
 import subprocess
 import sys
-import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -156,6 +155,7 @@ class Stats:
         self.battles = self.decisions = self.obs_bad = self.mask_bad = self.choice_bad = self.value_bad = 0
         self.final_bad = self.align_bad = self.crash_both = self.crash_bad = 0
         self.slots = Counter()
+        self.kinds = Counter()  # protocol coverage: message kinds (and a few effect/ability markers) seen
         self.examples = []
 
     def note(self, what, limit):
@@ -174,6 +174,15 @@ def check_side(rec, s, side, st: Stats, limit: int):
     k = 0
     py_crash = None
     for i, (kind, text) in enumerate(side["ev"]):
+        if kind == "L":
+            for ln in text.split("\n"):
+                p = ln.split("|")
+                if len(p) > 1:
+                    st.kinds[p[1]] += 1
+                    if p[1] in ("-start", "-activate", "-end", "-singleturn", "-singlemove") and len(p) > 3:
+                        st.kinds[f"{p[1]} {p[3]}"] += 1
+                    if p[1] == "move" and len(p) > 4 and p[-1].startswith("[from]"):
+                        st.kinds[f"move {p[-1]}"] += 1
         line = text if kind == "L" else (f"|request|{text}" if kind == "R" else f"|error|{text.removeprefix('|error|')}")
         try:
             decision = handle(battle, line)
@@ -236,13 +245,12 @@ def check_side(rec, s, side, st: Stats, limit: int):
         st.note(f"{tag} p{s + 1}: final value py={v} js={side['final']}", limit)
 
 
-def check_file(path: str, st: Stats, limit: int):
-    with open(path) as f:
-        for line in f:
-            rec = json.loads(line)
-            st.battles += 1
-            for s, side in enumerate(rec["sides"]):
-                check_side(rec, s, side, st, limit)
+def check_lines(lines, st: Stats, limit: int):
+    for line in lines:
+        rec = json.loads(line)
+        st.battles += 1
+        for s, side in enumerate(rec["sides"]):
+            check_side(rec, s, side, st, limit)
 
 
 def report(st: Stats, label: str) -> bool:
@@ -254,6 +262,10 @@ def report(st: Stats, label: str) -> bool:
         print("  mismatching obs slots (count over decisions x tokens):")
         for k, v in st.slots.most_common(30):
             print(f"    {v:6d}  {k}")
+    rare = sorted((v, k) for k, v in st.kinds.items() if not k.startswith(("-start", "-activate", "-end", "-single",
+                                                                             "move ")) or v < 50)
+    print("  protocol coverage (count of log lines per kind / marker, both sides):")
+    print("   ", ", ".join(f"{k}:{v}" for v, k in sorted(rare, key=lambda x: x[1]) if v))
     for e in st.examples:
         print("  -", e)
     return not (st.obs_bad or st.mask_bad or st.choice_bad or st.value_bad or st.final_bad or st.align_bad
@@ -269,19 +281,19 @@ def main():
     a = p.parse_args()
     logging.getLogger("poke-env").setLevel(logging.CRITICAL)
     logging.getLogger("parity").setLevel(logging.CRITICAL)
-    files = list(a.files)
-    tmp = None
-    if a.record:
-        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
-        subprocess.run(["node", str(ROOT / "scripts/fastenv/record_battles.js"), a.record[0], a.record[1], tmp.name,
-                        str(a.seed)], check=True)
-        files.append(tmp.name)
     st = Stats()
-    for f in files:
-        check_file(f, st, a.max_report)
-    ok = report(st, ", ".join(Path(f).name for f in files))
-    if tmp:
-        Path(tmp.name).unlink()
+    for f in a.files:
+        with open(f) as fh:
+            check_lines(fh, st, a.max_report)
+    label = ", ".join(Path(f).name for f in a.files)
+    if a.record:  # stream node's JSONL straight into the checker (no large temp files)
+        proc = subprocess.Popen(["node", str(ROOT / "scripts/fastenv/record_battles.js"), a.record[0], a.record[1],
+                                 "-", str(a.seed)], stdout=subprocess.PIPE, text=True, bufsize=1 << 20)
+        check_lines(proc.stdout, st, a.max_report)
+        if proc.wait() != 0:
+            raise SystemExit("record_battles.js failed")
+        label = f"{a.record[1]} x{a.record[0]} (seed {a.seed})"
+    ok = report(st, label)
     sys.exit(0 if ok else 1)
 
 
