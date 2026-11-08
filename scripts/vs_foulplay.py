@@ -20,6 +20,8 @@ Start one Foul Play instance per opponent name (each plays one battle at a time)
     default parallelism 1 = one core. It turns the battle timer on, so a stalled player loses on inactivity.)
 Then:
     python scripts/vs_foulplay.py MODEL --player policy --opponents fp0 fp1 ... --n 10
+    (--player policy: the raw network, sampling its policy unless --deterministic; MODEL is a v1 checkpoint
+    (PolicyPlayer) or a v2 net .pt (porygon.v2.player.NetPlayer, any generation matching --format))
     python scripts/vs_foulplay.py MODEL --player search --opponents fp0 fp1 --n 50 --workers 8
 """
 
@@ -39,6 +41,12 @@ from porygon.env import PolicyPlayer, local_server
 from porygon import inference
 from porygon.decisions import LoggedSearchPlayer
 from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args, load_model
+from porygon.v2.evaluate import check_net_gen, is_v2_net
+
+
+def NetPlayer(*args, **kwargs):  # noqa: N802 (lazy: porygon.v2.player only when a v2 net plays)
+    from porygon.v2.player import NetPlayer as cls
+    return cls(*args, **kwargs)
 
 log = logging.getLogger("vs_foulplay")
 
@@ -115,6 +123,7 @@ async def main():
     p = argparse.ArgumentParser()
     p.add_argument("model")
     p.add_argument("--player", choices=["policy", "search"], default="policy")
+    p.add_argument("--deterministic", action="store_true", help="policy: play the network's argmax (default: sample)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--opponents", nargs="+", required=True, help="usernames of running Foul Play instances")
     p.add_argument("--n", type=int, default=1, help="battles per opponent")
@@ -138,25 +147,31 @@ async def main():
     a = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s")
 
-    policy = load_model(a.model, a.device)  # "none": pure engine search (gen9)
+    policy = load_model(a.model, a.device)  # "none": pure engine search (gen9); a v1 policy or a v2 net
+    v2 = is_v2_net(policy)
+    if a.player == "policy":
+        assert policy is not None, "--player policy needs a network"
+        check_net_gen(policy, a.format, a.model)
     if a.prior_weight is None:
         a.prior_weight = 0.0 if policy is None else 0.25
     tag = random.randint(0, 10**5)
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)
     cfg = {k: getattr(a, k) for k in CONFIG}
+    raw = partial(NetPlayer, deterministic=a.deterministic) if v2 else partial(PolicyPlayer, deterministic=a.deterministic)
     players = []
     for i, _ in enumerate(a.opponents):
         acc = AccountConfiguration(f"{a.player[:3]}{tag}x{i}", None)
         search = (partial(LoggedSearchPlayer, out=a.log_dir) if a.log_dir else SearchPlayer)
         players.append(search(policy, **cfg, workers=a.workers, oracle=a.oracle, oracle_dir=a.oracle_dir,
                               account_configuration=acc, **common)
-                       if a.player == "search" else PolicyPlayer(policy, account_configuration=acc, **common))
+                       if a.player == "search" else raw(policy, account_configuration=acc, **common))
     for pl in players:
         if a.player == "search":
             guard_pool(pl.pool, a.search_timeout)
     desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())}, oracle={a.oracle})"
-            if a.player == "search" else "PolicyPlayer")
+            if a.player == "search" else
+            f"{'NetPlayer' if v2 else 'PolicyPlayer'}({'deterministic' if a.deterministic else 'sampling'})")
     start = time.time()
     with open(a.results, "a") as out:
         results = await asyncio.gather(*(series(pl, o, a, out) for pl, o in zip(players, a.opponents)))

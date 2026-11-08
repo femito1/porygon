@@ -26,7 +26,7 @@ def policy_probs(net: Net, battle: AbstractBattle) -> tuple[np.ndarray, np.ndarr
     obs = encode(battle)
     out = net(obs_to_tensors([obs], _device(net)), aux=False)
     mask = obs["action_mask"]
-    logits = out["logits"][0].float().cpu().numpy()
+    logits = out["logits"][0].double().cpu().numpy()  # float64: rng.choice needs probabilities summing to 1 ± 1e-8
     probs = np.zeros_like(mask, dtype=np.float64)
     legal = mask > 0
     if legal.any():

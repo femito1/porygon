@@ -44,6 +44,10 @@ gen4 network does not apply (its action space has no tera): run with policy=None
 engine search, prior weight 0. sample_species uses gen9's type list without gen4's banned pairs; gen9's extra
 Fire / Freeze-Dry weakness caps are not modelled.
 
+A v2 network (`porygon.v2.model`, any generation matching PORYGON_GEN) can be the prior instead of a v1 policy:
+`load_model` loads either kind, the prior is `porygon.v2.player.policy_probs`. Not with a v2 net: the value
+lookahead (value_weight > 0, v1 value head only) and the logged network value (`porygon.decisions` logs None).
+
     python -m porygon.search runs/<run>/best_model.zip --opponent heuristic --n-battles 100
     python -m porygon.search runs/<run>/best_model.zip --opponent search --opp-ms 300 --opp-prior-weight 0.5
     python -m porygon.search runs/new.zip --opponent search --opp-model runs/old.zip   # same search, other prior
@@ -665,6 +669,12 @@ class SearchPlayer(Player):
         super().__init__(*args, **kwargs)
         assert policy is not None or (prior_weight == 0 and c_puct == 0 and value_weight == 0 and not top_k), \
             "without a network (policy=None): prior_weight 0, no c_puct / top_k / value lookahead"
+        # a v2 net (porygon.v2.model.Net) is kept apart from self.policy, which stays the v1 SB3 policy or None
+        self.net = None
+        if policy is not None and not isinstance(policy, ActorCriticPolicy):
+            assert int(policy.gen) == GEN_NUM, f"the v2 net is gen{policy.gen} but PORYGON_GEN={GEN_NUM}"
+            assert value_weight == 0, "the value lookahead needs a v1 policy (value_weight 0 with a v2 net)"
+            self.net, policy = policy, None
         assert policy is None or GEN_NUM == 4, "the network is gen4-only (no tera actions): use policy=None"
         fmt = kwargs.get("battle_format", inference.FORMAT)
         assert fmt == inference.FORMAT, (f"battle format {fmt} but PORYGON_GEN={GEN_NUM} (conversion, action space and "
@@ -695,6 +705,13 @@ class SearchPlayer(Player):
         self.truth: dict[str, list[dict[str, Any]] | None] = {}
 
     def network_probs(self, battle: Battle) -> tuple[np.ndarray, np.ndarray]:
+        if self.net is not None:  # v2 net
+            from porygon.v2.player import policy_probs
+            probs, mask = policy_probs(self.net, battle)
+            probs, mask = (np.asarray(x.detach().cpu() if isinstance(x, torch.Tensor) else x, dtype=np.float64)
+                           for x in (probs, mask))
+            assert probs.shape == (N_ACTIONS,), f"v2 net gives {probs.shape} probabilities, expected {N_ACTIONS}"
+            return probs, mask
         mask = np.array(SinglesEnv.get_action_mask(battle), dtype=np.float32)
         if self.policy is None:  # pure engine search: uniform "probabilities" (the fallback = the first legal action)
             return mask / max(mask.sum(), 1), mask
@@ -833,7 +850,7 @@ class SearchPlayer(Player):
         assert isinstance(battle, Battle)
         probs, mask = self.network_probs(battle)
         net_action = int(np.argmax(np.where(mask > 0, probs, -1)))
-        if self.policy is None and mask[6:10].any():  # no network: fall back to the first legal move, not a switch
+        if self.policy is None and self.net is None and mask[6:10].any():  # no network: the first legal move
             net_action = 6 + int(np.argmax(mask[6:10] > 0))
         action = net_action
         self.stats["decisions"] += 1
@@ -873,9 +890,16 @@ def config(args: argparse.Namespace, prefix: str = "") -> dict[str, Any]:
     return {k: getattr(args, prefix + k) for k in CONFIG}
 
 
-def load_model(path: str | None, device: str = "cpu") -> ActorCriticPolicy | None:
-    """A checkpoint, or None for "none" (pure engine search)."""
-    return None if path in (None, "none") else load_policy(path, device)
+def load_model(path: str | None, device: str = "cpu") -> Any:
+    """A checkpoint, or None for "none" (pure engine search): a v1 SB3 policy (.zip / pool .pt), or a v2 net
+    (a .pt holding a dict with "cfg" / "gen", `porygon.v2.model.load`)."""
+    if path in (None, "none"):
+        return None
+    if Path(path).suffix == ".pt":
+        from porygon.v2.evaluate import checkpoint_kind, load_net
+        if checkpoint_kind(path) == "v2":
+            return load_net(path, device)
+    return load_policy(path, device)
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -907,8 +931,12 @@ async def run(args: argparse.Namespace) -> None:
         opponent = SearchPlayer(opp_policy, **opp_cfg, workers=args.workers, account_configuration=opp_conf, **common)
         desc = f"SearchPlayer({', '.join(f'{k}={v}' for k, v in opp_cfg.items())})"
     else:
-        opponent = (PolicyPlayer(opp_policy, account_configuration=opp_conf, **common) if args.opponent == "policy"
-                    else BASELINES[args.opponent](account_configuration=opp_conf, **common))
+        if args.opponent == "policy" and opp_policy is not None and not isinstance(opp_policy, ActorCriticPolicy):
+            from porygon.v2.player import NetPlayer  # a v2 net
+            opponent = NetPlayer(opp_policy, account_configuration=opp_conf, **common)
+        else:
+            opponent = (PolicyPlayer(opp_policy, account_configuration=opp_conf, **common) if args.opponent == "policy"
+                        else BASELINES[args.opponent](account_configuration=opp_conf, **common))
         desc = args.opponent
     if args.opp_model:
         desc += f" [{args.opp_model}]"
