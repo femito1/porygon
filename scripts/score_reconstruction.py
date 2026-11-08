@@ -279,7 +279,7 @@ def fallback_report(own: Path, fb: Path, git_dir: Path) -> dict:
             bucket = "fallback error"
         else:
             n, days = gap(r["sim"], r["version"])
-            bucket = ("same tree" if n == 0 else "1-5 commits" if n <= 5 else "6-20 commits" if n <= 20
+            bucket = ("not an ancestor (0 commits)" if n == 0 else "1-5 commits" if n <= 5 else "6-20 commits" if n <= 20
                       else "21-100 commits" if n <= 100 else ">100 commits")
             by_commit[r["version"]]["battles"] += 1
             by_commit[r["version"]]["exact"] += bool(r.get("exact"))
