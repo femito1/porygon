@@ -406,6 +406,8 @@ class Crawler:
             return False
         self.qpos += 1
         rid, fmt = line.rstrip("\n").split("\t")[:2]
+        if self.st.db.execute("SELECT 1 FROM replays WHERE id=? AND has_inputlog=1", (rid,)).fetchone():
+            return True  # already have it from a .json fetch
         url = f"{BASE}/{rid}.inputlog"
         status, body = self.http.get(url)
         if status < 0:
@@ -573,6 +575,44 @@ def cmd_queue(a):
             f.write(f"{rid}\t{fmt}\t{-p}\n")
     c = collections.Counter(-p for p, *_ in rows)
     log(f"queue {a.out}: {len(rows)} ids; by band {dict(sorted(c.items(), reverse=True))}")
+
+
+def cmd_queue_hf(a):
+    """Light queue builder straight from HolidayOugi parquet metadata columns (no logs read):
+    main-server/smogtours ids of the format, excluded players removed, band from the replay
+    rating, newest first. Lets the inputlog crawl start before the full normalise has run."""
+    import pyarrow.parquet as pq
+    rows, seen = [], set()
+    drops = collections.Counter()
+    for fmt in a.formats:
+        gen = re.match(r"gen(\d+)", fmt).group(1)
+        files = sorted(p for p in glob.glob(os.path.join(a.holidayougi_dir, f"[[]Gen {gen}[]] RANDOMBATTLE*.parquet"))
+                       if re.fullmatch(rf"\[Gen {gen}\] RANDOMBATTLE(_part\d+)?\.parquet", os.path.basename(p)))
+        for path in files:
+            t = pq.read_table(path, columns=["id", "players", "uploadtime", "rating", "formatid"]).to_pylist()
+            for r in t:
+                rid = r["id"]
+                if rid in seen:
+                    drops["duplicate"] += 1
+                    continue
+                seen.add(rid)
+                if (r["formatid"] or "").lower() != fmt or not re.fullmatch(rf"(smogtours-)?{fmt}-\d+", rid):
+                    drops["other_server_or_format"] += 1
+                    continue
+                if excluded(r["players"]):
+                    drops["excluded_player"] += 1
+                    continue
+                rating = r["rating"] if r["rating"] is not None and r["rating"] == r["rating"] else None
+                p = prio_of(rating)
+                if p < a.min_prio:
+                    continue
+                rows.append((-p, -(r["uploadtime"] or 0), rid, fmt))
+    rows.sort()
+    with gzip.open(a.out, "wt") as f:
+        for p, t, rid, fmt in rows:
+            f.write(f"{rid}\t{fmt}\t{-p}\n")
+    c = collections.Counter((fmt, -p) for p, _, _, fmt in rows)
+    log(f"queue {a.out}: {len(rows)} ids; drops {dict(drops)}; by (format, band) {dict(sorted(c.items()))}")
 
 
 def cmd_import_index(a):
@@ -1021,6 +1061,11 @@ def main() -> int:
     q.add_argument("--sources", nargs="+", default=["holidayougi", "pokechamp"])
     q.add_argument("--min-prio", type=int, default=0)
     q.add_argument("--out", required=True)
+    qh = sub.add_parser("queue-hf", help="build the inputlog queue from HolidayOugi parquet metadata only")
+    qh.add_argument("--formats", nargs="+", default=["gen9randombattle", "gen4randombattle"])
+    qh.add_argument("--holidayougi-dir", required=True)
+    qh.add_argument("--min-prio", type=int, default=0)
+    qh.add_argument("--out", required=True)
     im = sub.add_parser("import-index", help="queue inputlog fetches for ids in a corpus index")
     im.add_argument("--root", default=DEFAULT_ROOT)
     im.add_argument("--index", required=True, help="corpus index.jsonl.gz (from normalise)")
@@ -1049,6 +1094,8 @@ def main() -> int:
         cmd_stats(a)
     elif a.cmd == "queue":
         cmd_queue(a)
+    elif a.cmd == "queue-hf":
+        cmd_queue_hf(a)
     elif a.cmd == "import-index":
         cmd_import_index(a)
     elif a.cmd == "sync":
