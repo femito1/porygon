@@ -48,6 +48,7 @@ from porygon.encoder import OBS_DIM  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 RESIM = ROOT / "scripts" / "resim_inputlog.js"
 SKIP_PLAYERS = ("jaxcalibur",)
+V1 = "porygon.encoder:embed_battle"
 SET_FIELDS = ("species", "level", "item", "ability", "moves", "tera_type", "stats")
 # shard `source` ids (stable across units and runs)
 SOURCE_IDS = {"other": 0, "showdown-replays": 1, "holidayougi": 2, "pokechamp": 3, "searchlabels": 10, "benchmark": 11}
@@ -337,7 +338,7 @@ class LoggedDecision:
 
     def __init__(self, r: dict):
         import base64
-        self.obs = np.frombuffer(base64.b64decode(r["obs"]), dtype=np.float16)
+        self.obs = {V1: np.frombuffer(base64.b64decode(r["obs"]), dtype=np.float16)}
         self.mask = np.asarray(r["mask"], dtype=np.int8)
         self.action = int(r["action"])
         self.legal = bool(self.mask[self.action]) if 0 <= self.action < len(self.mask) else False
@@ -358,7 +359,7 @@ def logged_obs_unit(battles: list[dict], gen: int) -> Iterator[tuple[dict | None
         other = "p2" if side == "p1" else "p1"
         winner = None if not b.get("winner") else ("p1" if b["winner"] == b["p1"] else "p2")
         decs = [LoggedDecision(r) for r in b["logged_obs"]]
-        if len(decs[0].obs) != OBS_DIM:
+        if len(decs[0].obs[V1]) != OBS_DIM:
             yield None, [], "logged-obs: unexpected obs size"
             continue
         rec = {"id": b["roomid"], "format": f"gen{gen}randombattle", "side": side, "player": player, "rating": -1,
@@ -375,7 +376,8 @@ def logged_obs_unit(battles: list[dict], gen: int) -> Iterator[tuple[dict | None
 
 # ---------------------------------------------------------------- units
 
-def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, list]:
+def encode_rows(rec: dict, game: int, source: int, n_actions: int, spec: str) -> dict[str, list]:
+    """Shard rows of one record for encoder `spec` (decision.obs = {encoder spec: its output})."""
     rows: dict[str, list] = {k: [] for k in DTYPES}
     for d in rec["_decisions"]:
         q = np.full(n_actions, np.nan, dtype=np.float32)
@@ -393,7 +395,8 @@ def encode_rows(rec: dict, game: int, source: int, n_actions: int) -> dict[str, 
             target = shares * d.mask / (shares * d.mask).sum()
         elif d.action >= 0 and d.legal:
             target[d.action] = 1.0
-        rows["obs"].append(d.obs if isinstance(d.obs, dict) else np.asarray(d.obs, dtype=np.float16))
+        x = d.obs[spec]
+        rows["obs"].append(x if isinstance(x, dict) else np.asarray(x, dtype=np.float16))
         rows["mask"].append(d.mask.astype(np.int8))
         rows["action"].append(d.action if d.legal else -1)
         rows["target"].append(target.astype(np.float16))
@@ -416,19 +419,21 @@ DTYPES = {"obs": np.float16, "mask": np.int8, "action": np.int16, "target": np.f
 
 
 def do_unit(job: tuple) -> dict:
-    """Convert one unit of battles; writes its record part and its shard. Returns counts."""
+    """Convert one unit of battles: one record part, and one shard per encoder (all encoders see the same
+    decisions of the same replay pass). Returns counts."""
     (unit, base, battles, mode, a) = job
     fmt, gen = a["format"], a["gen"]
-    encoder = load_encoder(a["encoder"], a["extra_src"])
+    specs = a["encoders"]
+    fns = {spec: load_encoder(spec, a["extra_src"]) for spec in specs}
+    encoder = lambda battle: {spec: fn(battle) for spec, fn in fns.items()}  # noqa: E731
     from poke_env.environment import SinglesEnv
     n_actions = SinglesEnv.get_action_space_size(gen)
-    rec_dir, enc_dir = Path(a["rec_dir"]), Path(a["enc_dir"])
+    rec_dir = Path(a["rec_dir"])
     rec_dir.mkdir(parents=True, exist_ok=True)
-    enc_dir.mkdir(parents=True, exist_ok=True)
     counts, sources, commits = Counter(), {}, Counter()
     games: list[str | None] = []
-    cols: dict[str, list] = {k: [] for k in DTYPES}
-    obs_dim = None
+    cols = {spec: {k: [] for k in DTYPES} for spec in specs}
+    obs_dim: dict[str, Any] = {}
     t0 = time.time()
     try:
         if mode == "corpus":
@@ -436,7 +441,7 @@ def do_unit(job: tuple) -> dict:
         elif mode == "runs":
             it = run_unit(battles, gen, encoder, counts)
         else:
-            assert a["encoder"] == "porygon.encoder:embed_battle", "logged-obs runs hold v1 observations only"
+            assert specs == [V1], "logged-obs runs hold v1 observations only"
             it = logged_obs_unit(battles, gen)
         with gzip.open(rec_dir / f"part-{unit:05d}.jsonl.gz.tmp", "wt") as f:
             for i, (r, sides, err) in enumerate(it):
@@ -453,24 +458,32 @@ def do_unit(job: tuple) -> dict:
                 games.append(sides[0]["id"] if sides else None)
                 for rec in sides:
                     sources[rec["source"]] = source_id(rec["source"])
-                    rows = encode_rows(rec, base + i, sources[rec["source"]], n_actions)
-                    for k, v in rows.items():
-                        cols[k].extend(v)
+                    for spec in specs:
+                        rows = encode_rows(rec, base + i, sources[rec["source"]], n_actions, spec)
+                        for k, v in rows.items():
+                            cols[spec][k].extend(v)
                     for d in rec["_decisions"]:
                         counts["decisions"] += 1
                         counts["decisions with action"] += d.action >= 0 and bool(d.legal)
                         counts["illegal actions"] += d.action >= 0 and not d.legal
                         counts["unmapped choices"] += d.action < 0 and d.choice is not None
-                        if obs_dim is None and d.obs is not None:
-                            obs_dim = ({k: [list(v.shape), str(v.dtype)] for k, v in d.obs.items()}
-                                       if isinstance(d.obs, dict) else int(np.asarray(d.obs).shape[0]))
+                        for spec in specs:
+                            if spec not in obs_dim and d.obs is not None:
+                                x = d.obs[spec]
+                                obs_dim[spec] = ({k: [list(v.shape), str(v.dtype)] for k, v in x.items()}
+                                                 if isinstance(x, dict) else int(np.asarray(x).shape[0]))
                     rec.pop("_decisions")
                     f.write(json.dumps(rec) + "\n")
         os.replace(rec_dir / f"part-{unit:05d}.jsonl.gz.tmp", rec_dir / f"part-{unit:05d}.jsonl.gz")
-        if cols["obs"]:
-            obs = cols.pop("obs")
+        for spec in specs:
+            c = cols[spec]
+            if not c["obs"]:
+                continue
+            enc_dir = Path(a["enc_dirs"][spec])
+            enc_dir.mkdir(parents=True, exist_ok=True)
+            obs = c.pop("obs")
             arrays = {k: (np.stack(v) if k in ("mask", "target", "q") else np.asarray(v)).astype(DTYPES[k])
-                      for k, v in cols.items()}
+                      for k, v in c.items()}
             if isinstance(obs[0], dict):  # a structured encoder (netv2's v2): one array per field, own dtypes
                 arrays.update({f"obs_{k}": np.stack([o[k] for o in obs]) for k in obs[0]})
             else:
@@ -506,7 +519,8 @@ def main() -> None:
     p.add_argument("--format", required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--builds", type=Path, default=Path("/vol/bitbucket/fr1226/porygon-ws-data/showdown/builds"))
-    p.add_argument("--encoder", default="porygon.encoder:embed_battle")
+    p.add_argument("--encoder", action="append", default=None,
+                   help="module:function; repeat to encode the same decisions with several encoders in one pass")
     p.add_argument("--extra-src", action="append", default=[], help="another src tree for porygon.* encoders")
     p.add_argument("--workers", type=int, default=3)
     p.add_argument("--unit", type=int, default=500, help="battles per record part / encoded shard")
@@ -521,7 +535,8 @@ def main() -> None:
     if int(os.environ.get("PORYGON_GEN", "4")) != gen:
         print(f"warning: PORYGON_GEN={os.environ.get('PORYGON_GEN', '4 (default)')} but format is gen{gen}",
               file=sys.stderr)
-    args = {"format": a.format, "gen": gen, "encoder": a.encoder, "out": str(a.out), "builds": str(a.builds),
+    a.encoder = a.encoder or [V1]
+    args = {"format": a.format, "gen": gen, "encoders": a.encoder, "out": str(a.out), "builds": str(a.builds),
             "keep_inexact": a.keep_inexact, "min_rating": a.min_rating, "extra_src": a.extra_src,
             "no_compress": a.no_compress}
     if a.mode == "corpus":
@@ -532,12 +547,13 @@ def main() -> None:
     # then swaps symlinks onto them (rename is atomic), keeping the previous version for readers mid-read.
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     rec_final = a.out / "records" / a.format
-    enc_final = a.out / "encoded" / a.format / encoder_name(a.encoder)
+    enc_finals = {spec: a.out / "encoded" / a.format / encoder_name(spec) for spec in a.encoder}
     args["rec_dir"] = str(rec_final) + f".v{stamp}"
-    args["enc_dir"] = str(enc_final) + f".v{stamp}"
+    args["enc_dirs"] = {spec: str(d) + f".v{stamp}" for spec, d in enc_finals.items()}
     total, sources, commits = Counter(), {}, Counter()
     game_ids: list[str] = []
-    obs_dim = n_actions = None
+    obs_dim: dict[str, Any] = {}
+    n_actions = None
     t0 = time.time()
     jobs = units(items, a.unit, a.mode, args, a.start_unit)
     with Pool(a.workers) as pool:
@@ -545,24 +561,30 @@ def main() -> None:
             total.update(res["counts"])
             commits.update(res["commits"])
             sources.update(res["sources"])
-            obs_dim = obs_dim or res["obs_dim"]
+            for k, v in res["obs_dim"].items():
+                obs_dim.setdefault(k, v)
             n_actions = res["n_actions"]
             game_ids += [g for g in res["games"] if g]
             el = time.time() - t0
             print(f"unit {res['unit']}: {res['counts'].get('games', 0)} games, {res['counts'].get('decisions', 0)} "
                   f"decisions in {res['seconds']:.0f} s; total {total['games']} games / {total['battles']} battles, "
                   f"{total['games'] / max(el, 1e-9):.2f} games/s", flush=True)
-    meta = {"encoder": a.encoder, "encoder_name": encoder_name(a.encoder), "obs_dim": obs_dim, "n_actions": n_actions,
-            "format": a.format, "PORYGON_GEN": os.environ.get("PORYGON_GEN", "4"), "counts": dict(total),
-            "sources": sources, "source_ids": SOURCE_IDS, "showdown_commits": len(commits), "code_commit": code_commit(),
-            "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1), "workers": a.workers,
-            "version": stamp, "n_games": len(game_ids), "games": game_ids,
-            "note": "game index g in a shard = position of the battle in input order; `games` lists the converted ids"}
-    for d in (args["rec_dir"], args["enc_dir"]):
+    meta = {"format": a.format, "PORYGON_GEN": os.environ.get("PORYGON_GEN", "4"), "n_actions": n_actions,
+            "encoders": {encoder_name(spec): {"encoder": spec, "obs_dim": obs_dim.get(spec)} for spec in a.encoder},
+            "counts": dict(total), "sources": sources, "source_ids": SOURCE_IDS, "showdown_commits": len(commits),
+            "code_commit": code_commit(), "inputs": [str(x) for x in a.inputs], "seconds": round(time.time() - t0, 1),
+            "workers": a.workers, "version": stamp, "n_games": len(game_ids), "games": game_ids,
+            "note": "game index g in a shard = position of the battle in input order; `games` lists the converted ids;"
+                    " every encoder dir of one version holds the same decisions"}
+    for spec, d in args["enc_dirs"].items():  # per-encoder meta keeps the old single-encoder keys too
         Path(d).mkdir(parents=True, exist_ok=True)
-        (Path(d) / "meta.json").write_text(json.dumps(meta, indent=1))
-    for final, new in ((rec_final, Path(args["rec_dir"])), (enc_final, Path(args["enc_dir"]))):
-        swap_in(final, new)
+        (Path(d) / "meta.json").write_text(json.dumps(
+            {**meta, "encoder": spec, "encoder_name": encoder_name(spec), "obs_dim": obs_dim.get(spec)}, indent=1))
+    Path(args["rec_dir"]).mkdir(parents=True, exist_ok=True)
+    (Path(args["rec_dir"]) / "meta.json").write_text(json.dumps(meta, indent=1))
+    swap_in(rec_final, Path(args["rec_dir"]))
+    for spec, final in enc_finals.items():
+        swap_in(final, Path(args["enc_dirs"][spec]))
     print(json.dumps(meta["counts"], indent=1))
 
 
