@@ -32,7 +32,16 @@
 //  * -enditem compares the raw item name with 'powerherb' (never matches), boosts dict of -copyboost is a copy.
 //  * Exceptions poke-env raises in its handler (unknown messages, team-size overflow on Illusion, etc.) are raised
 //    as PokeEnvError by the tracker.
+//  * Transform overwrites the mon's weight and it is not restored on switch-out (poke-env bug); Illusion end copies
+//    the status and then clears it (set_hp without status); a knocked-off/consumed item and an unknown item both
+//    encode as UNK; Regenerator adds max_hp/3 on switch-out also for the opponent's percentage HP.
 // See tracker.js for the state schema.
+//
+// Tables: python scripts/fastenv/export_tables_v1.py (re-run if poke-env, vocab.json or the sets files change).
+// Parity: python scripts/fastenv/parity_v1.py --record 400 gen9randombattle --seed 21   (streams node -> python,
+//         no temp files; exit 0 iff zero mismatches); quick: pytest tests/test_fastenv_parity.py
+// Speed (laptop i5-1235U, one P-core): encode ~11 us hot / ~23 us batched over 32 battles interleaved with the
+//         simulator; tracker ~4.5 us per message, ~10 us per side-turn (see final report of the ws-fastenv task).
 
 const {loadCommon, loadSets, PokeEnvError} = require('./tracker');
 

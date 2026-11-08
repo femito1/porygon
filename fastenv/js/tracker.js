@@ -7,6 +7,8 @@
 //
 //   const {SideTracker} = require('./tracker');
 //   const t = new SideTracker({format: 'gen9randombattle', side: 0});   // side 0 = p1, 1 = p2
+//                       (option username: the player's name in |player| / |win| lines; default 'p1' / 'p2' as
+//                       battle.js names the players)
 //   t.onLog(text)       every SimBattle onLog chunk for this side, in order (lines joined by \n)
 //   t.onRequest(req)    every request object for this side (Showdown's side.activeRequest; not mutated)
 //   t.onError(text)     '|error|...' lines; '[Invalid choice]' re-opens the decision (poke-env re-asks the agent)
