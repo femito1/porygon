@@ -211,14 +211,23 @@ def ppo_losses(out: dict, mb: dict, args, normalized: bool = False) -> dict[str,
     logp_safe = torch.where(mask, logp_all, torch.zeros_like(logp_all))
     probs = torch.where(mask, logp_all.exp(), torch.zeros_like(logp_all))
     logp = logp_all.gather(1, mb["action"].long()[:, None]).squeeze(1)
-    log_ratio = logp - mb["logp"]
+    # decoupled PPO (Hilton et al. 2022): clip against the proximal policy (the weights at update start, "logp_prox")
+    # and weight each sample by the truncated behaviour ratio pi_prox / pi_behaviour, so off-policy (overlapped) data is
+    # not clipped before the first step; without it, the behaviour log-probs are the proximal policy
+    decoupled = "logp_prox" in mb
+    log_ratio = logp - (mb["logp_prox"] if decoupled else mb["logp"])
     ratio = log_ratio.exp()
     adv = mb["adv"]
     if not normalized:
         adv = (adv - adv.mean()) / (adv.std() + 1e-8) if adv.numel() > 1 else adv
     if args.adv_clip > 0:  # heavy-tailed per-sample advantages: cap the normalised value
         adv = adv.clamp(-args.adv_clip, args.adv_clip)
-    pg = -torch.min(ratio * adv, ratio.clamp(1 - args.clip_range, 1 + args.clip_range) * adv).mean()
+    surr = torch.min(ratio * adv, ratio.clamp(1 - args.clip_range, 1 + args.clip_range) * adv)
+    if decoupled:
+        w = torch.exp(mb["logp_prox"] - mb["logp"]).clamp(max=args.decoupled_rho)
+        pg = -(w * surr).mean()
+    else:
+        pg = -surr.mean()
     ent = -(probs * logp_safe).sum(-1).mean()
     za = -(logp_safe.sum(-1) / mask.sum(-1).clamp(min=1)).mean()
     target = ((mb["ret"] + 1) / 2).clamp(0, 1)
@@ -279,6 +288,23 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
     m = Meter()
     t0 = time.time()
     dmg_all = rollout_damage(net, tensors, keys)
+    if getattr(args, "decoupled", False):  # proximal log-probs: one no-grad pass at the update's starting weights
+        net.train()  # same id-dropout masks (hashed from drop_seed) as the gradient passes
+        parts = []
+        with torch.no_grad():
+            for c0 in range(0, n, 4096):
+                sl = slice(c0, c0 + 4096)
+                o = {k: (tensors[k][sl].long() if not tensors[k].is_floating_point() and tensors[k].dtype != torch.bool
+                         else tensors[k][sl]) for k in keys}
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                    out = net(o, dmg=None if dmg_all is None else {k: v[sl] for k, v in dmg_all.items()}, aux=False)
+                lp = torch.log_softmax(out["logits"].float(), -1)
+                parts.append(lp.gather(1, tensors["action"][sl].long()[:, None]).squeeze(1))
+        tensors["logp_prox"] = torch.cat(parts)
+        rho = torch.exp(tensors["logp_prox"] - tensors["logp"])
+        m.add("diag/behaviour_ratio_mean", rho.mean().item())
+        m.add("diag/behaviour_ratio_sd", rho.std().item())
+        m.add("diag/behaviour_off_clip", ((rho - 1).abs() > args.clip_range).float().mean().item())
     m.add("perf/damage_s", time.time() - t0)
     net.train()
 
@@ -398,6 +424,8 @@ def parse_args(argv=None):
     a("--gamma", type=float, default=0.9999)
     a("--gae-lambda", type=float, default=0.754)
     a("--clip-range", type=float, default=0.1)
+    a("--decoupled", action="store_true", help="decoupled PPO: clip vs the update-start policy, truncated IS weights")
+    a("--decoupled-rho", type=float, default=2.0, help="decoupled PPO: truncation of pi_prox / pi_behaviour")
     a("--ent-coef", type=float, default=0.01)
     a("--zero-avoid-coef", type=float, default=0.003)
     a("--vf-coef", type=float, default=0.5)
@@ -744,7 +772,7 @@ class Trainer:
                 f"clip {g('loss/clip')} ev {g('diag/explained_variance')} gn {g('diag/grad_norm')} "
                 f"ratio {g('diag/trunk_grad_ratio')} cos_pg {g('diag/grad_cos_policy')} "
                 f"cos_vf {g('diag/grad_cos_value')} r0 {g('diag/first_ratio_mean')}±{g('diag/first_ratio_std')} "
-                f"clip0 {g('diag/first_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
+                f"clip0 {g('diag/first_clip')} beh_off {g('diag/behaviour_off_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
                 f"len {g('episode/decisions', '{:.1f}')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
