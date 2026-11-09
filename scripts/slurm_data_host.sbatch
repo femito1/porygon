@@ -8,7 +8,10 @@
 #   - optionally one label step: $D/host/labels.args = one line of scripts/slurm_searchlabels.sbatch arguments
 #     (tag <job>1: run dir runs/searchlabels-gen<G>-<date>-<job>1, its own port),
 #   - netv2's pretraining steps, which netv2 starts itself:
-#       srun --jobid=<this job> --overlap --ntasks=1 -c 2 --gres=gpu:1 --mem=14G ...
+#       srun --jobid=<this job> --overlap --ntasks=1 -c 8 --gres=gpu:1 --mem=14G ...  (limit its threads itself)
+# CPU pinning (measured in 677193, 2026-11-09): an overlap step with -c N is bound to the job's first N/2 physical cores
+# (8 CPUs = 4 cores + SMT siblings), and --cpu-bind=none does not change that. So every -c 1 / -c 2 step shares the
+# first core. Steps that compute use -c 8 and bound their own parallelism, so the kernel spreads them over idle cores.
 # The batch step only holds the allocation and NEVER exits on its own: ending it ends every step, netv2's included.
 # A TERM (time limit, scancel, or a stray kill) is logged and ignored; at the time limit or on scancel Slurm
 # SIGKILLs the job after KillWait anyway. At start, and every CHECK_EVERY x HOLD_S s, it makes sure one successor
@@ -87,7 +90,7 @@ start_refresh() {  # a private copy: bash reads scripts lazily, and an rsync of 
     err "refresh: cannot copy $D/code/scripts/refresh_datasets.sh: not started"; return 1
   fi
   log "refresh: starting $RUN/refresh_datasets.sh 14400 $REFRESH_DELAY (log $D/logs/ws-data-refresh.log)"
-  ( cd /tmp && exec srun --overlap --ntasks=1 -c 2 --mem=24G --job-name=refresh \
+  ( cd /tmp && exec srun --overlap --ntasks=1 -c 8 --mem=24G --job-name=refresh \
       bash "$RUN/refresh_datasets.sh" 14400 "$REFRESH_DELAY" >> "$D/logs/ws-data-refresh.log" 2>&1 < /dev/null ) &
   PIDS[refresh]=$!; DONE[refresh]=
 }
