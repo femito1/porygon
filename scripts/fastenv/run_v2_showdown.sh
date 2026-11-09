@@ -8,9 +8,10 @@ NCPU=$1; NSRV=$2; RUN=$3; shift 3
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 G=/vol/bitbucket/fr1226/gloria
 PS=${PS_DIR:-$ROOT/ps-sets-pinned}
-export PYTHONPATH=$ROOT/combo/src OMP_NUM_THREADS=1 PATH=$G/.node/bin:$PATH
+export PYTHONPATH=${COMBO:-$ROOT/combo}/src OMP_NUM_THREADS=1 PATH=$G/.node/bin:$PATH
 export TORCHINDUCTOR_CACHE_DIR=${TMPDIR:-/tmp}/ws-fastenv-inductor-$$
-CPUS=$("$G/.venv/bin/python" -c "import os; c = sorted(os.sched_getaffinity(0)); print(','.join(map(str, c[-$NCPU:])))")
+# CPU_SKIP=k: leave the last k of the job's CPUs to another run (default: take the last NCPU)
+CPUS=$("$G/.venv/bin/python" -c "import os; c = sorted(os.sched_getaffinity(0)); k = ${CPU_SKIP:-0}; print(','.join(map(str, c[len(c) - k - $NCPU:len(c) - k])))")
 BASE=$(( 30000 + (${SLURM_JOB_ID:-0} % 1000) * 16 )); LAST=$(( BASE + NSRV - 1 ))
 if [ ! -f "$PS/config/config.js" ]; then  # training config: no disk state, no REPL sockets
   cp "$PS/config/config-example.js" "$PS/config/config.js"
