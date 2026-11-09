@@ -102,5 +102,40 @@ check 13d "WAIT_FOR done \(found: 1\)" "$(cat $ROOTM/local-A30/run/train.log)"
 fresh
 printf 'set -u\nfalse && echo g9p > %s/runs/r1/MODE\n' "$N" > "$N/runs/r1/INLINE_CMD"
 o=$(src r1 A30); check 14a "--run-dir $ROOTM/local-A30/run/G9s " "$o"; check 14b "--resume $ROOTM/local-A30/run/G9s/final_model.pt$" "$o"
+# 15-20 (2026-11-09 evening): R1b-F resumed as run g4r1bf (lineage R1bF) on a dove T4
+g4tree() {
+  fresh; P=$N/runs/r1b-parked; mkdir -p "$P/pool" "$ROOTM/local-T4/run"; touch "$ROOTM/local-T4/run/train.log" "$ROOTM/local-T4/.toucher-R1bF"
+  rm -f "$ROOTM/local-T4/run/final_model.pt"
+  echo parked-final > "$P/final_model.pt"; echo parked-best > "$P/best_model.pt"; echo parked-ema > "$P/ema_model.pt"
+  for x in 00002540836 00007500005 00020009055; do echo "s$x" > "$P/pool/$x.pt"; done
+  echo best75 > "$N/runs/r1/restart-best-7.5M.pt"
+}
+g4tree; L=$ROOTM/local-T4
+o=$(src g4r1bf T4); check 15a "FORMAT=gen4randombattle" "$o"; check 15b "ANCHOR=/vol/bitbucket/fr1226/gloria/runs/resume/pool/ppo_46259712_steps.pt" "$o"
+check 15c "--n-layers 4 --ffn-mult 1 --lr 7e-5 --guard-anchor-drop 0.15 --guard-entropy-max 1.0 --eval-async --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 60 --pool-battles 30 --run-dir $L/run/R1bF --pool-dir $L/run/R1bF/pool --snapshot-cache 40 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $N/runs/r1b-parked/final_model.pt$" "$o"
+checkno 15d "ent-coef|kl-anchor|frozen" "$o"
+[ -f "$N/runs/g4r1bf/R1BF_STARTED" ] && [ -f "$L/run/R1bF/pool/00020009055.pt" ] && [ "$(cat "$L/run/R1bF/best_model.pt")" = parked-best ] && [ "$(cat "$L/run/R1bF/ema_model.pt")" = parked-ema ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 15e: R1b-F first-start seed"; }
+o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$L; RUN_NAME=g4r1bf; SLURM_JOB_NAME=ws-netv2-g4; NV2_HOLD_ITERS=0; source "$ENVF"; echo "PS=$PORYGON_PS|CHAIN=$CHAIN|MIN=$MIN_CORES"; bash -c 'echo "child sees $PORYGON_PS"' ) 2>&1 )
+check 15f "PS=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11\|CHAIN=3\|MIN=10" "$o"; check 15g "child sees /vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11" "$o"
+o=$(src r1 A30); checkno 15h "porygon-ws-fastenv" "$o"  # the G9p branch never sees the gen4 settings (separate sourcing)
+echo r1bf-final > "$L/run/R1bF/final_model.pt"
+o=$(src g4r1bf T4); check 16a "--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"; checkno 16b "ent-coef" "$o"
+# 17: an anchor-drop trip -> follow-up #1 from the 7.5M checkpoint (not follow-up 2), trip file renamed, snapshots > 7.5M parked
+echo "eval score 50.0% < best 62.5% - 10% for 2 evals" > "$L/run/R1bF/GUARD_TRIPPED"; cp "$N/runs/r1b-parked/pool/00020009055.pt" "$L/run/R1bF/pool/"
+o=$(src g4r1bf T4); check 17a "--ent-coef 0 --zero-avoid-coef 0 --resume $N/runs/r1/restart-best-7.5M.pt --guard-anchor-drop 0.0999$" "$o"; checkno 17b "guard-pg-mean|p-frozen" "$o"
+check 17c "^1 " "$(cat "$N/runs/r1/FU.started" 2>/dev/null)"; check 17d "for 2 evals" "$(cat "$N/runs/g4r1bf/FU.reason" 2>/dev/null)"
+[ ! -e "$L/run/R1bF/GUARD_TRIPPED" ] && ls "$L"/run/R1bF/GUARD_TRIPPED.fu-* > /dev/null 2>&1 && [ ! -e "$L/run/R1bF/pool/00020009055.pt" ] && [ -f "$L/run/R1bF/pool/00007500005.pt" ] && [ ! -e "$N/runs/g4r1bf/HOLD" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 17e: follow-up start files"; }
+check 17f "follow-up #1 \(user rule\)" "$(cat "$L/run/train.log")"
+# 18: the follow-up's next restart (no new trip): still follow-up 1, from its own save, no HOLD
+o=$(src g4r1bf T4); check 18a "--ent-coef 0 --zero-avoid-coef 0 .*--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"; [ ! -e "$N/runs/g4r1bf/HOLD" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 18b: HOLD without a trip"; }
+# 19: a trip of the follow-up -> HOLD (allocation kept), not a second follow-up
+echo "eval score 40.0% < best 62.5% - 10% for 2 evals" > "$L/run/R1bF/GUARD_TRIPPED"
+o=$(src g4r1bf T4); [ -f "$N/runs/g4r1bf/HOLD" ] && ls "$L"/run/R1bF/GUARD_TRIPPED.second-* > /dev/null 2>&1 && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 19a: no HOLD on the follow-up's trip"; }
+check 19b "--ent-coef 0 --zero-avoid-coef 0" "$o"
+# 20: a pool trip before any follow-up -> HOLD, no follow-up
+g4tree; L=$ROOTM/local-T4; src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/R1bF/final_model.pt"
+echo "pool: snapshot 00020009055.pt failed to load" > "$L/run/R1bF/GUARD_TRIPPED"
+o=$(src g4r1bf T4); [ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$N/runs/r1/FOLLOWUP1" ] && [ ! -e "$N/runs/r1/FU.started" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 20a: pool trip handling"; }
+check 20b "--guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
 echo "passed $pass, failed $fail"
 for f in /proc/[0-9]*/fd/1; do if [ "$(readlink "$f" 2>/dev/null)" = "$ROOTM.out" ]; then q=${f#/proc/}; q=${q%%/*}; echo "killing my leftover $(cat /proc/$q/cmdline | tr '\0' ' ') ($q)"; kill "$q" 2>/dev/null; fi; done

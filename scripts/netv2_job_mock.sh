@@ -82,6 +82,10 @@ tree() {  # tree post|pre : the cluster state after the 12:40 swap (projected to
   R=$N/runs/r1; J=$R/20261108-220401-718701; G=$N/runs/g9; K=$G/20261109-021316-741849
   mkdir -p "$R/pool" "$G/pool" "$J/checkpoints" "$K" "$R/handover-g9p/pool" "$G/handover-g9p-a30/pool" "$R/handover-g9s-a16/pool"
   echo 0 > "$R/chain_left"; echo 0 > "$G/chain_left"
+  # R1b-F's parked state (2026-11-09 05:00) and follow-up #1's start point
+  mkdir -p "$N/runs/r1b-parked/pool"; echo R1bF-parked-final > "$N/runs/r1b-parked/final_model.pt"; echo R1bF-parked-best > "$N/runs/r1b-parked/best_model.pt"
+  echo R1bF-parked-ema > "$N/runs/r1b-parked/ema_model.pt"; echo best75 > "$R/restart-best-7.5M.pt"
+  for s in 00002540836 00007500005 00020009055; do echo "R1bF-$s" > "$N/runs/r1b-parked/pool/$s.pt"; done
   touch "$R/G9_STARTED" "$R/LINEAGE_DIRS" "$R/R1B_PARKED" "$G/G9P_STARTED" "$G/LINEAGE_DIRS" "$G/R1B_STARTED" "$G/pre_done"
   echo stale-top > "$J/final_model.pt"; at '09 04:02' "$J/final_model.pt"; echo stale-R1b-top > "$K/final_model.pt"; at '09 04:03' "$K/final_model.pt"
   echo G9p-handover-13M > "$R/handover-g9p/final_model.pt"; at '09 05:00' "$R/handover-g9p/final_model.pt"
@@ -143,6 +147,21 @@ tree post; echo 46068 > "$M/gpu_mib"; job g9 900012 10 a40 ws-netv2-g9 restart; 
 expect "S2b G9s on an a40: cache 512 + stacked-opp, 8 workers" "fastenv-workers 8 .*--snapshot-cache 512 --stacked-opp" "$(cat "$M/job-900012.out")"
 tree post; rm -f "$M/gpu_mib"; job g9 900013 10 a16 ws-netv2-g9 restart; calls
 expect "S2b G9s, GPU unknown: the A16 value (72, no stacked-opp)" "fastenv-workers 8 .*--snapshot-cache 72 --resume" "$(cat "$M/job-900013.out")"
+if [ -z "$OLD" ]; then  # R1b-F is submitted fresh with the current job script, never under an old spooled one
+  echo "== S5: R1b-F resume: a fresh g4r1bf job on a dove T4 (training, 10 CPUs), restart flag armed; then its chained job"
+  tree post; mkdir -p "$M/nv2/runs/g4r1bf"; echo 15360 > "$M/gpu_mib"; job g4r1bf 900021 10 training ws-netv2-g4 restart; calls
+  expect "S5 first start resumes the parked R1b-F state with its pool + best / ema" "^call resume=$M/nv2/runs/r1b-parked/final_model.pt \[R1bF-parked-final\] run_dir=$T/ws-netv2-900021/run/R1bF pool_dir=$T/ws-netv2-900021/run/R1bF/pool pool=3 frozen=0 best=y ema=y" "$(sed -n 1p <<< "$c")"
+  expect "S5 restart in place relaunches from the lineage's own save" "^call resume=$T/ws-netv2-900021/run/R1bF/final_model.pt \[trained-from:R1bF-parked-final\]" "$(sed -n 2p <<< "$c")"
+  expect "S5 gen4 R1b-F recipe (8 workers, cache 40, strength watch 0.0999)" "fastenv-workers 8 .*--snapshot-cache 40 --guard-pg-mean 20 --guard-anchor-drop 0.0999" "$(cat "$M/job-900021.out")"
+  s=$(cat "$M/sbatch.log" 2>/dev/null); echo "  sbatch: ${s:-none}"
+  {
+    expect "S5 chain resubmission carries name / training / gres / 10 CPUs / 72 h" "--job-name=ws-netv2-g4 --partition=training --gres=gpu:1 --cpus-per-task=10 --mem=98304M --time=72:00:00 scripts/slurm_train_v2.sbatch g4r1bf" "$s"
+  }
+  job g4r1bf 900022 10 training ws-netv2-g4; calls
+  expect "S5b the chained job resumes the mirrored R1bF save (not the parked state)" "^call resume=$M/nv2/runs/g4r1bf/[0-9-]+-900021/R1bF/final_model.pt \[trained-from:trained-from:R1bF-parked-final\]" "$(sed -n 3p <<< "$c")"
+else
+  echo "== S5 skipped: R1b-F (g4r1bf) is a fresh submission of the current job script"
+fi
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
 expect "S3 r1 resumes the newest G9s file" "^call resume=.*/20261108-220401-718701/G9s/final_model.pt \[G9s-preswap-final\] run_dir=$T/ws-netv2-900003/run/G9s .*pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"
