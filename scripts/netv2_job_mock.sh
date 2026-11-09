@@ -40,7 +40,8 @@ def rd(f):
 yn = lambda f: "y" if os.path.isfile(f) else "n"
 log = open(f"{M}/calls.log", "a")
 log.write(f"call resume={resume} [{rd(resume)}] run_dir={rundir} pool_dir={pooldir} pool={n(pooldir)} "
-          f"frozen={n(pooldir + '/frozen')} best={yn(rundir + '/best_model.pt')} ema={yn(rundir + '/ema_model.pt')}\n"); log.flush()
+          f"frozen={n(pooldir + '/frozen')} best={yn(rundir + '/best_model.pt')} ema={yn(rundir + '/ema_model.pt')} "
+          f"pp={os.environ.get('PYTHONPATH', '')}\n"); log.flush()
 if os.environ.get("MOCK_WAIT") == "1":
     got = []
     signal.signal(signal.SIGINT, lambda *_: got.append(1))
@@ -161,6 +162,30 @@ if [ -z "$OLD" ]; then  # R1b-F is submitted fresh with the current job script, 
   expect "S5b the chained job resumes the mirrored R1bF save (not the parked state)" "^call resume=$M/nv2/runs/g4r1bf/[0-9-]+-900021/R1bF/final_model.pt \[trained-from:trained-from:R1bF-parked-final\]" "$(sed -n 3p <<< "$c")"
 else
   echo "== S5 skipped: R1b-F (g4r1bf) is a fresh submission of the current job script"
+fi
+if [ -z "$OLD" ]; then  # the successors were spooled with the current job script (d913fdbc)
+  echo "== S6: successor src (19:30): a fresh r1 job trains through \$NV2/bin/py-src-9d0efe0 (src-9d0efe0 first, --snapshot-cache-cpu 400); job 718701 does not"
+  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  job r1 900031 30 a30 ws-netv2-r1 restart; calls
+  expect "S6 the successor's trainer runs with src-9d0efe0 first" "^call resume=.*/G9p/final_model.pt .* pp=$M/nv2/src-9d0efe0:$M/nv2/src" "$(sed -n 1p <<< "$c")"
+  expect "S6 its restart in place too" "pp=$M/nv2/src-9d0efe0:" "$(sed -n 2p <<< "$c")"
+  expect "S6 successor args: cache 192 + stacked-opp + cpu tier 400" "--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400" "$(cat "$M/job-900031.out")"
+  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  job r1 718701 30 a30 ws-netv2-r1 restart; calls
+  expect "S6 job 718701 keeps \$ROOT/src only (restart included)" "pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")$(sed -n 2p <<< "$c" | grep -o "pp=.*")"
+  expect "S6 job 718701 args without the cpu tier" "--snapshot-cache 192 --stacked-opp --resume" "$(cat "$M/job-718701.out")"
+  tree post; echo 15356 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  job g9 900032 10 a16 ws-netv2-g9 restart; calls
+  expect "S6 the G9s successor: src-9d0efe0 first, cache 72 + cpu tier 200" "pp=$M/nv2/src-9d0efe0:" "$(sed -n 1p <<< "$c")"
+  expect "S6 G9s successor args" "--snapshot-cache 72 --snapshot-cache-cpu 200 --resume" "$(cat "$M/job-900032.out")"
+  echo "== S6b: deadline watch through the wrapper: the job ends in 15 min + 3 s; the trainer gets SIGINT"
+  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  MOCK_END=$(( $(date +%s) + 903 )) MOCK_WAIT=1 job r1 900033 30 a30 ws-netv2-r1 restart; calls
+  expect "S6b the wrapped trainer got SIGINT from the watcher" "^trainer: got SIGINT" "$(sed -n 2p <<< "$c")"
 fi
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
