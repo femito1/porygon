@@ -9,6 +9,11 @@ Data: battle worker processes (`porygon.v2.workers`): self-play battles (both si
 a copy of the network refreshed before every rollout; by default it keeps running during the PPO update (data at most
 one update old; the stored log-probs keep the importance ratio exact), `--no-overlap` pauses it instead.
 
+`--collector fastenv` collects from fastenv instead (`porygon.fastenv_v2`: Showdown's simulator in-process in Node
+workers, the v2 encoder in JS at parity with `porygon.v2.encoder`; no servers or poke-env workers; `--ports` is then
+only needed for the in-training evaluation). With `--no-overlap` it is strictly on-policy (end-of-rollout bootstrap,
+no carry-over of transitions acted by the previous weights); with overlap use `--decoupled`.
+
 Loss (per minibatch): clipped PPO surrogate (advantages normalised per minibatch) − ent_coef · entropy
 + zero_avoid_coef · (−mean log π over legal actions: Jaxcalibur's KL to uniform) + vf_coef · BCE(win prob,
 clip((λ-return + 1) / 2, 0, 1)) (no value clipping) + aux_coef · Σ aux heads (CE item / ability / tera, BCE per
@@ -639,6 +644,8 @@ def parse_args(argv=None):
     a("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
     a("--max-updates", type=int, help="stop after this many updates in this process (tests)")
     a("--no-overlap", action="store_true", help="pause battles during the PPO update")
+    from porygon.fastenv_v2 import add_args as fastenv_args
+    fastenv_args(a)  # --collector showdown|fastenv, --fastenv-workers / -battles / -pool-share
     a("--grad-ratio-every", type=int, default=10,
       help="every N updates: trunk value/policy gradient ratio and the minibatch-to-minibatch gradient cosines")
     a("--stall-seconds", type=float, default=900.0, help="restart a battle worker silent this long")
@@ -711,10 +718,14 @@ class Trainer:
 
         ports = parse_ports(args.ports)
         shaping = dict(zip(("fainted_value", "hp_value", "status_value"), args.shaping))
-        specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping) for i in range(args.n_battles)]
-                 + [WorkerSpec("pool", ports[::-1][i % len(ports)], args.format, shaping, str(self.pool_dir),
-                               args.p_baseline, p_frozen=args.p_frozen) for i in range(args.pool_battles)])
-        self.workers = BattleWorkers(specs)  # before CUDA init (forkserver anyway)
+        if args.collector == "fastenv":
+            from porygon.fastenv_v2 import build_env
+            self.workers = build_env(args, args.seed)
+        else:
+            specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping) for i in range(args.n_battles)]
+                     + [WorkerSpec("pool", ports[::-1][i % len(ports)], args.format, shaping, str(self.pool_dir),
+                                   args.p_baseline, p_frozen=args.p_frozen) for i in range(args.pool_battles)])
+            self.workers = BattleWorkers(specs)  # before CUDA init (forkserver anyway)
 
         torch.set_num_threads(args.threads)
         torch.set_float32_matmul_precision("high")
@@ -764,16 +775,25 @@ class Trainer:
             self.net.compile_damage()
             self.actor.compile_damage()
         self.snapshots: dict[str, Net] = {}  # pool snapshot opponents on the device (LRU)
-        self.collector = Collector(self.workers, self.packer, self._act, self._opp_act,
-                                   id_dropout=self.net.cfg["id_dropout"] > 0, stall_seconds=args.stall_seconds,
-                                   seed=args.seed)
+        if args.collector == "fastenv":
+            from porygon.fastenv_v2 import FastCollector
+            self.collector = FastCollector(self.workers.env, self.packer, self._act, self._opp_act,
+                                           id_dropout=self.net.cfg["id_dropout"] > 0, seed=args.seed,
+                                           pool_per_worker=self.workers.pool_per_worker, pool_dir=self.pool_dir,
+                                           p_baseline=args.p_baseline, p_frozen=args.p_frozen,
+                                           on_policy=args.no_overlap)
+        else:
+            self.collector = Collector(self.workers, self.packer, self._act, self._opp_act,
+                                       id_dropout=self.net.cfg["id_dropout"] > 0, stall_seconds=args.stall_seconds,
+                                       seed=args.seed)
         self.requests = threading.Semaphore(0)
         self.rollouts: queue.Queue = queue.Queue()
         self.evaluator = None
         from torch.utils.tensorboard import SummaryWriter
         self.writer = SummaryWriter(str(self.run_dir / "tb"))
         n_params = sum(p.numel() for p in self.net.parameters())
-        self.log(f"v2 trainer: {args.format} gen{self.gen}, {args.n_battles} self-play + {args.pool_battles} pool "
+        self.log(f"v2 trainer: {args.format} gen{self.gen}, collector {args.collector}, {args.n_battles} self-play + "
+                 f"{args.pool_battles} pool "
                  f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
                  f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, steps={self.counters['steps']:,}")
         if self.distill is not None:
@@ -966,6 +986,7 @@ class Trainer:
                 c["updates"] += 1
                 updates_here += 1
                 st.update(self._episode_stats(eps, wall))
+                st.update(getattr(self.collector, "last_stats", {}))  # fastenv: stale / drained shares, drain time
                 st["diag/policy_lag_mean"], st["diag/policy_lag_max"] = lag_mean, float(lag_max)
                 st["perf/steps_per_s"] = n / max(wall, 1e-9)
                 st["perf/collect_steps_per_s"] = n / max(collect_s, 1e-9)  # while collecting (overlaps updates)
@@ -1037,7 +1058,8 @@ class Trainer:
                 f"ratio {g('diag/trunk_grad_ratio')} cos_pg {g('diag/grad_cos_policy')} "
                 f"cos_vf {g('diag/grad_cos_value')} r0 {g('diag/first_ratio_mean')}±{g('diag/first_ratio_std')} "
                 f"clip0 {g('diag/first_clip')} beh_off {g('diag/behaviour_off_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
-                f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
+                + (f"stale {st['perf/fastenv_stale_frac']:.3f} " if "perf/fastenv_stale_frac" in st else "")
+                + f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
                 f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
                 f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} "
                 f"dst {g('loss/distill')} dval {g('diag/distill_val_ce')} "
