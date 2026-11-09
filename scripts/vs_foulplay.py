@@ -30,6 +30,7 @@ import logging
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 import numpy as np
@@ -43,6 +44,14 @@ from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args
 
 log = logging.getLogger("vs_foulplay")
 TIMINGS: list[dict] = []  # per battle: pre-game wait, challenge / start / end times, retries
+# per-battle records are written by one thread: a write + flush on the slow shared disk can block for 15-30 s, which
+# on the event loop stalled every series (no challenge goes out meanwhile); one thread keeps the file in order
+WRITER = ThreadPoolExecutor(max_workers=1)
+
+
+def write_line(out, line: str) -> None:
+    out.write(line)
+    out.flush()
 
 
 def guard_pool(pool, timeout: float) -> None:
@@ -109,15 +118,16 @@ class ServerQueries:
             await handle(message)
         client._handle_message = hooked
 
-    async def userdetails(self, name: str, timeout: float = 2.0) -> dict | None:
+    async def userdetails(self, name: str, timeout: float = 5.0) -> dict | None:
         uid, t0 = to_id(name), time.monotonic()
         await send(self.player, f"/cmd userdetails {name}")
-        while time.monotonic() - t0 < timeout:
+        while True:  # (the reply is looked for once more after the deadline: this loop may itself have been stalled)
             got = self.details.get(uid)
             if got and got[0] >= t0:
                 return got[1]
+            if time.monotonic() - t0 > timeout:
+                return None
             await asyncio.sleep(0.02)
-        return None
 
 
 async def wait_ready(player, queries: ServerQueries, opp: str, args) -> tuple[str, float]:
@@ -139,8 +149,8 @@ async def wait_ready(player, queries: ServerQueries, opp: str, args) -> tuple[st
         waited = time.monotonic() - t0
         if d is None:
             misses += 1
-            if misses >= 3:  # the server does not answer userdetails: fixed sleeps for this opponent from now on
-                queries.blind = True
+            if misses >= 3:  # no answer: the old fixed sleep for this game (for good if it never answered at all)
+                queries.blind = not queries.details
                 await asyncio.sleep(args.pre_game_sleep)
                 return "noreply", time.monotonic() - t0
             continue
@@ -184,9 +194,9 @@ async def one_battle(player, queries: ServerQueries, opp: str, args, timing: dic
     if args.pre_game_wait == "ready" and not queries.checked:
         # once per series: the server must list Foul Play's battle room while it plays, or "ready" would mean nothing
         d = await queries.userdetails(opp)
-        queries.checked = True
+        queries.checked = d is not None  # no reply: look again in the next battle
         timing["fp_room_visible"] = bool(d and battle.battle_tag in (battle_rooms(d) or []))
-        if not timing["fp_room_visible"]:
+        if d is not None and not timing["fp_room_visible"]:
             queries.blind = True  # fall back to the fixed sleep for this opponent
             log.warning("%s: userdetails does not list its battle room (%s): fixed --pre-game-sleep from now on", opp, d)
     try:
@@ -219,8 +229,7 @@ async def series(player, opp: str, args, out) -> dict[str, int]:
                "battle": battle and battle.battle_tag, "turns": battle and battle.turn,
                **{k: round(v, 3) if isinstance(v, float) else v for k, v in timing.items()},
                "popups": len(queries.popups)}
-        out.write(json.dumps(rec) + "\n")
-        out.flush()
+        WRITER.submit(write_line, out, json.dumps(rec) + "\n")
         print(f"[{opp} {i + 1}/{args.n}] {status} {rec['battle']} ({rec['turns']} turns)", flush=True)
         if status == "no_accept":
             log.error("%s is not accepting challenges, giving up on it", opp)
@@ -285,7 +294,10 @@ async def main():
             if a.player == "search" else "PolicyPlayer")
     start = time.time()
     with open(a.results, "a") as out:
-        results = await asyncio.gather(*(series(pl, o, a, out) for pl, o in zip(players, a.opponents)))
+        try:
+            results = await asyncio.gather(*(series(pl, o, a, out) for pl, o in zip(players, a.opponents)))
+        finally:
+            WRITER.shutdown(wait=True)  # every record is on disk before the file closes
     tot = {k: sum(r[k] for r in results) for k in results[0]}
     n = tot["win"] + tot["loss"] + tot["tie"]
     se = np.sqrt(max(tot["win"], 1) * max(n - tot["win"], 1) / max(n, 1) ** 3)
