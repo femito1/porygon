@@ -48,7 +48,25 @@ def auc(score, y):
     return float((r[pos].sum() - n1 * (n1 + 1) / 2) / max(n1 * n0, 1))
 
 
+def load_npz_pos(pattern, searched_only=True):
+    """Positions from the data stream's v2 shards (e.g. gen9 search labels): ref policy = the search target,
+    ref value = the search's root value, outcome from z."""
+    rows = []
+    for f in sorted(glob.glob(pattern)):
+        z = np.load(f)
+        okeys = [k for k in z.files if k.startswith("obs/")]
+        cols = {k[4:]: z[k] for k in okeys}
+        sel = np.where(z["searched"] > 0)[0] if (searched_only and "searched" in z.files) else np.arange(len(z["z"]))
+        for i in sel:
+            rows.append({"gid": (f, int(z["game"][i])), "obs": {k: v[i] for k, v in cols.items()},
+                         "v1_probs": z["target"][i].astype(np.float32), "v1_value": float(z["root_value"][i])
+                         if "root_value" in z.files else 0.0, "won": bool(z["z"][i] > 0)})
+    return rows
+
+
 def load_pos(d):
+    if d.endswith(".npz") or "*" in d:
+        return load_npz_pos(d)
     rows = []
     for f in sorted(glob.glob(f"{d}/*/rows.pkl")) + sorted(glob.glob(f"{d}/rows.pkl")):
         with open(f, "rb") as fh:
@@ -65,7 +83,7 @@ def run_net(net, rows, bs=512):
             for s in range(0, len(rows), bs):
                 t = M.obs_to_tensors([r["obs"] for r in rows[s:s + bs]], "cpu")
                 o = net(t, aux=False)
-                out["logits"].append(o["logits"][:, :10].numpy())
+                out["logits"].append(o["logits"].numpy())
                 out["value"].append(o["value"].numpy())
     finally:
         M.F.scaled_dot_product_attention = _REAL_SDPA
@@ -112,14 +130,15 @@ def emb_stats(net, init, rows):
 
 def policy_stats(o, rows):
     lg = o["logits"]
-    mask = np.stack([r["obs"]["action_mask"][:10] for r in rows]) > 0
+    mask = np.stack([r["obs"]["action_mask"] for r in rows]) > 0
+    nA = mask.shape[1]
     lg = np.where(mask, lg, -1e30)
     p = np.exp(lg - lg.max(1, keepdims=True))
     p = np.where(mask, p, 0)
     p /= p.sum(1, keepdims=True)
-    v1 = np.stack([r["v1_probs"][:10] for r in rows])
+    v1 = np.stack([np.pad(r["v1_probs"], (0, max(0, nA - len(r["v1_probs"]))))[:nA] for r in rows])
     ent = -(np.where(p > 0, p * np.log(np.maximum(p, 1e-30)), 0)).sum(1)
-    vol = mask[:, :6].any(1) & mask[:, 6:10].any(1)
+    vol = mask[:, :6].any(1) & mask[:, 6:].any(1)
     won = np.array([r["won"] for r in rows])
     v = o["value"]
     return {"entropy": float(ent.mean()), "v1_entropy": float(-(np.where(v1 > 0, v1 * np.log(np.maximum(v1, 1e-30)), 0)).sum(1).mean()),

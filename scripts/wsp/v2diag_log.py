@@ -14,8 +14,9 @@ KEYS = ["sps", "lr", "pg", "vf", "ent", "kl", "clip", "ev", "gn", "ratio", "cos_
 def parse(path):
     rows = []
     for line in open(path):
-        if not line.startswith("upd "):
+        if " upd " not in f" {line}":
             continue
+        line = line[line.index("upd "):]
         m = re.search(r"steps ([\d,]+)", line)
         if not m:
             continue
