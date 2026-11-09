@@ -27,7 +27,7 @@ def logits_values(net, rows, bs=512):
     with torch.no_grad():
         for s in range(0, len(rows), bs):
             o = net(M.obs_to_tensors([r["obs"] for r in rows[s:s + bs]], "cpu"), aux=False)
-            L.append(o["logits"][:, :10].numpy().astype(np.float64))
+            L.append(o["logits"].numpy().astype(np.float64))
             V.append(o["value"].numpy())
     return np.concatenate(L), np.concatenate(V)
 
@@ -50,20 +50,25 @@ def main():
     ap.add_argument("--pos", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=12000)
+    ap.add_argument("--gen", type=int, default=4)
     a = ap.parse_args()
     rows = load_pos(a.pos)
     rng = np.random.default_rng(0)
     rows = [rows[i] for i in sorted(rng.choice(len(rows), min(a.n, len(rows)), replace=False))]
-    mask = np.stack([r["obs"]["action_mask"][:10] for r in rows]) > 0
-    cat = move_raw(4)["category"]
-    cls = np.zeros((len(rows), 10), np.int64)  # 0 switch, 1 attack, 2 status, 3 unknown move
+    mask = np.stack([r["obs"]["action_mask"] for r in rows]) > 0
+    nA = mask.shape[1]
+    cat = move_raw(a.gen)["category"]
+    # 0 switch, 1 attack, 2 status, 3 unknown move, 4 other (unused action ids); gen9: tera moves 22-25 = move slots 0-3
+    cls = np.full((len(rows), nA), 4, np.int64)
+    cls[:, :6] = 0
+    move_cols = [(6 + j, j) for j in range(4)] + ([(22 + j, j) for j in range(4)] if nA > 22 else [])
     for i, r in enumerate(rows):
         mn = r["obs"]["mon_num"]
         act = mn[:6, COL["active"]] * mn[:6, COL["present"]]
         ids = r["obs"]["moves"][int(act.argmax()), :4] if act.max() > 0 else np.zeros(4, int)
-        for j in range(4):
+        for col, j in move_cols:
             c = cat[int(ids[j])] if 0 <= int(ids[j]) < len(cat) else 0
-            cls[i, 6 + j] = 1 if c in (1, 2) else (2 if c == 3 else 3)
+            cls[i, col] = 1 if c in (1, 2) else (2 if c == 3 else 3)
     vol = mask[:, :6].any(1) & mask[:, 6:].any(1)
     won = np.array([r["won"] for r in rows])
     nleg = mask.sum(1)
