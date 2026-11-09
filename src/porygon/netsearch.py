@@ -226,12 +226,17 @@ class NetSearchPlayer(S.SearchPlayer):
     PORYGON_GEN's generation. margin: +inf = raw network, -inf = pure search. temperature: the network's sampling
     temperature (0.5 = how raw nets are benchmarked); deterministic = its argmax. c_puct / prior_weight: the
     variants. The search options (ms, samples, rm_gamma, eval_config, workers, engine_python, seed) are
-    porygon.search's; eval_config defaults to its DEFAULT_EVAL (gen9: stock, as the benchmark search)."""
+    porygon.search's; eval_config defaults to its DEFAULT_EVAL (gen9: stock, as the benchmark search).
+    own_pool (default): this player's `workers` engine processes are its own. porygon.search.engine_pool is one
+    process-wide pool per (workers, engine_python), so without it a SearchPlayer opponent with the same workers in
+    the same harness process would share them (both sides queue on one set of processes)."""
 
     def __init__(self, net: Any, *args: Any, margin: float = 0.03, temperature: float = 0.5,
                  deterministic: bool = False, c_puct: float = 0.0, prior_weight: float = 0.0,
-                 seed: int | None = None, **kwargs: Any):
+                 seed: int | None = None, own_pool: bool = True, **kwargs: Any):
         super().__init__(None, *args, prior_weight=0.0, c_puct=0.0, seed=seed, **kwargs)
+        if own_pool:  # the registry pool stays for others (its processes start on first use, so none run here)
+            self.pool = S.EnginePool(self.pool.n, python=self.pool.python)
         assert int(net.gen) == S.GEN_NUM, f"the v2 net is gen{net.gen} but PORYGON_GEN={S.GEN_NUM}"
         self.net = net.eval()
         self.margin, self.temperature, self.deterministic = float(margin), float(temperature), deterministic
@@ -315,7 +320,8 @@ class LoggedNetSearchPlayer(NetSearchPlayer):
 
 def load_spec(spec: str, net_loader: Any = None, **player_kwargs: Any) -> NetSearchPlayer:
     """A player from `netsearch:NET[,margin=M][,temperature=T][,deterministic=1][,c_puct=C][,prior_weight=W]
-    [,ms=MS][,samples=K][,workers=N][,seed=S][,device=D][,log=PATH]` (margin: a number, inf or -inf). For harnesses
+    [,ms=MS][,samples=K][,workers=N][,own_pool=0][,seed=S][,device=D][,log=PATH]` (margin: a number, inf or -inf;
+    own_pool=0 shares porygon.search's process-wide engine pool, see NetSearchPlayer). For harnesses
     that build players from spec strings (netv2's porygon.v2.evaluate.load_player takes no such spec; wrap it)."""
     base, _, rest = spec.partition(",")
     kind, _, path = base.partition(":")
@@ -333,7 +339,7 @@ def load_spec(spec: str, net_loader: Any = None, **player_kwargs: Any) -> NetSea
             kw[k] = float(v)
         elif k in ints:
             kw[k] = int(v)
-        elif k == "deterministic":
+        elif k in ("deterministic", "own_pool"):
             kw[k] = v not in ("0", "false", "False")
         elif k != "log":
             raise ValueError(f"unknown netsearch option {k!r} in {spec}")
