@@ -16,6 +16,10 @@
 #   PRE_CMD="..."    run once per run before the first training start (e.g. a supervised refit that picks the init);
 #                    marker runs/RUN_NAME/pre_done; netv2.env is sourced again afterwards
 #   MIN_CORES / N_SELFPLAY / N_POOL: smaller jobs (default: refuse < 24 CPUs; 2 self-play + 1 pool battle per CPU)
+#   COLLECTOR=fastenv  rollouts from fastenv (in-process Showdown: $ROOT/fastenv + porygon.fastenv*) instead of
+#                    servers + poke-env workers: one server (in-training evaluation only), FASTENV_WORKERS (default
+#                    CPUs - 2) x FASTENV_BATTLES (48) battles; pool share N_POOL / (N_SELFPLAY + N_POOL) as before;
+#                    add --no-overlap (strictly on-policy) or keep the overlap with --decoupled
 # netv2.env may branch on $RUN_NAME for per-run settings (it is sourced under set -e: end it with a true command).
 #
 # Layout: runs/RUN_NAME/<date>-<job>/ (train.log, stdout.log, tb/, checkpoints/, final_model.pt, best_model.pt) and
@@ -100,6 +104,12 @@ if [ -n "${PRE_CMD:-}" ] && [ ! -f "$ROOT/runs/$RUN_NAME/pre_done" ]; then
   echo "$(date -u +%T) PRE_CMD done; RESUME=${RESUME:-}"
 fi
 N_SERVERS=$(( CORES / 3 )); SELFPLAY=${N_SELFPLAY:-$(( CORES * 2 ))}; POOL_BATTLES=${N_POOL:-$CORES}  # netv2.env may cap them (memory)
+COLLECT_ARGS=""
+if [ "${COLLECTOR:-showdown}" = fastenv ]; then  # one server for the evaluator; fastenv workers on the other CPUs
+  N_SERVERS=1
+  COLLECT_ARGS="--collector fastenv --fastenv-workers ${FASTENV_WORKERS:-$(( CORES - 2 ))} --fastenv-battles ${FASTENV_BATTLES:-48}"
+  export PORYGON_PS=${PORYGON_PS:-$ROOT/pokemon-showdown} PORYGON_NODE=${PORYGON_NODE:-$(command -v node)}
+fi
 BASE=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 )); LAST=$(( BASE + N_SERVERS - 1 ))
 # start_servers.sh writes the no-disk-writes training config only when there is none
 CFG=pokemon-showdown/config/config.js
@@ -158,7 +168,7 @@ while true; do
   "$PY" -u -m porygon.v2.train --format "$FORMAT" --ports "$BASE-$LAST" --n-battles "$SELFPLAY" \
     --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
     ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "$TOTAL" --max-hours 70.5 \
-    ${TRAIN_ARGS:-} "$@" >> "$LOCAL/run/stdout.log" 2>&1 &
+    $COLLECT_ARGS ${TRAIN_ARGS:-} "$@" >> "$LOCAL/run/stdout.log" 2>&1 &
   TRAIN=$!
   RC=0
   while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" && RC=0 || RC=$?; done
