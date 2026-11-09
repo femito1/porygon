@@ -220,6 +220,6 @@ def test_reload_and_log_line(tmp):
     st = {"perf/steps_per_s": 1.0, "perf/collect_steps_per_s": 1.0, "perf/games_per_s": 1.0, "perf/lr": 1e-4,
           "perf/update_s": 2.0, "loss/distill": 0.25}
     fake = SimpleNamespace(counters={"updates": 3, "steps": 10})
-    assert " wr_frozen - ptop - dst 0.250 dval - upd_s 2.0 | " in Trainer._line(fake, 10, st)  # new fields before upd_s
+    assert " wr_frozen - ptop - plf - mix - dst 0.250 dval - upd_s 2.0 | " in Trainer._line(fake, 10, st)
     st["diag/distill_val_ce"] = 1.5
     assert " dst 0.250 dval 1.500 upd_s " in Trainer._line(fake, 10, st)

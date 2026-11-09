@@ -43,6 +43,16 @@ lr: warmup–stable–decay on absolute env steps: linear warmup over --warmup-s
 Outputs in --run-dir: train.log (one line per update), tb/ (TensorBoard), checkpoints/ckpt_<steps>.pt every
 --checkpoint-every steps, final_model.pt (on exit, SIGINT / SIGTERM included), best_model.pt (best eval score:
 vs --anchor if given, else vs SimpleHeuristicsPlayer), pool snapshots every --snapshot-every steps.
+
+`--eval-async`: the evaluation games run in a CPU subprocess (`porygon.v2.train_eval`) on a snapshot of the live net
+(eval/snap_<steps>.pt) while training continues, one at a time (an eval point is skipped while the previous one
+runs); its result is handled at the first update after it finished, like a synchronous eval of the snapshot (log
+line, TensorBoard, best_model.pt and the guard at the snapshot's steps). Subprocess output: eval/eval.log.
+
+Pool health, every update: the realised opponent mix of the finished games (mix/*, `mix` in the log), the pool-net
+loads (pool/load_*, `plf` = failures), and a guard with a "pool:" reason: a frozen net fails to load, > 5% of >= 20
+snapshot loads fail in one update, or pool battles are configured but none finished for --pool-alarm-updates updates
+in a row (also POOL_ALARM). A frozen/best-*.pt rotated out by --frozen-best mid-battle is replaced by the newest best.
 """
 
 import argparse
@@ -55,6 +65,7 @@ import os
 import queue
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -69,6 +80,7 @@ from porygon.v2.model import (
     COL, DEFAULT_CFG, Net, batch_to_tensors, load, model_keys, net_from_checkpoint, save,
 )
 from porygon.v2.spec import VOCAB_SIZES, n_actions
+from porygon.v2.train_eval import EvalJob, copy_checkpoint, launch, stop_process, tail
 from porygon.v2.workers import (
     ACT, DONE, LOGP, NEXT_V, OBS, OPP_C, OPP_T, REW, SEED, VAL, BattleWorkers, Collector, Packer, WorkerSpec, gen_of,
 )
@@ -647,6 +659,10 @@ def parse_args(argv=None):
       help="potential-based shaping weights (v1 used 0.05 0.05 0); default sparse ±1 only")
     a("--eval-every", type=int, default=2_500_000)
     a("--eval-battles", type=int, default=200, help="per opponent; 0 disables evaluation")
+    a("--eval-async", action="store_true",
+      help="play the evaluation in a CPU subprocess on a snapshot while training continues (porygon.v2.train_eval)")
+    a("--eval-timeout", type=float, default=3600.0,
+      help="--eval-async: kill an eval subprocess that has run this many seconds without a result (0 = never)")
     a("--anchor", type=Path, help="also evaluate vs this net (v2 .pt, or v1 .zip / pool .pt)")
     a("--checkpoint-every", type=int, default=5_000_000)
     a("--run-dir", type=Path, default=Path("runs") / ("v2-" + time.strftime("%Y%m%d-%H%M%S")))
@@ -655,6 +671,10 @@ def parse_args(argv=None):
     a("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
     a("--max-updates", type=int, help="stop after this many updates in this process (tests)")
     a("--no-overlap", action="store_true", help="pause battles during the PPO update")
+    a("--pool-alarm-updates", type=int, default=5,
+      help="pool battles configured but no pool episode finished for this many updates in a row: log, write "
+           "POOL_ALARM and stop with a 'pool:' guard (0 = off); a silently missing opponent mix (R1's hung pool "
+           "workers) must not recur")
     from porygon.fastenv_v2 import add_args as fastenv_args
     fastenv_args(a)  # --collector showdown|fastenv, --fastenv-workers / -battles / -pool-share
     a("--grad-ratio-every", type=int, default=10,
@@ -711,6 +731,51 @@ class EMA:
     def load_state_dict(self, st: dict) -> None:
         self.n = st["n"]
         self.net.load_state_dict(st["state_dict"], strict=False)
+
+
+class PoolLoads:
+    """Pool-opponent net loads of `Trainer._opp_act` (collector thread) per kind, "frozen" (names under frozen/,
+    best-*.pt included) or "snapshot": attempts (= cache misses), failures, and messages queued once per net for the
+    main loop's log. `take()` (main loop): the counts since its previous call and the queued messages."""
+
+    KINDS = ("frozen", "snapshot")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.attempts = dict.fromkeys(self.KINDS, 0)
+        self.failures = dict.fromkeys(self.KINDS, 0)
+        self._taken = (dict(self.attempts), dict(self.failures))
+        self._noted: set = set()
+        self._messages: list[str] = []
+
+    @staticmethod
+    def kind(name: str) -> str:
+        return "frozen" if name.startswith("frozen/") else "snapshot"
+
+    def note(self, key, msg: str) -> None:
+        """Queue `msg` for the log unless one was queued for `key` before."""
+        with self.lock:
+            if key not in self._noted:
+                self._noted.add(key)
+                self._messages.append(msg)
+
+    def record(self, name: str, path, error: BaseException | None = None) -> None:
+        kind = self.kind(name)
+        with self.lock:
+            self.attempts[kind] += 1
+            self.failures[kind] += error is not None
+        if error is not None:
+            self.note(("failed", name), f"pool load FAILED {kind} {path}: {error!r}")
+
+    def take(self) -> tuple[dict[str, float], list[str]]:
+        with self.lock:
+            (a0, f0), now = self._taken, (dict(self.attempts), dict(self.failures))
+            self._taken, msgs, self._messages = now, self._messages, []
+        st = {}
+        for k in self.KINDS:
+            st[f"pool/load_attempts_{k}"] = float(now[0][k] - a0[k])
+            st[f"pool/load_failures_{k}"] = float(now[1][k] - f0[k])
+        return st, msgs
 
 
 class Trainer:
@@ -786,6 +851,7 @@ class Trainer:
             self.net.compile_damage()
             self.actor.compile_damage()
         self.snapshots: dict[str, Net] = {}  # pool snapshot opponents on the device (LRU)
+        self.pool_loads = PoolLoads()  # their loads (attempts / failures), checked after every update
         if args.collector == "fastenv":
             from porygon.fastenv_v2 import FastCollector
             self.collector = FastCollector(self.workers.env, self.packer, self._act, self._opp_act,
@@ -800,6 +866,7 @@ class Trainer:
         self.requests = threading.Semaphore(0)
         self.rollouts: queue.Queue = queue.Queue()
         self.evaluator = None
+        self.eval_job: EvalJob | None = None  # --eval-async: the running eval subprocess
         from torch.utils.tensorboard import SummaryWriter
         self.writer = SummaryWriter(str(self.run_dir / "tb"))
         n_params = sum(p.numel() for p in self.net.parameters())
@@ -834,17 +901,24 @@ class Trainer:
     @torch.no_grad()
     def _opp_act(self, name: str, batch: dict) -> np.ndarray:
         """Sampled actions of pool snapshot `name` (cached on the device; uniform over legal actions if it cannot
-        be loaded)."""
+        be loaded). Collector thread: every load (cache miss) and failure is only recorded in `self.pool_loads`;
+        the main loop logs the failures and trips the pool guard after each update (`_pool_alarm`)."""
         net = self.snapshots.pop(name, None)
         if net is None:
+            name = self._rotated(name)
+            net = self.snapshots.pop(name, None)
+        if net is None:
+            path = self.pool_dir / name
             try:
-                net = load(self.pool_dir / name, self.device)
+                net = load(path, self.device)
                 assert net.gen == self.gen, f"gen {net.gen} snapshot"
                 if self.compile:  # same parameter-free layer: reuse the actor's compiled function (no recompiles)
                     object.__setattr__(net, "_damage_compiled", getattr(self.actor, "_damage_compiled", None))
             except Exception as e:
-                print(f"pool snapshot {name}: {e!r}; playing uniformly", file=sys.stderr)
+                self.pool_loads.record(name, path, e)
                 net = None
+            else:
+                self.pool_loads.record(name, path)
             if len(self.snapshots) >= self.args.snapshot_cache:
                 self.snapshots.pop(next(iter(self.snapshots)))
         mask = torch.from_numpy(batch["action_mask"]) > 0
@@ -858,6 +932,19 @@ class Trainer:
         probs = torch.softmax(logits, -1)
         probs = torch.where(mask.any(-1, keepdim=True), probs, torch.full_like(probs, 1.0 / probs.shape[-1]))
         return torch.multinomial(probs, 1).squeeze(1).numpy()
+
+    def _rotated(self, name: str) -> str:
+        """`name`, unless it is a frozen/best-*.pt that --frozen-best replaced while a battle still plays it (the file
+        gone, a newer best there): then that newest best, noted once per name (a rotation, not a load failure)."""
+        if not name.startswith("frozen/best-") or (self.pool_dir / name).exists():
+            return name
+        newest = max((self.pool_dir / "frozen").glob("best-*.pt"), default=None)
+        if newest is None or newest.name <= name[len("frozen/"):]:
+            return name  # nothing newer: a real failure
+        new = "frozen/" + newest.name
+        self.pool_loads.note(("rotated", name), f"pool opponent {name} was replaced by --frozen-best mid-battle; "
+                                                f"playing {new} instead")
+        return new
 
     def _refresh_actor(self) -> None:
         with self.actor_lock:
@@ -897,21 +984,31 @@ class Trainer:
         start = time.time()
         res = self.evaluator.run(a.eval_battles)
         self.net.train()
-        steps = self.counters["steps"]
+        self._after_eval(res, self.counters["steps"], time.time() - start,
+                         lambda path, **extra: save(self.net, path, **extra), self.counters)
+
+    def _after_eval(self, res: dict[str, float], steps: int, seconds: float, put, counters: dict,
+                    note: str = "") -> bool:
+        """Everything a finished evaluation does, synchronous or async: TensorBoard and the log line at the evaluated
+        weights' `steps`, best_model.pt (+ --frozen-best) on a new best score, the anchor-drop guard. `put(path,
+        **extra)` writes the evaluated weights; `counters`: the trainer counters they were taken at. Returns whether
+        the score is a new best."""
+        a = self.args
         for k, v in res.items():
             self.writer.add_scalar(f"eval/win_rate_{k}", v, steps)
-        self.writer.add_scalar("eval/seconds", time.time() - start, steps)
+        self.writer.add_scalar("eval/seconds", seconds, steps)
         score = res["anchor" if "anchor" in res else "heuristic"]
         self.log(f"[eval @ {steps:,}] " + "  ".join(f"{k}={v:.1%}" for k, v in res.items())
-                 + f"  ({time.time() - start:.0f} s)")
-        if score > self.counters["best"]:
+                 + f"  ({seconds:.0f} s){note}")
+        best = score > self.counters["best"]
+        if best:
             self.counters["best"] = score
-            save(self.net, self.run_dir / "best_model.pt", counters=dict(self.counters), eval=res)
+            put(self.run_dir / "best_model.pt", counters=dict(counters, best=score), eval=res)
             if a.frozen_best:  # a new name each time (the trainer caches snapshot nets by name); older bests removed
                 fdir = self.pool_dir / "frozen"
                 fdir.mkdir(parents=True, exist_ok=True)
                 name = f"best-{steps:011d}.pt"
-                save(self.net, fdir / name)
+                put(fdir / name)
                 for old in fdir.glob("best-*.pt"):
                     if old.name != name:
                         old.unlink(missing_ok=True)
@@ -923,6 +1020,86 @@ class Trainer:
                                 f"{a.guard_anchor_drop:.0%} for 2 evals")
         else:
             self.guard_evals = 0
+        return best
+
+    def _eval_command(self, snap: Path, out: Path, steps: int) -> list[str]:
+        a = self.args
+        cmd = [sys.executable, "-m", "porygon.v2.train_eval", str(snap), "--format", a.format,
+               "--port", str(parse_ports(a.ports)[0]), "--battles", str(a.eval_battles), "--steps", str(steps),
+               "--out", str(out)]
+        return cmd + (["--anchor", str(a.anchor)] if a.anchor is not None else [])
+
+    def start_eval(self) -> None:
+        """--eval-async, at an eval point: snapshot the live net (eval/snap_<steps>.pt) and start the eval subprocess
+        on it, unless the previous one is still running (then this eval point is skipped)."""
+        steps = self.counters["steps"]
+        if self.stop.is_set():
+            return
+        if self.eval_job is not None:
+            job = self.eval_job
+            self.log(f"eval @ {steps:,} skipped: previous still running (eval @ {job.steps:,}, "
+                     f"{time.time() - job.started:.0f} s)")
+            return
+        d = self.run_dir / "eval"
+        snap, result = d / f"snap_{steps:011d}.pt", d / f"result_{steps:011d}.json"
+        save(self.net, snap, counters=dict(self.counters))
+        result.unlink(missing_ok=True)  # an earlier process may have evaluated these steps
+        proc = launch(self._eval_command(snap, result, steps), d / "eval.log")
+        self.eval_job = EvalJob(steps, snap, result, dict(self.counters), proc, d / "eval.log")
+        self.log(f"eval @ {steps:,} started (async, pid {proc.pid})")
+
+    def poll_eval(self) -> None:
+        """--eval-async, every update (non-blocking; nothing to do without a running eval): once the subprocess has
+        written its result, handle it as an eval of the snapshot's weights at the snapshot's steps; an exit without
+        a result is logged with the tail of eval.log and leaves the best score and the guard alone. Snapshots that
+        are not the current best are deleted."""
+        job = self.eval_job
+        if job is None:
+            return
+        rc = job.proc.poll()
+        if rc is None and not job.result.exists():
+            if self.args.eval_timeout > 0 and time.time() - job.started > self.args.eval_timeout:
+                self.eval_job = None
+                rc = stop_process(job.proc)
+                job.snap.unlink(missing_ok=True)
+                self.log(f"eval @ {job.steps:,} timed out after {time.time() - job.started:.0f} s (exit code {rc}); "
+                         f"killed — the next eval point starts a new one; {job.log} ends:\n{tail(job.log)}")
+            return  # still playing
+        if rc is None:  # the result is written and the process exits right after it
+            try:
+                rc = job.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                rc = stop_process(job.proc)
+        self.eval_job = None
+        try:
+            out = json.loads(job.result.read_text())
+            res, seconds = {k: float(v) for k, v in out["res"].items()}, float(out["seconds"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            job.snap.unlink(missing_ok=True)
+            self.log(f"eval @ {job.steps:,} failed: exit code {rc}, no result ({e!r:.200}); "
+                     f"{job.log} ends:\n{tail(job.log)}")
+            return
+        best = self._after_eval(res, job.steps, seconds, lambda path, **extra: copy_checkpoint(job.snap, path, **extra),
+                                job.counters, note=f" (async, finished at {self.counters['steps']:,})")
+        if best:  # the previous best's snapshot (and any left by an earlier process) is no longer needed
+            for f in job.snap.parent.glob("snap_*.pt"):
+                if f != job.snap:
+                    f.unlink(missing_ok=True)
+        else:
+            job.snap.unlink(missing_ok=True)
+
+    def stop_eval(self, timeout: float = 10.0) -> None:
+        """Trainer exit: terminate a running eval subprocess (SIGTERM, up to `timeout` s, then SIGKILL) and delete its
+        snapshot. Never raises."""
+        job, self.eval_job = self.eval_job, None
+        if job is None:
+            return
+        try:
+            rc = stop_process(job.proc, timeout)
+            job.snap.unlink(missing_ok=True)
+            self.log(f"eval @ {job.steps:,} stopped at exit (exit code {rc})")
+        except Exception as e:
+            self.log(f"eval @ {job.steps:,}: could not stop the subprocess ({e!r})")
 
     def _reload_distill(self) -> None:
         """--distill-reload-every: pick up added / rewritten shards; on any error keep training on the current set."""
@@ -934,6 +1111,46 @@ class Trainer:
         if new is not None:
             self.distill = new
             self.log(f"distill: reloaded {new.summary()}")
+
+    def _pool_alarm(self, eps: list[dict], st: dict) -> None:
+        """Pool health after each update (main loop), into `st`: the realised opponent mix of the rollout's finished
+        games (mix/selfplay, mix/frozen, mix/snapshot, mix/baseline = heuristic + max_power; perf/pool_episode_share)
+        and the pool-net loads of `_opp_act` since the last update (pool/load_{attempts,failures}_{frozen,snapshot};
+        lineage totals in the counters; each failing net logged once). Then the pool guard, one trip with a "pool: "
+        reason: no pool game finished for --pool-alarm-updates updates in a row although pool battles are configured
+        (also writes POOL_ALARM), any frozen-net load failure, or > 5% failed snapshot loads (>= 20 attempts)."""
+        a = self.args
+        n_pool = sum(e["kind"] == "pool" for e in eps)
+        st["perf/pool_episode_share"] = n_pool / max(len(eps), 1)
+        if eps:
+            mix = ["selfplay" if e["kind"] != "pool" else e["opp"] if e["opp"] in ("frozen", "snapshot")
+                   else "baseline" for e in eps]
+            for k in ("selfplay", "frozen", "snapshot", "baseline"):
+                st[f"mix/{k}"] = mix.count(k) / len(eps)
+        loads, msgs = self.pool_loads.take()
+        st.update(loads)
+        for k, v in loads.items():
+            key = k.replace("/", "_")
+            self.counters[key] = self.counters.get(key, 0) + int(v)
+        for msg in msgs:
+            self.log(msg)
+        why = []
+        if loads["pool/load_failures_frozen"] > 0:
+            why.append(f"{loads['pool/load_failures_frozen']:.0f} frozen-net load failure(s) in the last update")
+        tried, failed = loads["pool/load_attempts_snapshot"], loads["pool/load_failures_snapshot"]
+        if tried >= 20 and failed / tried > 0.05:
+            why.append(f"{failed:.0f} of {tried:.0f} snapshot loads failed in the last update (> 5%)")
+        expected = a.pool_battles > 0 and getattr(self.workers, "pool_per_worker", 1) != 0
+        if expected and a.pool_alarm_updates > 0:
+            self.pool_dry = 0 if n_pool else getattr(self, "pool_dry", 0) + 1
+            if self.pool_dry >= a.pool_alarm_updates:
+                msg = (f"POOL ALARM: {a.pool_battles} pool battles configured but no pool episode finished in "
+                       f"{self.pool_dry} updates in a row (worker restarts {self.workers.restarts})")
+                self.log(msg)
+                (self.run_dir / "POOL_ALARM").write_text(msg + "\n")
+                why.append(msg)
+        if why:
+            self.trip_guard("pool: " + "; ".join(why))
 
     def trip_guard(self, why: str) -> None:
         """Stop training (final_model.pt is saved as usual) and leave GUARD_TRIPPED in the run dir."""
@@ -997,6 +1214,7 @@ class Trainer:
                 c["updates"] += 1
                 updates_here += 1
                 st.update(self._episode_stats(eps, wall))
+                self._pool_alarm(eps, st)  # opponent mix, pool-net loads, pool guard
                 st.update(getattr(self.collector, "last_stats", {}))  # fastenv: stale / drained shares, drain time
                 st["diag/policy_lag_mean"], st["diag/policy_lag_max"] = lag_mean, float(lag_max)
                 st["perf/steps_per_s"] = n / max(wall, 1e-9)
@@ -1042,6 +1260,7 @@ class Trainer:
                         self.ptop_bad = getattr(self, "ptop_bad", 0) + 1 if sharp else 0
                         if self.ptop_bad >= 5:
                             self.trip_guard(f"collapse: P(top >= 0.9) > {a.guard_ptop_max} for 5 updates")
+                self.poll_eval()  # --eval-async: a finished eval subprocess (no-op otherwise)
                 if c["steps"] >= next_snap:
                     next_snap = nxt(a.snapshot_every)
                     save(self.net, self.pool_dir / f"{c['steps']:011d}.pt")
@@ -1050,15 +1269,23 @@ class Trainer:
                     self.checkpoint(self.run_dir / "checkpoints" / f"ckpt_{c['steps']:011d}.pt")
                 if a.eval_battles > 0 and c["steps"] >= next_eval:
                     next_eval = nxt(a.eval_every)
-                    self.evaluate()
+                    if a.eval_async:
+                        self.start_eval()
+                    else:
+                        self.evaluate()
                 if (self.distill is not None and a.distill_reload_every > 0
                         and updates_here % a.distill_reload_every == 0):
                     self._reload_distill()
         finally:
             self.stop.set()
             thread.join(30)  # the collector notices `stop` within ~1 s unless a forward is running
+            try:
+                self.poll_eval()  # --eval-async: a result written since the last update still counts
+            except Exception as e:
+                self.log(f"eval: handling the last result failed ({e!r})")
             self.checkpoint(self.run_dir / "final_model.pt")
             self.log(f"saved final_model.pt at {c['steps']:,} steps")
+            self.stop_eval()  # --eval-async: terminate a running eval subprocess
             self.workers.close()
             self.writer.close()
 
@@ -1080,6 +1307,10 @@ class Trainer:
         c = self.counters
         g = lambda k, f="{:.3f}": f.format(st[k]) if k in st else "-"  # noqa: E731
         aux = " ".join(f"{k.split('/')[1]}={st[k]:.3f}" for k in sorted(st) if k.startswith("aux/"))
+        plf = (f"{st['pool/load_failures_frozen'] + st['pool/load_failures_snapshot']:.0f}"
+               if "pool/load_failures_frozen" in st else "-")
+        mix = ("/".join(f"{st['mix/' + k]:.2f}" for k in ("selfplay", "frozen", "snapshot", "baseline"))
+               if "mix/selfplay" in st else "-")
         return (f"upd {c['updates']} steps {c['steps']:,} (+{n}) sps {st['perf/steps_per_s']:.0f} "
                 f"collect_sps {st['perf/collect_steps_per_s']:.0f} "
                 f"games/s {st['perf/games_per_s']:.2f} lr {st['perf/lr']:.2e} pg {g('loss/pg', '{:+.4f}')} "
@@ -1091,7 +1322,7 @@ class Trainer:
                 + (f"stale {st['perf/fastenv_stale_frac']:.3f} " if "perf/fastenv_stale_frac" in st else "")
                 + f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
                 f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
-                f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} ptop {g('loss/ptop')} "
+                f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} ptop {g('loss/ptop')} plf {plf} mix {mix} "
                 f"dst {g('loss/distill')} dval {g('diag/distill_val_ce')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
