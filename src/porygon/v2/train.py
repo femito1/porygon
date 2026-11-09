@@ -424,6 +424,8 @@ def parse_args(argv=None):
     a("--gamma", type=float, default=0.9999)
     a("--gae-lambda", type=float, default=0.754)
     a("--clip-range", type=float, default=0.1)
+    a("--guard-anchor-drop", type=float, default=0.0, help="stop when the eval score is this far below its best twice")
+    a("--guard-entropy-max", type=float, default=0.0, help="stop when the policy entropy exceeds this for 5 updates")
     a("--decoupled", action="store_true", help="decoupled PPO: clip vs the update-start policy, truncated IS weights")
     a("--decoupled-rho", type=float, default=2.0, help="decoupled PPO: truncation of pi_prox / pi_behaviour")
     a("--ent-coef", type=float, default=0.01)
@@ -667,6 +669,20 @@ class Trainer:
         if score > self.counters["best"]:
             self.counters["best"] = score
             save(self.net, self.run_dir / "best_model.pt", counters=dict(self.counters), eval=res)
+        # guard: the eval score fell more than --guard-anchor-drop below its best for 2 evals in a row -> stop
+        if a.guard_anchor_drop > 0 and score < self.counters["best"] - a.guard_anchor_drop:
+            self.guard_evals = getattr(self, "guard_evals", 0) + 1
+            if self.guard_evals >= 2:
+                self.trip_guard(f"eval score {score:.1%} < best {self.counters['best']:.1%} - "
+                                f"{a.guard_anchor_drop:.0%} for 2 evals")
+        else:
+            self.guard_evals = 0
+
+    def trip_guard(self, why: str) -> None:
+        """Stop training (final_model.pt is saved as usual) and leave GUARD_TRIPPED in the run dir."""
+        self.log(f"GUARD TRIPPED: {why}; stopping (best model: best_model.pt)")
+        (self.run_dir / "GUARD_TRIPPED").write_text(why + "\n")
+        self.stop.set()
 
     def run(self) -> None:
         a, c = self.args, self.counters
@@ -730,6 +746,11 @@ class Trainer:
                 for k, v in st.items():
                     self.writer.add_scalar(k, v, c["steps"])
                 self.log(self._line(n, st))
+                # guard: entropy above --guard-entropy-max for 5 updates in a row (drift towards uniform) -> stop
+                if a.guard_entropy_max > 0 and updates_here > 5:
+                    self.ent_bad = getattr(self, "ent_bad", 0) + 1 if st.get("loss/ent", 0.0) > a.guard_entropy_max else 0
+                    if self.ent_bad >= 5:
+                        self.trip_guard(f"entropy > {a.guard_entropy_max} for 5 updates")
                 if c["steps"] >= next_snap:
                     next_snap = nxt(a.snapshot_every)
                     save(self.net, self.pool_dir / f"{c['steps']:011d}.pt")
