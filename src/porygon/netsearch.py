@@ -286,3 +286,57 @@ class NetSearchPlayer(S.SearchPlayer):
     def on_gate(self, battle: Battle, probs: np.ndarray, mask: np.ndarray, win: float, stats: RootStats,
                 g: Gate) -> None:
         """Called after every searched decision (logging subclasses)."""
+
+
+class LoggedNetSearchPlayer(NetSearchPlayer):
+    """NetSearchPlayer that appends one JSON line per searched decision to `log_path` (the override analysis of a
+    test: where the gate helped and hurt): battle tag, turn, legal mask, network probabilities and P(win), both
+    moves, the gap, the override, the search's Q / shares over legal actions, root value and visits."""
+
+    def __init__(self, net: Any, *args: Any, log_path: str, **kwargs: Any):
+        super().__init__(net, *args, **kwargs)
+        self.log_path = log_path
+
+    def on_gate(self, battle: Battle, probs: np.ndarray, mask: np.ndarray, win: float, stats: RootStats,
+                g: Gate) -> None:
+        import json
+        legal = np.flatnonzero(mask > 0)
+        q = stats.q
+        rec = {"battle": battle.battle_tag, "turn": battle.turn, "legal": legal.tolist(),
+               "probs": [round(float(probs[a]), 5) for a in legal], "win": round(win, 5), "net": g.net,
+               "search": g.search, "gap": None if not math.isfinite(g.gap) else round(g.gap, 5),
+               "override": g.override, "action": g.action,
+               "q": [None if not math.isfinite(q[a]) else round(float(q[a]), 5) for a in legal],
+               "share": [round(float(stats.share[a]), 5) for a in legal], "root": round(stats.root, 5),
+               "visits": round(stats.visits), "ok": int(stats.ok.sum())}
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
+def load_spec(spec: str, net_loader: Any = None, **player_kwargs: Any) -> NetSearchPlayer:
+    """A player from `netsearch:NET[,margin=M][,temperature=T][,deterministic=1][,c_puct=C][,prior_weight=W]
+    [,ms=MS][,samples=K][,workers=N][,seed=S][,device=D][,log=PATH]` (margin: a number, inf or -inf). For harnesses
+    that build players from spec strings (netv2's porygon.v2.evaluate.load_player takes no such spec; wrap it)."""
+    base, _, rest = spec.partition(",")
+    kind, _, path = base.partition(":")
+    assert kind == "netsearch" and path, f"not a netsearch spec: {spec}"
+    opts = dict(kv.split("=", 1) for kv in rest.split(",") if kv)
+    device = opts.pop("device", "cpu")
+    if net_loader is None:
+        from porygon.v2.model import load as net_loader
+    net = net_loader(path, device=device)
+    floats = {"margin", "temperature", "c_puct", "prior_weight"}
+    ints = {"ms", "samples", "workers", "seed"}
+    kw: dict[str, Any] = {}
+    for k, v in opts.items():
+        if k in floats:
+            kw[k] = float(v)
+        elif k in ints:
+            kw[k] = int(v)
+        elif k == "deterministic":
+            kw[k] = v not in ("0", "false", "False")
+        elif k != "log":
+            raise ValueError(f"unknown netsearch option {k!r} in {spec}")
+    if "log" in opts:
+        return LoggedNetSearchPlayer(net, log_path=opts["log"], **kw, **player_kwargs)
+    return NetSearchPlayer(net, **kw, **player_kwargs)

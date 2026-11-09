@@ -102,3 +102,24 @@ def test_gap_t():
     res = [opts(tackle=(100, q1), growl=(100, q2)) for q1, q2 in ((0.6, 0.5), (0.7, 0.5), (0.5, 0.5))]
     m, se, n = NS.gap_t(NS.root_stats(convs, res, A), 6, 7)
     assert n == 3 and m == pytest.approx(0.1) and se == pytest.approx(0.1 / math.sqrt(3))
+
+
+def test_load_spec_parses_options():
+    class Net:
+        gen = NS.S.GEN_NUM
+
+        def eval(self):
+            return self
+
+    seen = {}
+
+    def loader(path, device):
+        seen.update(path=path, device=device)
+        return Net()
+
+    p = NS.load_spec("netsearch:/x/net.pt,margin=-inf,temperature=0.5,ms=200,samples=2,c_puct=1.5,device=cpu",
+                     net_loader=loader, battle_format=NS.S.inference.FORMAT, start_listening=False)
+    assert seen == {"path": "/x/net.pt", "device": "cpu"}
+    assert p.margin == -math.inf and p.temperature == 0.5 and p.ms == 200 and p.samples == 2 and p.c_puct == 1.5
+    with pytest.raises(ValueError):
+        NS.load_spec("netsearch:/x/net.pt,bogus=1", net_loader=loader, start_listening=False)
