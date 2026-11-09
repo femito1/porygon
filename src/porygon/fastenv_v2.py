@@ -171,6 +171,9 @@ class FastCollector:
         """Opponent of a new pool battle: PoolOpponent.new_battle's draw (frozen / baseline / snapshot)."""
         snaps = self._list_snapshots()
         frozen = self._frozen
+        if (snaps and not snaps[-1].exists()) or (frozen and not all(f.exists() for f in frozen)):
+            self._snaps_t = -1e9  # a listed file was replaced (e.g. --frozen-best rotates best-*.pt): list again
+            snaps, frozen = self._list_snapshots(), self._frozen
         r = self.rng.random()
         if frozen and (r < self.p_frozen or (not snaps and r >= self.p_frozen + self.p_baseline)):
             self.snapshot[battle] = "frozen/" + frozen[self.rng.integers(len(frozen))].name
