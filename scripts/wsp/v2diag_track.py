@@ -36,14 +36,47 @@ def pg_window(segments, step, width=2.5e6):
     return f"{sum(xs) / len(xs):+.4f} ({sum(x > 0 for x in xs) / len(xs):.2f}, {len(xs)})"
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    for k in ("--decay", "--switch", "--ckpt", "--table", "--flags"):
-        ap.add_argument(k, required=True)
-    ap.add_argument("--step", type=int, required=True)
-    ap.add_argument("--trainlog", action="append", default=[],
-                    help="PATH|SINCE|UNTIL (log-time bounds 'YYYY-MM-DD HH:MM:SS'); repeat for each segment of the run")
-    ap.add_argument("--boundary", default="", help="STEP:TEXT — write a marker row before the first row at or after STEP")
+def compute_flags(d: dict, r: dict | None, a, step: int) -> list[str]:
+    """Flags of one checkpoint (d = its decay.json stats, r = the reference's or None). From --absolute-from on, a run
+    with --absolute gets ONLY those absolute limits (until 2026-11-09 the generic --status-abs / --top09-abs defaults
+    were applied on top of them, which flagged G9s at voluntary status > 0.20 despite its conf's status_max 0.35)."""
+    fl = []
+    if a.absolute and step >= a.absolute_from:
+        lim = {k: float(v) for k, v in (kv.split("=") for kv in a.absolute.split(","))}
+        if d["entropy"] < lim.get("ent_min", -1):
+            fl.append(f"COLLAPSE entropy {d['entropy']:.2f} < {lim['ent_min']}")
+        if d["p_top_ge_0.9"] > lim.get("top_max", 9):
+            fl.append(f"COLLAPSE P(top>=0.9) {d['p_top_ge_0.9']:.2f} > {lim['top_max']}")
+        if d["mass_voluntary"]["status"] > lim.get("status_max", 9):
+            fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {lim['status_max']}")
+        if d["mass_voluntary"]["switch"] < lim.get("switch_min", -1):
+            fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < {lim['switch_min']}")
+    else:
+        st_thr = a.status_abs if r is None else max(a.status_abs, r["mass_voluntary"]["status"] + 0.10)
+        if d["mass_voluntary"]["status"] > st_thr:
+            fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {st_thr:.2f}")
+        top_thr = 0.5 * r["p_top_ge_0.9"] if (r is not None and a.relative_top09) else a.top09_abs
+        if d["p_top_ge_0.9"] < top_thr:
+            fl.append(f"P(top>=0.9) {d['p_top_ge_0.9']:.2f} < {top_thr:.2f}")
+        if r is not None and d["entropy"] > r["entropy"] + a.entropy_rise:
+            fl.append(f"entropy {d['entropy']:.2f} > ref {r['entropy']:.2f} + {a.entropy_rise}")
+        if r is not None and a.collapse:
+            if d["entropy"] < r["entropy"] - 0.6:
+                fl.append(f"COLLAPSE entropy {d['entropy']:.2f} < ref {r['entropy']:.2f} - 0.6")
+            thr = max(3 * r["p_top_ge_0.9"], 0.4)
+            if d["p_top_ge_0.9"] > thr:
+                fl.append(f"COLLAPSE P(top>=0.9) {d['p_top_ge_0.9']:.2f} > {thr:.2f}")
+            sw = r["mass_voluntary"]["switch"]
+            if d["mass_voluntary"]["switch"] < 0.5 * sw:
+                fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < half the ref's {sw:.2f}")
+        if r is not None and step >= a.auc_min_step and d["value_auc"] < r["value_auc"] - a.auc_drop:
+            fl.append(f"value AUC {d['value_auc']:.3f} < ref {r['value_auc']:.3f} - {a.auc_drop}")
+    if step < a.flag_min_step:
+        fl = [f"(suppressed before {a.flag_min_step / 1e6:.0f}M: {x})" for x in fl]
+    return fl
+
+
+def add_flag_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--ref", default="", help="reference checkpoint name in decay.json (relative flags)")
     ap.add_argument("--status-abs", type=float, default=0.2)
     ap.add_argument("--top09-abs", type=float, default=0.2)
@@ -55,45 +88,27 @@ def main():
     ap.add_argument("--auc-min-step", type=float, default=0, help="no value-AUC flag before this step (fresh value head)")
     ap.add_argument("--absolute", default="",
                     help="from-scratch runs: only absolute flags, e.g. 'ent_min=0.5,top_max=0.6,status_max=0.35,switch_min=0.05'")
+    ap.add_argument("--absolute-from", type=float, default=0,
+                    help="use the --absolute limits from this step on, the reference-relative flags before it "
+                         "(G9p: from its KL anchor's end at 50M)")
     ap.add_argument("--flag-min-step", type=float, default=0, help="no flags before this step")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    for k in ("--decay", "--switch", "--ckpt", "--table", "--flags"):
+        ap.add_argument(k, required=True)
+    ap.add_argument("--step", type=int, required=True)
+    ap.add_argument("--trainlog", action="append", default=[],
+                    help="PATH|SINCE|UNTIL (log-time bounds 'YYYY-MM-DD HH:MM:SS'); repeat for each segment of the run")
+    ap.add_argument("--boundary", default="", help="STEP:TEXT — write a marker row before the first row at or after STEP")
     ap.add_argument("--since", default="0000", help="segment start, 'YYYY-MM-DD HH:MM:SS' as in train.log")
+    add_flag_args(ap)
     a = ap.parse_args()
     d = json.load(open(a.decay))[a.ckpt]
     s = json.load(open(a.switch))[a.ckpt]
-    fl = []
     r = json.load(open(a.decay)).get(a.ref) if a.ref else None
-    if a.absolute:
-        lim = {k: float(v) for k, v in (kv.split("=") for kv in a.absolute.split(","))}
-        if d["entropy"] < lim.get("ent_min", -1):
-            fl.append(f"COLLAPSE entropy {d['entropy']:.2f} < {lim['ent_min']}")
-        if d["p_top_ge_0.9"] > lim.get("top_max", 9):
-            fl.append(f"COLLAPSE P(top>=0.9) {d['p_top_ge_0.9']:.2f} > {lim['top_max']}")
-        if d["mass_voluntary"]["status"] > lim.get("status_max", 9):
-            fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {lim['status_max']}")
-        if d["mass_voluntary"]["switch"] < lim.get("switch_min", -1):
-            fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < {lim['switch_min']}")
-        r = None  # no reference-relative flags for a from-scratch run (the reference only feeds the KL / top-1 columns)
-    st_thr = a.status_abs if r is None else max(a.status_abs, r["mass_voluntary"]["status"] + 0.10)
-    if d["mass_voluntary"]["status"] > st_thr:
-        fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {st_thr:.2f}")
-    top_thr = 0.5 * r["p_top_ge_0.9"] if (r is not None and a.relative_top09) else a.top09_abs
-    if d["p_top_ge_0.9"] < top_thr:
-        fl.append(f"P(top>=0.9) {d['p_top_ge_0.9']:.2f} < {top_thr:.2f}")
-    if r is not None and d["entropy"] > r["entropy"] + a.entropy_rise:
-        fl.append(f"entropy {d['entropy']:.2f} > ref {r['entropy']:.2f} + {a.entropy_rise}")
-    if r is not None and a.collapse:
-        if d["entropy"] < r["entropy"] - 0.6:
-            fl.append(f"COLLAPSE entropy {d['entropy']:.2f} < ref {r['entropy']:.2f} - 0.6")
-        thr = max(3 * r["p_top_ge_0.9"], 0.4)
-        if d["p_top_ge_0.9"] > thr:
-            fl.append(f"COLLAPSE P(top>=0.9) {d['p_top_ge_0.9']:.2f} > {thr:.2f}")
-        sw = r["mass_voluntary"]["switch"]
-        if d["mass_voluntary"]["switch"] < 0.5 * sw:
-            fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < half the ref's {sw:.2f}")
-    if r is not None and a.step >= a.auc_min_step and d["value_auc"] < r["value_auc"] - a.auc_drop:
-        fl.append(f"value AUC {d['value_auc']:.3f} < ref {r['value_auc']:.3f} - {a.auc_drop}")
-    if a.step < a.flag_min_step:
-        fl = [f"(suppressed before {a.flag_min_step / 1e6:.0f}M: {x})" for x in fl]
+    fl = compute_flags(d, r, a, a.step)
     mv, ma = d["mass_voluntary"], d["mass_all"]
     row = (f"| {a.step / 1e6:.2f}M | {d['entropy']:.2f} | {d['p_top_ge_0.9']:.2f} | {d['top_gap']:.2f} | "
            f"{mv['switch']:.2f} / {mv['attack']:.2f} / {mv['status']:.2f} | {ma['switch']:.2f} / {ma['attack']:.2f} / {ma['status']:.2f} | "
