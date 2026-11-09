@@ -95,6 +95,15 @@ def compact(stats, t: float) -> dict:
             "ok": stats.ok.tolist(), "err": stats.errors[:2], "t": round(t, 3)}
 
 
+async def close_pool(pool) -> None:
+    """Stop the engine workers before the event loop closes (else their transports complain at exit)."""
+    while pool.idle is not None and not pool.idle.empty():
+        proc = pool.idle.get_nowait()
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
 def load_net(path: str, device: str):
     from porygon.v2.model import load
     return load(path, device=device).eval()
@@ -166,6 +175,7 @@ async def check(a, NS, S, R, gen: int) -> int:
             print(f"{tag} turn {d.turn} {d.kind} legal {int(mask.sum())}: net {NS.sharpen(probs, .5).round(2).max()}"
                   f" pick {pick} q {np.nanmax(stats.q):.3f} visits {stats.visits:.0f} order {order.message!r}",
                   flush=True)
+    await close_pool(pool)
     print(f"check: {n} positions, {len(fails)} failures; player stats {player.stats}")
     for f in fails[:20]:
         print("  FAIL", f)
@@ -232,6 +242,7 @@ async def run(a, NS, S, R, gen: int) -> int:
     tasks = [asyncio.create_task(one(r)) for r in recs[:max(1, 3 * a.positions // max(a.per_record, 1))]]
     await asyncio.gather(*tasks)
     out.close()
+    await close_pool(pool)
     print(f"done: {done['n']} positions in {time.time() - t_start:.0f}s -> {a.out}")
     return 0
 
