@@ -18,7 +18,8 @@ for o in $(ls v2diag/oneshot/*.sh 2>/dev/null); do
 done
 # the per-run watcher also runs as a /tmp copy: bash reads scripts incrementally, and replacing a file another NFS
 # client has open gives that reader a stale handle
-for c in v2diag/conf/g9s.conf v2diag/conf/g9p.conf v2diag/conf/r1b.conf; do
+# G9p first since the 12:40 GPU swap (it is the A30 run now, with a post-swap sharpening watch item)
+for c in v2diag/conf/g9p.conf v2diag/conf/g9s.conf v2diag/conf/r1b.conf; do
   echo "#### $c $(date -u +%H:%M)"
   A=$(mktemp /tmp/v2diag-any-XXXX.sh); cp scripts/wsp/v2diag_watch_any.sh $A
   NO_CHAIN=1 bash $A $c; rm -f $A
