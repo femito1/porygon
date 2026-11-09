@@ -6,6 +6,14 @@ CONF=$1; source $CONF
 mkdir -p $D/ck $D/out
 [ -e $D/STOP ] && { echo "$CONF stopped"; exit 0; }
 START=$(date -d "$START_FROM" +%s)
+# queue the next pass first (after this one ends, at least 20 min from now), so a pass that hits the time limit
+# cannot break the chain
+if squeue -h -u $USER -o %j | grep -q -E "$JOBRE"; then
+  sbatch --begin=now+20minutes --dependency=afterany:$SLURM_JOB_ID --partition=long scripts/wsp/v2diag_run.sbatch \
+    scripts/wsp/v2diag_watch_any.sh $CONF | tail -1
+else
+  echo "no job matching $JOBRE: not resubmitting $CONF"
+fi
 cp --update=none $REF $D/ck/$REFNAME
 for f in $(ls ${POOLS[@]} 2>/dev/null); do
   [ $(stat -c %Y $f) -le $START ] && continue
@@ -22,8 +30,3 @@ for f in $(ls ${POOLS[@]} 2>/dev/null); do
     --ckpt s_$key.pt --step $st --table $D/table.md --flags $D/flags.txt "${SEGS[@]}" --ref $REFNAME "${TRACK_ARGS[@]}" \
     && touch $D/out/$key/done && rm -f $D/ck/s_$key.pt
 done
-if squeue -h -u $USER -o %j | grep -q -E "$JOBRE"; then
-  sbatch --begin=now+20minutes --partition=long scripts/wsp/v2diag_run.sbatch scripts/wsp/v2diag_watch_any.sh $CONF | tail -1
-else
-  echo "no job matching $JOBRE: not resubmitting $CONF"
-fi
