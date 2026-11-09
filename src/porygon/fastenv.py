@@ -99,14 +99,15 @@ def node_binary() -> str:
 
 class Worker:
     def __init__(self, index: int, fmt: str, battles: int, seed: int, encoder: str, shaping, node: str,
-                 max_turns: int, duplicate: bool, bot: str, bot_battles: int):
+                 max_turns: int, duplicate: bool, bot: str, bot_battles: int, dyn_bots: str = ""):
         self.index, self.battles = index, battles
         to_child_r, self.to_child = os.pipe()
         self.from_child, from_child_w = os.pipe()
         cmd = [node, "--max-old-space-size=2048", str(JS / "host.js"), "--format", fmt, "--battles", str(battles),
                "--seed", str(seed), "--encoder", encoder, "--fd-in", str(to_child_r), "--fd-out", str(from_child_w),
                "--shaping", ",".join(map(str, shaping[:3])), "--max-turns", str(max_turns),
-               "--duplicate", str(int(duplicate))] + (["--bot", bot, "--bot-battles", str(bot_battles)] if bot else [])
+               "--duplicate", str(int(duplicate))] + (["--bot", bot, "--bot-battles", str(bot_battles)] if bot else []) \
+            + (["--bots", dyn_bots] if dyn_bots else [])
         self.proc = subprocess.Popen(cmd, pass_fds=(to_child_r, from_child_w), stdin=subprocess.DEVNULL)
         os.close(to_child_r)
         os.close(from_child_w)
@@ -188,18 +189,36 @@ class FastEnv:
 
     def __init__(self, battle_format: str = "gen9randombattle", n_workers: int = 4, battles_per_worker: int = 64,
                  seed: int = 0, encoder: str | None = None, shaping=SHAPING, node: str | None = None,
-                 max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0):
+                 max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0,
+                 dyn_bots: str = ""):
         """bot: an env-side baseline ('heuristic' / 'max_power' = poke-env SimpleHeuristicsPlayer /
-        MaxBasePowerPlayer, 'random') playing side two of
-        the first bot_battles battles of every worker (those sides emit no rows)."""
+        MaxBasePowerPlayer, 'random') playing side two of the first bot_battles battles of every worker (those
+        sides emit no rows); a comma list ('heuristic,max_power') assigns the bots to workers round-robin
+        (worker i plays bots[i % len(bots)]).
+        dyn_bots: bots ('heuristic,max_power') the caller may hand side two of any battle to, one battle at a time,
+        by answering that side's row with action -2-k (`bot_action(k)`); the bot then plays the side until the
+        battle ends and the side emits no more rows (not even its terminal row). FastCollector uses it for netv2's
+        pool mix."""
         encoder = encoder or os.environ.get("PORYGON_FASTENV_ENCODER", "v1")
-        self.bot, self.bot_battles = bot, (bot_battles if bot else 0)
+        self.bots = [b for b in bot.split(",") if b] if bot else []
+        self.dyn_bots = [b for b in dyn_bots.split(",") if b]
+        self.bot, self.bot_battles = bot, (bot_battles if self.bots else 0)
         self.format, self.n_workers, self.battles_per_worker = battle_format, n_workers, battles_per_worker
         node = node or node_binary()
         self.workers = [Worker(i, battle_format, battles_per_worker, seed * 1000 + i, encoder, shaping, node,
-                               max_turns, duplicate, bot, bot_battles) for i in range(n_workers)]
+                               max_turns, duplicate, self.worker_bot(i), self.bot_battles, ",".join(self.dyn_bots))
+                        for i in range(n_workers)]
         self.span = 2 * battles_per_worker
         self._pending: dict[int, Batch] = {}  # worker -> batch whose decisions are not answered yet
+
+    @staticmethod
+    def bot_action(k: int) -> int:
+        """The action that hands a side-two row's battle to dyn_bots[k]."""
+        return -2 - k
+
+    def worker_bot(self, worker: int) -> str:
+        """The env-side bot of that worker's bot battles ('' if none)."""
+        return self.bots[worker % len(self.bots)] if self.bots else ""
 
     # --- asynchronous interface ---
     def poll(self, timeout: float | None = None) -> list[tuple[int, Batch]]:

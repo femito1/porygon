@@ -18,6 +18,10 @@
 //   side 0 plays both teams of each pair: for head-to-head evaluation (porygon.fastenv_eval).
 // --bot heuristic|max_power|random --bot-battles K: side two of battles 0..K-1 is an env-side baseline bot
 //   (poke-env SimpleHeuristicsPlayer / MaxBasePowerPlayer ports, fastenv/js/bots.js; those sides emit no rows).
+// --bots heuristic,max_power: bots Python may hand side two of any battle to, one battle at a time: answering a
+//   side-two row with action -2-k makes bots[k] play that side until the battle ends (it emits no more rows, not
+//   even the terminal one). porygon.fastenv_v2 uses it for netv2's pool mix (a baseline with p_baseline, else a
+//   snapshot; a baseline whenever no snapshot exists yet).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -30,7 +34,7 @@ const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 
 function parseArgs(argv) {
   const a = {format: 'gen9randombattle', battles: 64, seed: 1, encoder: 'v1', fdIn: 0, fdOut: 1,
-    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0};
+    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0, bots: ''};
   for (let i = 2; i < argv.length; i += 2) {
     const k = argv[i].replace(/^--/, '').replace(/-(.)/g, (_, c) => c.toUpperCase());
     a[k] = argv[i + 1];
@@ -79,6 +83,7 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
     this.first = [true, true];
     this.crashed = false;
     this.retries = [0, 0];
+    this.dynBot = null;        // a --bots bot Python handed side two of this battle to (action -2-k)
     this.oppPrev = [[-1, 0, 0, 0], [-1, 0, 0, 0]];
     this.auxTeams = [aux.teamIds(teams[0], GEN), aux.teamIds(teams[1], GEN)];
     this.battle = new SimBattle(args.format, battleSeed, teams.map(t => JSON.parse(JSON.stringify(t))), {
@@ -179,12 +184,16 @@ const BOTS = {  // poke-env baselines (bots.js, parity-tested); null from a bot 
 };
 const BOT = args.bot ? BOTS[args.bot] : null;
 if (args.bot && !BOT) throw new Error(`unknown --bot ${args.bot} (have ${Object.keys(BOTS)})`);
-const isBot = slot => BOT !== null && slot.i < args.botBattles;
+const DYN_BOTS = args.bots ? String(args.bots).split(',').map(k => {
+  if (!BOTS[k]) throw new Error(`unknown --bots entry ${k} (have ${Object.keys(BOTS)})`);
+  return BOTS[k];
+}) : [];
+const isBot = slot => slot.dynBot !== null || (BOT !== null && slot.i < args.botBattles);
 
 function botAct(slot) {  // the bot answers every pending request of its side (several when the learner waits)
-  const t = slot.trackers[1], b = slot.battle;
+  const t = slot.trackers[1], b = slot.battle, bot = slot.dynBot ?? BOT;
   for (let guard = 0; guard < 20 && t.decisionPending && !b.ended && !slot.crashed; guard++) {
-    const c = BOT(t);
+    const c = bot(t);
     if (t.markChosen) t.markChosen(); else t.decisionPending = false;
     try {
       if (!b.choose(1, c) && !t.decisionPending && !b.ended && b.pendingSides().includes(1)) b.choose(1, 'default');
@@ -196,8 +205,7 @@ function botAct(slot) {  // the bot answers every pending request of its side (s
 }
 
 function emitSlot(slot) {
-  const bot = isBot(slot);
-  if (bot) botAct(slot);
+  if (isBot(slot)) botAct(slot);
   const b = slot.battle;
   if (!b.ended && !slot.crashed && b.turn >= args.maxTurns) {  // endless battle: call it a tie
     b.battle.tie();
@@ -207,11 +215,11 @@ function emitSlot(slot) {
     stats.games++;
     stats.turns += b.turn;
     row(slot, 0, false, true);
-    if (!bot) row(slot, 1, false, true);
+    if (!isBot(slot)) row(slot, 1, false, true);
     slot.newBattle();
-    if (bot) botAct(slot);
+    if (isBot(slot)) botAct(slot);
   }
-  for (const side of bot ? [0] : [0, 1]) if (slot.trackers[side].decisionPending) row(slot, side, true, false);
+  for (const side of isBot(slot) ? [0] : [0, 1]) if (slot.trackers[side].decisionPending) row(slot, side, true, false);
 }
 
 function flush() {
@@ -277,6 +285,12 @@ for (;;) {
   for (let k = 0; k < m; k++) {
     const s = inBuf.readUInt32LE(8 * k), action = inBuf.readInt32LE(8 * k + 4);
     const slot = slots[s >> 1], side = s & 1;
+    if (action <= -2) {  // hand side two to a --bots bot for the rest of this battle (emitSlot lets it answer)
+      if (side !== 1 || !DYN_BOTS[-2 - action]) throw new Error(`bad bot handover: slot ${s} action ${action}`);
+      slot.dynBot = DYN_BOTS[-2 - action];
+      touched.add(slot);
+      continue;
+    }
     slot.choice[side] = E.actionToChoice(slot.trackers[side], action);
     slot.lastAction[side] = action;
     touched.add(slot);

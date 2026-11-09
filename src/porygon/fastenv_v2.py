@@ -14,6 +14,19 @@ Needs the v2 JS encoder (`fastenv/js/encoder_v2.js`: obs/<field> and aux/<field>
 opp_fn as in Collector), plus baseline bots inside the env (`FastEnv(bot="heuristic", bot_battles=k)`: poke-env's
 SimpleHeuristicsPlayer / MaxBasePowerPlayer ported to JS, episodes reported as kind "pool", opp = the bot). Transitions close as in Collector: at the side's next decision (bootstrap = its
 value) or at the end of the battle (done, bootstrap 0); open transitions carry over between rollouts.
+
+On-policy collection (`on_policy=True`, what `porygon.v2.train --collector fastenv --no-overlap` uses): at the end
+of every rollout the collector waits for the workers' in-flight batches and closes every open learner transition
+whose side has its next decision waiting, bootstrapping with the *current* actor's value of that decision (one
+extra forward, no action sent). The next rollout then starts from fresh decisions acted by the refreshed actor, so
+every transition's behaviour log-prob comes from the weights the update starts from (Collector's carry-over leaves
+~2 open transitions per battle acted by the previous weights). The few open transitions whose side has no decision
+waiting at that moment (the other side is force-switching) still carry over: `rollout_stats()` counts them
+(`perf/fastenv_stale_frac`). With overlap (the trainer's default) use `--decoupled`: the behaviour log-probs stored
+here are exact for the weights that acted.
+
+`add_args(parser)` / `build(args, ...)` give `porygon.v2.train` its `--collector fastenv` switch
+(patch: `patches/netv2-fastenv-collector.patch`).
 """
 
 from __future__ import annotations
@@ -35,23 +48,62 @@ from porygon.v2.workers import ACT, DONE, NEXT_V, OBS, OPP_C, OPP_T, REW, Packer
 class FastWorkers:
     """Stands in for BattleWorkers where the trainer only reads counters and closes it."""
 
-    def __init__(self, env: FastEnv):
-        self.env, self.restarts = env, 0
+    def __init__(self, env: FastEnv, pool_per_worker: int = 0):
+        self.env, self.restarts, self.pool_per_worker = env, 0, pool_per_worker
 
     def close(self) -> None:
         self.env.close()
 
 
+# ---------------------------------------------------------------- porygon.v2.train --collector fastenv
+
+def add_args(add: Callable) -> None:
+    """The trainer's fastenv flags (`add` = parser.add_argument)."""
+    add("--collector", choices=("showdown", "fastenv"), default="showdown",
+        help="rollouts from Showdown servers + poke-env workers, or from fastenv (in-process Showdown, porygon.fastenv)")
+    add("--fastenv-workers", type=int, default=0, help="fastenv Node workers (0: usable CPUs - 2)")
+    add("--fastenv-battles", type=int, default=48, help="battles per fastenv worker (>= 32 keeps workers busy)")
+    add("--fastenv-pool-share", type=float, default=None,
+        help="share of each worker's battles played vs the pool (default: pool_battles / (n_battles + pool_battles));"
+             " of those, a p_baseline share vs env-side baseline bots (heuristic / max_power by worker), the rest vs"
+             " pool snapshots (self-play until the first snapshot exists)")
+
+
+def build_env(args, seed: int | None = None) -> FastWorkers:
+    """FastWorkers(FastEnv) for porygon.v2.train args (format, shaping, n_battles / pool_battles and the --fastenv-*
+    flags). Workers default to the usable CPUs - 2 (the trainer's main and collector threads). Pool battles: the
+    first round(B * share) battles of every worker; each new one is a baseline bot (env-side heuristic / max_power,
+    uniform) with p_baseline or while the pool is empty, else a snapshot (FastCollector(p_baseline=...))."""
+    import os
+    n = args.fastenv_workers or max(1, len(os.sched_getaffinity(0)) - 2)
+    total = args.n_battles + args.pool_battles
+    share = args.fastenv_pool_share if args.fastenv_pool_share is not None else (
+        args.pool_battles / total if total else 0.0)
+    pool = int(round(args.fastenv_battles * share))
+    seed = seed if seed is not None else int.from_bytes(os.urandom(3), "little")  # restarts must not replay teams
+    env = FastEnv(args.format, n, args.fastenv_battles, seed=seed, encoder="v2", shaping=tuple(args.shaping),
+                  dyn_bots="heuristic,max_power" if pool else "")
+    print(f"fastenv: {n} workers x {args.fastenv_battles} battles ({pool} pool battles per worker: baseline bot "
+          f"with p {args.p_baseline} or while the pool is empty, else a snapshot), seed {seed}", flush=True)
+    return FastWorkers(env, pool_per_worker=pool)
+
+
 class FastCollector:
     def __init__(self, env: FastEnv, packer: Packer, act_fn: Callable, opp_fn: Callable | None = None, *,
                  id_dropout: bool = True, seed: int | None = None, pool_per_worker: int = 0,
-                 pool_dir=None, recent: int = 4, **_ignored):
-        """pool_per_worker: in every worker, battles 0..k-1 are pool battles: side two is a frozen snapshot from
-        pool_dir (`*.pt`, picked per battle like PoolOpponent: half the time one of the `recent` newest, else
-        uniform), played through opp_fn(name, batch); no snapshot yet -> that battle is self-play."""
+                 pool_dir=None, recent: int = 4, on_policy: bool = False, p_baseline: float = 0.0, **_ignored):
+        """pool_per_worker: in every worker, battles bot_battles..bot_battles+k-1 are pool battles: side two is a
+        frozen snapshot from pool_dir (`*.pt`, picked per battle like PoolOpponent: half the time one of the
+        `recent` newest, else uniform), played through opp_fn(name, batch). With env dyn_bots (FastEnv(dyn_bots=
+        'heuristic,max_power')) each pool battle is, as netv2's PoolOpponent, a baseline bot (uniform over
+        dyn_bots) with probability p_baseline or whenever no snapshot exists, else a snapshot; without dyn_bots a
+        pool battle with no snapshot yet is self-play."""
         self.env, self.packer, self.act_fn, self.opp_fn = env, packer, act_fn, opp_fn
         self.pool_per_worker, self.pool_dir, self.recent = pool_per_worker, pool_dir, recent
         self.snapshot: dict[int, str | None] = {}  # battle id -> snapshot name of the current pool battle
+        self.dynbot: dict[int, int] = {}  # battle id -> index into env.dyn_bots of the current pool battle's bot
+        self.p_baseline = p_baseline
+        self._snaps, self._snaps_t = [], -1e9  # cached pool listing (re-listed every 10 s)
         self.opp_packer = Packer(packer.gen, aux=False)
         self.id_dropout = id_dropout
         self.rng = np.random.default_rng(seed)
@@ -65,6 +117,12 @@ class FastCollector:
         self.forward_batches = 0
         self.opp_decisions = 0
         self.decisions: dict[int, int] = defaultdict(int)  # per slot, current battle
+        self.on_policy = on_policy
+        self.rollout_index = 0  # rollouts taken so far; transitions remember the rollout they were acted in
+        self.born: dict[int, int] = {}  # slot -> rollout index of its open transition
+        self.stale = 0  # closed transitions acted in an earlier rollout (carry-over)
+        self.drained = 0  # transitions closed by the end-of-rollout bootstrap
+        self.drain_s = 0.0
         b0 = next(iter(self.ready.values()))
         self.col = {k: (f"obs/{k}" if f"obs/{k}" in b0.cols else f"aux/{k}") for k in packer.layout}
         missing = [k for k, c in self.col.items() if c not in b0.cols]
@@ -79,15 +137,34 @@ class FastCollector:
         k = battle % self.env.battles_per_worker - self.env.bot_battles
         return 0 <= k < self.pool_per_worker
 
-    def _pick_snapshot(self) -> str | None:
+    def _list_snapshots(self) -> list:
         if self.pool_dir is None or self.opp_fn is None:
-            return None
-        from pathlib import Path
-        snaps = sorted(Path(self.pool_dir).glob("*.pt"), key=lambda p: p.stat().st_mtime)
+            return []
+        if time.time() - self._snaps_t > 10.0:
+            from pathlib import Path
+            try:
+                self._snaps = sorted(Path(self.pool_dir).glob("*.pt"), key=lambda p: p.stat().st_mtime)
+            except OSError:  # a snapshot being replaced while listed: keep the previous listing
+                pass
+            self._snaps_t = time.time()
+        return self._snaps
+
+    def _pick_snapshot(self) -> str | None:
+        snaps = self._list_snapshots()
         if not snaps:
             return None
         pick = snaps[-self.recent:] if self.rng.random() < 0.5 else snaps
         return pick[self.rng.integers(len(pick))].name
+
+    def _new_pool_battle(self, battle: int) -> None:
+        """Opponent of a new pool battle (PoolOpponent.new_battle semantics when the env has dyn_bots)."""
+        if self.env.dyn_bots:
+            if self._list_snapshots() and self.rng.random() >= self.p_baseline:
+                self.snapshot[battle] = self._pick_snapshot()
+            else:
+                self.dynbot[battle] = int(self.rng.integers(len(self.env.dyn_bots)))
+        else:
+            self.snapshot[battle] = self._pick_snapshot()
 
     def _opponent(self, s: int) -> str | None:
         """Snapshot playing slot s (side two of a pool battle), else None (the learner plays it)."""
@@ -105,6 +182,8 @@ class FastCollector:
         tr[NEXT_V], tr[DONE] = next_value, done
         self.segments[key].append(tr)
         self.n_closed += 1
+        if self.born.pop(key, self.rollout_index) != self.rollout_index:
+            self.stale += 1
 
     def _receive(self, b: Batch) -> None:
         pending_result: dict[int, list] = {}
@@ -120,8 +199,11 @@ class FastCollector:
                 r = pending_result.setdefault(s // 2, [None, None, 0])
                 r[s % 2] = int(b.win[i])
                 r[2] = int(b.turn[i])
-                if self._is_bot(s // 2) and s % 2 == 0:  # env-side baseline bot battle: only the learner side
-                    self.episodes.append({"kind": "pool", "opp": self.env.bot, "turns": r[2],
+                if (self._is_bot(s // 2) or (s // 2) in self.dynbot) and s % 2 == 0:  # bot battle: learner side only
+                    k = self.dynbot.pop(s // 2, None)
+                    self.episodes.append({"kind": "pool", "turns": r[2],
+                                          "opp": self.env.worker_bot(s // self.env.span) if k is None
+                                          else self.env.dyn_bots[k],
                                           "decisions": [self.decisions.pop(s, 0)], "result": [r[0]]})
                     self.decisions.pop(s + 1, None)
                     pending_result.pop(s // 2)
@@ -136,7 +218,7 @@ class FastCollector:
                         self.episodes.append({"kind": "pool", "opp": "snapshot", "snapshot": snap, "turns": r[2],
                                               "decisions": dec[:1], "result": r[:1]})
             elif b.flags[i] & 4 and s % 2 == 0 and self._is_pool(s // 2):  # a new pool battle: pick its opponent
-                self.snapshot[s // 2] = self._pick_snapshot()
+                self._new_pool_battle(s // 2)
 
     def _act(self) -> None:
         ws = list(self.ready)
@@ -149,7 +231,11 @@ class FastCollector:
         for bi, (b, r) in enumerate(zip(batches, all_rows)):
             mine = []
             for k, i in enumerate(r):
-                name = self._opponent(int(b.slot[i]))
+                s = int(b.slot[i])
+                if s % 2 == 1 and (s // 2) in self.dynbot:  # hand side two to the env-side bot for this battle
+                    acts_out[bi][k] = FastEnv.bot_action(self.dynbot[s // 2])
+                    continue
+                name = self._opponent(s)
                 if name is None:
                     mine.append(k)
                 else:
@@ -185,6 +271,7 @@ class FastCollector:
                     self._close(s, prev, float(values[i]), False)
                 self.open[s] = [raw[i].tobytes(), int(actions[i]), float(logps[i]), float(values[i]), int(seeds[i]),
                                 0.0, None, -1, 0.0, False]
+                self.born[s] = self.rollout_index
                 self.decisions[s] += 1
                 pos[s] = i
             cls = batch["aux_opp_class"]
@@ -220,9 +307,49 @@ class FastCollector:
             self._receive(b)
             self.ready[w] = b
 
+    def drain(self) -> None:
+        """End of an on-policy rollout: receive every in-flight batch, then close each open learner transition whose
+        side has its next decision waiting, with the current actor's value of that decision as the bootstrap (those
+        decisions stay `ready` and are acted afresh by the next rollout's actor)."""
+        t0 = time.time()
+        while self.in_flight:
+            for w, b in self.env.poll(1.0):
+                self.in_flight.discard(w)
+                self._receive(b)
+                self.ready[w] = b
+        picks = []  # (batch, row) of learner decisions that close an open transition
+        for b in self.ready.values():
+            for i in np.flatnonzero(b.needs_action):
+                s = int(b.slot[i])
+                if s in self.open and self._opponent(s) is None:
+                    picks.append((b, i, s))
+        if picks:
+            raw = np.concatenate([self._pack(b, np.array([i])) for b, i, _ in picks])
+            n = len(picks)
+            batch = {k: raw[:, off:off + nb].copy().view(dtype).reshape(n, *shape)
+                     for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.model_keys}
+            batch["drop_seed"] = (self.rng.integers(1, 2 ** 62, n, dtype=np.int64) if self.id_dropout
+                                  else np.zeros(n, np.int64))
+            _, _, values, _ = self.act_fn(batch)
+            for (_, _, s), v in zip(picks, values):
+                self._close(s, self.open.pop(s), float(v), False)
+            self.drained += n
+        self.drain_s += time.time() - t0
+
+    def rollout_stats(self) -> dict[str, float]:
+        """Per-rollout collector diagnostics (reset by `take`): share of transitions acted in an earlier rollout,
+        share closed by the end-of-rollout bootstrap, seconds spent draining."""
+        n = max(self.n_closed, 1)
+        return {"perf/fastenv_stale_frac": self.stale / n, "perf/fastenv_drained_frac": self.drained / n,
+                "perf/fastenv_drain_s": self.drain_s}
+
     def take(self) -> tuple[dict, list[dict]]:
+        self.last_stats = self.rollout_stats()
         segs, eps = self.segments, self.episodes
         self.segments, self.episodes, self.n_closed = defaultdict(list), [], 0
+        self.stale = self.drained = 0
+        self.drain_s = 0.0
+        self.rollout_index += 1
         return segs, eps
 
     def run(self, rollout: int, requests: threading.Semaphore, out: queue.Queue, stop: threading.Event) -> None:
@@ -235,6 +362,8 @@ class FastCollector:
                     self.step()
                 if stop.is_set():
                     break
+                if self.on_policy:
+                    self.drain()
                 segs, eps = self.take()
                 out.put((segs, eps, time.time() - start))
         except BaseException as e:
