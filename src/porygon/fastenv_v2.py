@@ -77,8 +77,8 @@ def add_args(add: Callable) -> None:
 def build_env(args, seed: int | None = None) -> FastWorkers:
     """FastWorkers(FastEnv) for porygon.v2.train args (format, shaping, n_battles / pool_battles and the --fastenv-*
     flags). Workers default to the usable CPUs - 2 (the trainer's main and collector threads). Pool battles: the
-    first round(B * share) battles of every worker; each new one is a baseline bot (env-side heuristic / max_power,
-    uniform) with p_baseline or while the pool is empty, else a snapshot (FastCollector(p_baseline=...))."""
+    first round(B * share) battles of every worker; each new one draws its opponent as PoolOpponent (frozen net /
+    env-side heuristic or max_power bot / snapshot: FastCollector(p_frozen=..., p_baseline=...))."""
     import os
     n = args.fastenv_workers or max(1, len(os.sched_getaffinity(0)) - 2)
     total = args.n_battles + args.pool_battles
@@ -89,8 +89,9 @@ def build_env(args, seed: int | None = None) -> FastWorkers:
     env = FastEnv(args.format, n, args.fastenv_battles, seed=seed, encoder="v2", shaping=tuple(args.shaping),
                   dyn_bots="heuristic,max_power" if pool else "")
     env.restart_dead = True  # a crashed worker is replaced (its battles start over) instead of ending training
-    print(f"fastenv: {n} workers x {args.fastenv_battles} battles ({pool} pool battles per worker: baseline bot "
-          f"with p {args.p_baseline} or while the pool is empty, else a snapshot), seed {seed}", flush=True)
+    print(f"fastenv: {n} workers x {args.fastenv_battles} battles ({pool} pool battles per worker: frozen net with p "
+          f"{getattr(args, 'p_frozen', 0.0)}, baseline bot with p {args.p_baseline}, else a snapshot), seed {seed}",
+          flush=True)
     return FastWorkers(env, pool_per_worker=pool)
 
 
