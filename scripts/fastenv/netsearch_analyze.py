@@ -178,6 +178,22 @@ def analyse(NS, rows):
         table.append(row)
     out["margins"] = table
 
+    # V1: the network as a prior at weight w (pick = argmax share + w * p, as porygon.search.combine), from search A
+    v1 = []
+    for w in (0.1, 0.25, 0.5, 1.0):
+        row = {"w": w}
+        picks = [NS.search_pick(p["A"], p["mask"], p["probs"], w) for p in per]
+        row["pick_eq_net_argmax"] = float(np.mean([pk == p["arg"] for pk, p in zip(picks, per)]))
+        row["pick_ne_search"] = float(np.mean([pk != p["sA"] for pk, p in zip(picks, per)]))
+        for k in ("B", "R"):
+            vals = [p["X"][k].q[pk] - p["X"][k].q[p["sA"]] for pk, p in zip(picks, per) if k in p["X"]]
+            if vals:
+                m, se, n = mean_se(vals)
+                row[f"judge_{k}_minus_search"] = m
+                row[f"judge_{k}_se"] = se
+        v1.append(row)
+    out["prior_weight"] = v1
+
     # PUCT arm: how the network's priors move the search
     sub = [p for p in per if "P" in p["X"]]
     if sub:
@@ -230,7 +246,7 @@ def fmt(x):
 def report(name, s):
     print(f"== {name}: {s.get('positions')} positions, {s.get('usable')} usable, legal {fmt(s.get('legal_mean', 0))}, "
           f"forced {fmt(s.get('kind_forced_share', 0))}")
-    for k in ("agree", "gap_A_when_disagree_argmax", "noise", "puct", "value_head", "visits", "timing"):
+    for k in ("agree", "gap_A_when_disagree_argmax", "noise", "prior_weight", "puct", "value_head", "visits", "timing"):
         if k in s:
             print(f"  {k}: " + json.dumps(s[k], default=fmt))
     if "margins" in s:
