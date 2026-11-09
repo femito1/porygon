@@ -91,6 +91,7 @@ def main():
         Tb = float(Ts[int(np.argmin(kls))])
         st = {"entropy": float(H.mean()), "entropy_over_max": float(np.mean(H[nleg >= 2] / np.log(nleg[nleg >= 2]))),
               "logit_std": float(np.nanmean(std)), "top_gap": float(np.nanmean(gap)),
+              "p_top_ge_0.9": float(np.mean(p.max(1) >= 0.9)),
               "mass_all": dict(zip(names, mass)), "mass_voluntary": dict(zip(names[:3], massv)),
               "rel_logit": dict(zip(names[:3], relc)), "T_star": Tb, "KL_ref_to_ck": kl(p, p_ref),
               "KL_after_T": float(min(kls)), "top1_eq_ref": float(np.mean(p.argmax(1) == p_ref.argmax(1))),
