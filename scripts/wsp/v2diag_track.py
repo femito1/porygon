@@ -53,12 +53,26 @@ def main():
     ap.add_argument("--collapse", action="store_true",
                     help="also flag collapse: entropy < ref - 0.6, P(top>=0.9) > max(3 x ref, 0.4), voluntary switch < ref / 2")
     ap.add_argument("--auc-min-step", type=float, default=0, help="no value-AUC flag before this step (fresh value head)")
+    ap.add_argument("--absolute", default="",
+                    help="from-scratch runs: only absolute flags, e.g. 'ent_min=0.5,top_max=0.6,status_max=0.35,switch_min=0.05'")
+    ap.add_argument("--flag-min-step", type=float, default=0, help="no flags before this step")
     ap.add_argument("--since", default="0000", help="segment start, 'YYYY-MM-DD HH:MM:SS' as in train.log")
     a = ap.parse_args()
     d = json.load(open(a.decay))[a.ckpt]
     s = json.load(open(a.switch))[a.ckpt]
     fl = []
     r = json.load(open(a.decay)).get(a.ref) if a.ref else None
+    if a.absolute:
+        lim = {k: float(v) for k, v in (kv.split("=") for kv in a.absolute.split(","))}
+        if d["entropy"] < lim.get("ent_min", -1):
+            fl.append(f"COLLAPSE entropy {d['entropy']:.2f} < {lim['ent_min']}")
+        if d["p_top_ge_0.9"] > lim.get("top_max", 9):
+            fl.append(f"COLLAPSE P(top>=0.9) {d['p_top_ge_0.9']:.2f} > {lim['top_max']}")
+        if d["mass_voluntary"]["status"] > lim.get("status_max", 9):
+            fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {lim['status_max']}")
+        if d["mass_voluntary"]["switch"] < lim.get("switch_min", -1):
+            fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < {lim['switch_min']}")
+        r = None  # no reference-relative flags for a from-scratch run (the reference only feeds the KL / top-1 columns)
     st_thr = a.status_abs if r is None else max(a.status_abs, r["mass_voluntary"]["status"] + 0.10)
     if d["mass_voluntary"]["status"] > st_thr:
         fl.append(f"voluntary status mass {d['mass_voluntary']['status']:.2f} > {st_thr:.2f}")
@@ -78,6 +92,8 @@ def main():
             fl.append(f"voluntary switch mass {d['mass_voluntary']['switch']:.2f} < half the ref's {sw:.2f}")
     if r is not None and a.step >= a.auc_min_step and d["value_auc"] < r["value_auc"] - a.auc_drop:
         fl.append(f"value AUC {d['value_auc']:.3f} < ref {r['value_auc']:.3f} - {a.auc_drop}")
+    if a.step < a.flag_min_step:
+        fl = [f"(suppressed before {a.flag_min_step / 1e6:.0f}M: {x})" for x in fl]
     mv, ma = d["mass_voluntary"], d["mass_all"]
     row = (f"| {a.step / 1e6:.2f}M | {d['entropy']:.2f} | {d['p_top_ge_0.9']:.2f} | {d['top_gap']:.2f} | "
            f"{mv['switch']:.2f} / {mv['attack']:.2f} / {mv['status']:.2f} | {ma['switch']:.2f} / {ma['attack']:.2f} / {ma['status']:.2f} | "
@@ -93,7 +109,7 @@ def main():
                 f.write(f"| BOUNDARY {btext} |" + " |" * 12 + "\n")
     with open(t, "a") as f:
         f.write(row)
-    if fl:
+    if fl and not fl[0].startswith("(suppressed"):
         with open(a.flags, "a") as f:
             f.write(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%MZ} step {a.step:,}: {'; '.join(fl)}\n")
     print(row.strip())
