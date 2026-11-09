@@ -26,9 +26,13 @@ run() {  # NAME pretrain-args...
   local name=$1; shift
   local out=$C/runs/pretrain/$name
   if [ -f "$out/final.pt" ]; then echo "skip $name (final.pt exists)"; return 0; fi
+  # one runner per arm (a second step started in parallel skips it); a stale lock after a crash: rmdir it
+  mkdir -p "$C/runs/pretrain"
+  if ! mkdir "$out.lock" 2>/dev/null; then echo "skip $name (locked: $out.lock)"; return 0; fi
   echo "== $(date -u +%H:%M:%S) $name: $*"
   $PY -u -m porygon.v2.pretrain --out "$out" "${COMMON[@]}" "$@" 2>&1 | grep -vE '"event": "train"' | cut -c1-900
   echo "== $(date -u +%H:%M:%S) $name exit ${PIPESTATUS[0]}"
+  rmdir "$out.lock"
 }
 
 # VR rule (pre-registered 02:05, interpretation fixed 04:50): qualifying = final held-out value BCE <= 0.62 and final
@@ -66,6 +70,9 @@ for arm in "$@"; do
     ctrl)
       run g9h-vr-ctrl-s2 --shards "$H" --model-json "$CFG" --epochs 6 --seed 2 ;;
     p2mix)
+      if [ ! -f "$C/runs/pretrain/g9h-vr-c005-s2/final.pt" ] || [ ! -f "$C/runs/pretrain/g9h-vr-1pg-s2/final.pt" ]; then
+        echo "p2mix skipped: both VR arms must be finished first"; continue
+      fi
       # W = N_human_train / (3 N_search_train) over rows with policy-target mass on a legal action
       W=$($PY -I - "$H" "$S" <<'EOF'
 import glob, sys, zlib
