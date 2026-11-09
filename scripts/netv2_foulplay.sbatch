@@ -42,11 +42,14 @@ trap 'kill "${LOOPS[@]}" 2>/dev/null || true; netv2_stop_servers
 netv2_server "$PORT" "$OUT" "$SEED" '^fp'
 netv2_preread "$FP/$FP_VENV" "$FP/fp" "$GLORIA"/.venv/lib/python3.12/site-packages/torch
 netv2_wait_servers
+# gen9 Foul Play needs gloria's gen9 poke-engine build (as gloria's slurm_foulplay.sbatch ran the 11-07 baselines:
+# PYTHONPATH=.engine-gen9:src); gen4 Foul Play uses its own venv's engine (data found this, ws/data 3936649)
+FP_PYTHONPATH=; if [ "$GEN" = 9 ]; then FP_PYTHONPATH=$GLORIA/.engine-gen9:$GLORIA/src; fi
 NAMES=()
 for ((i = 0; i < K; i++)); do
   NAMES+=("fp${SLURM_JOB_ID}x$i")
   # restarted if it exits (e.g. "timed out during handshake" while the server is still slow to start)
-  (cd "$FP" && while true; do PYTHONDONTWRITEBYTECODE=1 PYTHONPATH= "$FP_VENV"/bin/python run.py \
+  (cd "$FP" && while true; do PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$FP_PYTHONPATH" "$FP_VENV"/bin/python run.py \
      --websocket-uri "ws://localhost:$PORT/showdown/websocket" --ps-username "fp${SLURM_JOB_ID}x$i" \
      --bot-mode accept_challenge --pokemon-format "$FORMAT" --search-time-ms 1000 --search-parallelism "$FP_PAR" \
      --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
