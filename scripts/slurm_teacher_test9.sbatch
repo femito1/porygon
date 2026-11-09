@@ -6,7 +6,7 @@
 #   b. pure search 4 x 1000 ms vs pure search 4 x 500 ms
 # Both sides: stock eval, 4 samples. Decision: the label generator moves to the config with the best win-rate gain
 # per CPU-second. If (a) is a clear gain, the next slot use is G9p-prior search vs Foul Play gen9.
-#   sbatch [--dependency=afterany:J] scripts/slurm_teacher_test9.sbatch PRIOR_PT
+#   sbatch [--dependency=afterany:J] scripts/slurm_teacher_test9.sbatch PRIOR_PT|POINTER.txt
 #SBATCH --job-name=ws-data-teacher9
 #SBATCH --partition=long
 #SBATCH --gres=gpu:1
@@ -16,6 +16,8 @@
 #SBATCH --output=/vol/bitbucket/fr1226/porygon-ws-data/logs/slurm-%j.out
 set -uo pipefail
 PRIOR=$1
+# PRIOR may be a .txt pointer file holding the checkpoint path, read at job start (so the "latest" net is used).
+case "$PRIOR" in *.txt) PRIOR=$(grep -v "^#" "$PRIOR" | head -1 | tr -d "[:space:]") ;; esac
 NV=/vol/bitbucket/fr1226/porygon-ws-netv2
 LOG=/vol/bitbucket/fr1226/porygon-ws-data/logs/teacher9-$SLURM_JOB_ID.txt
 [ -f "$PRIOR" ] || { echo "no prior net at $PRIOR" | tee -a "$LOG"; exit 2; }
