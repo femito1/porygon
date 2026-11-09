@@ -60,6 +60,8 @@ EOF
   for c in squeue scontrol srun pkill; do printf '#!/bin/bash\necho "%s $*" >> "$MOCK/other.log"\nexit 0\n' "$c" > "$M/bin/$c"; done
   printf '#!/bin/bash\n# long sleeps fail at once (ends the job script'"'"'s background while-sleep loops)\ncase $1 in 0*|1|2|3|4) exec /bin/sleep "$1";; esac\nexit 1\n' > "$M/bin/sleep"
   printf '#!/bin/bash\necho "${SLURM_CPUS_ON_NODE:-30}"\n' > "$M/bin/nproc"
+  # nvidia-smi: the GPU memory a scenario writes to $MOCK/gpu_mib (none: fails, like a node without a working GPU)
+  printf '#!/bin/bash\n[ -f "$MOCK/gpu_mib" ] || exit 9\ncat "$MOCK/gpu_mib"\n' > "$M/bin/nvidia-smi"
   chmod +x "$M"/bin/*
 }
 at() { touch -d "2026-11-$1" "${@:2}"; }  # at 'DD HH:MM' files...
@@ -114,15 +116,15 @@ calls() { c=$(cat "$M/calls.log" 2>/dev/null); printf '  trainer calls:\n%s\n' "
 stubs; export MOCK=$M
 T=$M/tmp
 echo "== S1: r1 fresh job after 718701, post-swap (MODE g9p = G9p on the A30), restart flag armed"
-tree post; job r1 900001 30 a30 ws-netv2-r1 restart; calls
+tree post; echo 24576 > "$M/gpu_mib"; job r1 900001 30 a30 ws-netv2-r1 restart; calls
 expect "S1 resumes the newest mirrored G9p file (post-swap segment)" "^call resume=.*/20261108-220401-718701/G9p/final_model.pt \[G9p-postswap-final\]" "$(sed -n 1p <<< "$c")"
 expect "S1 G9p lineage dirs" "run_dir=$T/ws-netv2-900001/run/G9p pool_dir=$T/ws-netv2-900001/run/G9p/pool" "$(sed -n 1p <<< "$c")"
 expect "S1 pool (3) + frozen (2) + best/ema re-seeded" "pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"
 expect "S1 restart in place relaunches from the lineage's own save" "^call resume=.*/run/G9p/final_model.pt \[trained-from:G9p-postswap-final\]" "$(sed -n 2p <<< "$c")"
-expect "S1 G9p recipe on the A30 (KL anchor, 28 workers, cache 96, stacked-opp)" "kl-anchor-coef 0.1 .*fastenv-workers 28 .*--snapshot-cache 96 --stacked-opp" "$(cat "$M/job-900001.out")"
+expect "S1 G9p recipe on the A30 (KL anchor, 28 workers, cache 192, stacked-opp)" "kl-anchor-coef 0.1 .*fastenv-workers 28 .*--snapshot-cache 192 --stacked-opp" "$(cat "$M/job-900001.out")"
 expect "S1 no resubmission (chain_left 0)" "^$" "$(cat "$M/sbatch.log" 2>/dev/null)"
 echo "== S2: g9 fresh job after 741849, post-swap (MODE g9s = G9s on the A16), restart flag armed, chain_left 1"
-tree post; echo 1 > "$M/nv2/runs/g9/chain_left"; job g9 900002 10 a16 ws-netv2-g9 restart; calls
+tree post; echo 15356 > "$M/gpu_mib"; echo 1 > "$M/nv2/runs/g9/chain_left"; job g9 900002 10 a16 ws-netv2-g9 restart; calls
 expect "S2 resumes the newest mirrored G9s file (post-swap, not the pre-swap A30 segment)" "^call resume=.*/20261109-021316-741849/G9s/final_model.pt \[G9s-postswap-final\]" "$(sed -n 1p <<< "$c")"
 expect "S2 G9s lineage dirs" "run_dir=$T/ws-netv2-900002/run/G9s pool_dir=$T/ws-netv2-900002/run/G9s/pool" "$(sed -n 1p <<< "$c")"
 expect "S2 pool (3) + frozen (2) + best/ema re-seeded" "pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"
@@ -134,6 +136,13 @@ if [ -z "$OLD" ]; then
 else
   echo "  (old spooled script: its bare chain sbatch cannot carry flags; keep chain_left 0 and queue the successor by hand)"
 fi
+echo "== S2b: the successors on an a40 (46068 MiB): G9p cache 640; G9s cache 512 + stacked-opp; no nvidia-smi: A30 / A16 values"
+tree post; echo 46068 > "$M/gpu_mib"; job r1 900011 30 a40 ws-netv2-r1 restart; calls
+expect "S2b G9p on an a40: cache 640 + stacked-opp" "fastenv-workers 28 .*--snapshot-cache 640 --stacked-opp" "$(cat "$M/job-900011.out")"
+tree post; echo 46068 > "$M/gpu_mib"; job g9 900012 10 a40 ws-netv2-g9 restart; calls
+expect "S2b G9s on an a40: cache 512 + stacked-opp, 8 workers" "fastenv-workers 8 .*--snapshot-cache 512 --stacked-opp" "$(cat "$M/job-900012.out")"
+tree post; rm -f "$M/gpu_mib"; job g9 900013 10 a16 ws-netv2-g9 restart; calls
+expect "S2b G9s, GPU unknown: the A16 value (72, no stacked-opp)" "fastenv-workers 8 .*--snapshot-cache 72 --resume" "$(cat "$M/job-900013.out")"
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
 expect "S3 r1 resumes the newest G9s file" "^call resume=.*/20261108-220401-718701/G9s/final_model.pt \[G9s-preswap-final\] run_dir=$T/ws-netv2-900003/run/G9s .*pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"

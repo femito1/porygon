@@ -62,7 +62,7 @@ check 4d "--resume $ROOTM/local-A16/run/G9/final_model.pt$" "$o"
 fresh; echo g9p > "$N/runs/r1/MODE"; echo g9s > "$N/runs/g9/MODE"
 handover "$N/runs/g9/handover-g9p-a30" "$ROOTM/local-A16/run/G9"; handover "$N/runs/r1/handover-g9s-a16" "$ROOTM/local-A30/run/G9s"
 o=$(src r1 A30); check 5a "kl-anchor-coef 0.1" "$o"; check 5b "fastenv-workers 28" "$o"; check 5c "--run-dir $ROOTM/local-A30/run/G9p --pool-dir $ROOTM/local-A30/run/G9p/pool" "$o"
-check 5d "--resume $N/runs/g9/handover-g9p-a30/final_model.pt$" "$o"; check 5e "guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5" "$o"; check 5g "--snapshot-cache 96 --stacked-opp --resume" "$o"
+check 5d "--resume $N/runs/g9/handover-g9p-a30/final_model.pt$" "$o"; check 5e "guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5" "$o"; check 5g "--snapshot-cache 192 --stacked-opp --resume" "$o"
 [ -f "$ROOTM/local-A30/run/G9p/pool/00015000000.pt" ] && [ -f "$ROOTM/local-A30/run/G9p/pool/frozen/best-00005016943.pt" ] && [ "$(cat $ROOTM/local-A30/run/G9p/best_model.pt)" = g9p-best ] && [ -f "$N/runs/r1/G9P_A30_STARTED" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 5f: G9p seed"; }
 o=$(src g9 A16); check 6a "guard-anchor-drop 0.10 --guard-entropy-rel 1.5 --guard-entropy-min 0.3" "$o"; check 6b "fastenv-workers 8 " "$o"; checkno 6c "kl-anchor" "$o"; check 6g "--snapshot-cache 72 --resume" "$o"
 check 6d "--run-dir $ROOTM/local-A16/run/G9s --pool-dir $ROOTM/local-A16/run/G9s/pool" "$o"; check 6e "--resume $N/runs/r1/handover-g9s-a16/final_model.pt$" "$o"
@@ -70,6 +70,11 @@ check 6d "--run-dir $ROOTM/local-A16/run/G9s --pool-dir $ROOTM/local-A16/run/G9s
 echo g9p-a30-final > "$ROOTM/local-A30/run/G9p/final_model.pt"; echo g9s-a16-final > "$ROOTM/local-A16/run/G9s/final_model.pt"
 o=$(src r1 A30); check 7a "--resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"; check 7b "--run-dir $ROOTM/local-A30/run/G9p " "$o"
 o=$(src g9 A16); check 8a "--resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"; check 8b "--run-dir $ROOTM/local-A16/run/G9s " "$o"
+# 7c-8e (2026-11-09 evening): the opponent cache follows the GPU's memory (NV2_GPU_MIB; unset + no nvidia-smi = A30 / A16)
+o=$(NV2_GPU_MIB=24576 src r1 A30); check 7c "--snapshot-cache 192 --stacked-opp --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"
+o=$(NV2_GPU_MIB=46068 src r1 A30); check 7d "--snapshot-cache 640 --stacked-opp --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"; checkno 7e "snapshot-cache 192" "$o"
+o=$(NV2_GPU_MIB=15356 src g9 A16); check 8c "--snapshot-cache 72 --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"; checkno 8d "stacked-opp" "$o"
+o=$(NV2_GPU_MIB=46068 src g9 A16); check 8e "--snapshot-cache 512 --stacked-opp --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"
 # 9-10: first guard trips after the swap use each lineage's own fallback
 echo "eval score 40.0% < best 60.0% - 15 points for 2 evals" > "$ROOTM/local-A30/run/G9p/GUARD_TRIPPED"; echo g9p-best2 > "$ROOTM/local-A30/run/G9p/best_model.pt"
 o=$(src r1 A30); check 9a "--lr 3.5e-5" "$o"; check 9b "--resume $N/runs/g9a30/fu-start-best.pt$" "$o"; check 9c "^2 " "$(cat $N/runs/g9a30/FU.started)"
