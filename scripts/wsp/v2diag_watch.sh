@@ -11,9 +11,11 @@ WANT=5702969
 START=$(cat $D/START 2>/dev/null || echo 9999999999)
 SEGS=(--trainlog "$NV2/r1/20261108-220401-718701/train.log|2026-11-09 01:12:12|2026-11-09 03:14:57"
       --trainlog "$NV2/g9/20261109-021316-741849/train.log|2026-11-09 03:11:58|9999")
-for f in $(ls $NV2/r1/pool/*.pt $NV2/g9/pool/*.pt 2>/dev/null); do
+# pool snapshots land in runs/<run>/pool/ or, since the swap, in the job dirs' pool<gen>/ (runs/g9/...741849/pool4/)
+for f in $(ls $NV2/r1/pool/*.pt $NV2/g9/pool/*.pt $NV2/*/2*/pool*/*.pt 2>/dev/null); do
   [ $(stat -c %Y $f) -le $START ] && continue
-  b=$(basename $f .pt); st=$((10#$b)); key=$st; [[ $f == */g9/pool/* ]] && key=g9p_$st
+  b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st; [[ $f == */g9/pool/* ]] && key=g9p_$st
+  [[ $f == */2*/pool*/* ]] && key=$(basename $(dirname $f))_$(basename $(dirname $(dirname $f)) | grep -o "[0-9]*$")_$st
   [ -e $D/out/$key/done ] || [ -e $D/out/$key/skip ] && continue
   sleep 30
   mkdir -p $D/out/$key

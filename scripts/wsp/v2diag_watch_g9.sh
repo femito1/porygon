@@ -17,9 +17,11 @@ SEGS=(--trainlog "$NV2/g9/20261109-021316-741849/train.log|2026-11-09 02:13:02|2
       --trainlog "$NV2/r1/20261108-220401-718701/train.log|2026-11-09 03:14:57|9999")
 if [ -n "$REF" ]; then
   cp --update=none $REF $D/ck/ref.pt
-  for f in $(ls $NV2/g9/pool/*.pt $NV2/r1/pool/*.pt 2>/dev/null); do
+  # pool snapshots land in runs/<run>/pool/ or, since the swap, in the job dirs' pool<gen>/ (runs/r1/...718701/pool9/)
+  for f in $(ls $NV2/g9/pool/*.pt $NV2/r1/pool/*.pt $NV2/*/2*/pool*/*.pt 2>/dev/null); do
     [ $(stat -c %Y $f) -le $START ] && continue
-    b=$(basename $f .pt); st=$((10#$b)); key=$st; [[ $f == */r1/pool/* ]] && key=r1p_$st
+    b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st; [[ $f == */r1/pool/* ]] && key=r1p_$st
+    [[ $f == */2*/pool*/* ]] && key=$(basename $(dirname $f))_$(basename $(dirname $(dirname $f)) | grep -o "[0-9]*$")_$st
     [ -e $D/out/$key/done ] || [ -e $D/out/$key/skip ] && continue
     sleep 30
     mkdir -p $D/out/$key
