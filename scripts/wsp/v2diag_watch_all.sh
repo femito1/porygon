@@ -11,6 +11,10 @@ if squeue -h -u $USER -o %j | grep -q -E "^ws-netv2-(g9|r1)" && [ "$others" = "0
 else
   echo "not resubmitting (netv2 jobs gone, or $others other wsp tracker job(s) pending)"
 fi
+# one-off analyses ride along in the same job (one wsp job on long): v2diag/oneshot/*.sh run once, then are moved
+for o in $(ls v2diag/oneshot/*.sh 2>/dev/null); do
+  echo "#### oneshot $o $(date -u +%H:%M)"; mkdir -p v2diag/oneshot/done; mv $o v2diag/oneshot/done/; bash v2diag/oneshot/done/$(basename $o)
+done
 for c in v2diag/conf/g9s.conf v2diag/conf/g9p.conf v2diag/conf/r1b.conf; do
   echo "#### $c $(date -u +%H:%M)"
   NO_CHAIN=1 bash scripts/wsp/v2diag_watch_any.sh $c
