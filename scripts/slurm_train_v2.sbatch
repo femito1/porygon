@@ -39,8 +39,14 @@ set -euo pipefail
 ROOT=$SLURM_SUBMIT_DIR; cd "$ROOT"
 RUN_NAME=${1:?usage: sbatch scripts/slurm_train_v2.sbatch RUN_NAME [porygon.v2.train args]}; shift
 case $RUN_NAME in */*|.*|"") echo "bad RUN_NAME '$RUN_NAME'" >&2; exit 2;; esac
+# The node-local run dir is known before netv2.env is first sourced, so a fresh job (requeue / successor) runs the
+# lineage logic there at its first launch (it used to see no LOCAL: no lineage dirs, a stale resume file, empty pool).
+LOCAL=${TMPDIR:-/tmp}/ws-netv2-$SLURM_JOB_ID; mkdir -p "$LOCAL/run" "$LOCAL/pool"
 [ -f netv2.env ] && source netv2.env
 PY=${PY:-/vol/bitbucket/fr1226/gloria/.venv/bin/python}
+# a resubmission asks for this job's own resources (a bare sbatch got the #SBATCH defaults: a30, 30 CPUs, 96G)
+RESUB=(--job-name="$SLURM_JOB_NAME" --partition="$SLURM_JOB_PARTITION" --gres=gpu:1 --cpus-per-task="${SLURM_CPUS_ON_NODE:-30}"
+       --mem="${SLURM_MEM_PER_NODE:-98304}M" --time=72:00:00)
 export PATH=${NODE_BIN:-/vol/bitbucket/fr1226/gloria/.node/bin}:$PATH
 export PYTHONPATH=$ROOT/src${PYTHONPATH:+:$PYTHONPATH}
 export OMP_NUM_THREADS=1
@@ -49,7 +55,7 @@ if ! "$PY" -c "import torch, porygon.v2.train; assert torch.cuda.is_available();
   # a node with a broken GPU (seen: CUDA unknown error): resubmit the same run elsewhere, excluding this node
   EXCL=$(hostname -s)${SLURM_JOB_EXC_NODES:+,$SLURM_JOB_EXC_NODES}
   echo "no usable CUDA on $(hostname -s): resubmitting $RUN_NAME excluding $EXCL" >&2
-  sbatch --job-name="$SLURM_JOB_NAME" --partition="$SLURM_JOB_PARTITION" --exclude="$EXCL" scripts/slurm_train_v2.sbatch "$RUN_NAME" "$@"
+  sbatch "${RESUB[@]}" --exclude="$EXCL" scripts/slurm_train_v2.sbatch "$RUN_NAME" "$@"
   exit 1
 fi
 [ -f pokemon-showdown/package.json ] || { echo "no Showdown checkout at $ROOT/pokemon-showdown" >&2; exit 1; }
@@ -129,7 +135,7 @@ if [ -n "${POOL_SEED:-}" ] && [ -z "$(ls -A "$RUNS/pool" 2>/dev/null || true)" ]
 fi
 echo "run $RUN_NAME job $SLURM_JOB_ID on $(hostname): $FORMAT, resuming from ${LATEST:-scratch}, $SELFPLAY self-play + $POOL_BATTLES pool battles, ports $BASE-$LAST"
 
-LOCAL=${TMPDIR:-/tmp}/ws-netv2-$SLURM_JOB_ID; mkdir -p "$LOCAL/run" "$LOCAL/pool"
+mkdir -p "$LOCAL/run" "$LOCAL/pool"  # LOCAL was set before netv2.env (top)
 export TORCHINDUCTOR_CACHE_DIR=$LOCAL/inductor
 # pool copied in the background, newest first (cp -p keeps the mtimes PoolOpponent's "recent" picks use); until
 # snapshots arrive, pool battles fall back to the baseline bots (the pool directory is re-listed every battle)
@@ -172,10 +178,11 @@ while true; do
   TRAIN=$!
   RC=0
   while kill -0 "$TRAIN" 2>/dev/null; do wait "$TRAIN" && RC=0 || RC=$?; done
-  if [ "$STOPPED" = 0 ] && [ -f "$RUNS/restart" ] && [ -f "$LOCAL/run/final_model.pt" ]; then
+  if [ "$STOPPED" = 0 ] && [ -f "$RUNS/restart" ] && { [ -f "$LOCAL/run/final_model.pt" ] || ls "$LOCAL"/run/*/final_model.pt > /dev/null 2>&1; }; then
     rm -f "$RUNS/restart"
     [ -f netv2.env ] && source netv2.env
     LATEST=$LOCAL/run/final_model.pt
+    [ -f "$LATEST" ] || LATEST=$(ls -t "$LOCAL"/run/*/final_model.pt 2>/dev/null | head -n 1 || true)
     echo "$(date -u +%T) restart in place from $LATEST with TRAIN_ARGS='${TRAIN_ARGS:-}'" | tee -a "$LOCAL/run/train.log"
     continue
   fi
@@ -190,7 +197,7 @@ fi
 # --- continue in a new job (72 h walltime) unless the chain is used up or training is done ---
 STEPS=$({ grep -oE "steps [0-9,]+ \(" "$LOCAL/run/train.log" 2>/dev/null || true; } | tail -1 | tr -dc 0-9)
 LEFT=$(cat "$RUNS/chain_left" 2>/dev/null || echo 0)
-if [ "${LEFT:-0}" -gt 0 ] && [ -f "$JOB_DIR/final_model.pt" ] && [ "${STEPS:-0}" -lt "$TOTAL" ]; then
+if [ "${LEFT:-0}" -gt 0 ] && { [ -f "$JOB_DIR/final_model.pt" ] || ls "$JOB_DIR"/*/final_model.pt > /dev/null 2>&1; } && [ "${STEPS:-0}" -lt "$TOTAL" ]; then
   echo $(( LEFT - 1 )) > "$RUNS/chain_left"
-  sbatch scripts/slurm_train_v2.sbatch "$RUN_NAME" "$@"
+  sbatch "${RESUB[@]}" scripts/slurm_train_v2.sbatch "$RUN_NAME" "$@"
 fi
