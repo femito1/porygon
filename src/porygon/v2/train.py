@@ -12,7 +12,10 @@ one update old; the stored log-probs keep the importance ratio exact), `--no-ove
 `--collector fastenv` collects from fastenv instead (`porygon.fastenv_v2`: Showdown's simulator in-process in Node
 workers, the v2 encoder in JS at parity with `porygon.v2.encoder`; no servers or poke-env workers; `--ports` is then
 only needed for the in-training evaluation). With `--no-overlap` it is strictly on-policy (end-of-rollout bootstrap,
-no carry-over of transitions acted by the previous weights); with overlap use `--decoupled`.
+no carry-over of transitions acted by the previous weights); with overlap use `--decoupled`. `--stacked-opp` (off by
+default): the pool opponents acting in one fastenv collector step share one forward when they have the same
+architecture (`porygon.v2.stacked`: weights stacked, rows folded per net; logits equal the per-net forward's up to
+float rounding), instead of one launch-bound forward per opponent.
 
 Loss (per minibatch): clipped PPO surrogate (advantages normalised per minibatch) − ent_coef · entropy
 + zero_avoid_coef · (−mean log π over legal actions: Jaxcalibur's KL to uniform) + vf_coef · BCE(win prob,
@@ -686,6 +689,10 @@ def parse_args(argv=None):
     a("--compile", action=argparse.BooleanOptionalAction, default=None,
       help="torch.compile the damage layer (default: on CUDA); falls back to eager if compilation fails")
     a("--snapshot-cache", type=int, default=8, help="pool snapshot opponents kept on the device")
+    a("--stacked-opp", action="store_true",
+      help="--collector fastenv: the pool opponents of one collector step share one forward when they have the same "
+           "architecture (weights stacked, porygon.v2.stacked; ~one forward's kernel launches instead of one "
+           "forward per opponent; logits equal up to float rounding); others and failed loads as without it")
     a("--seed", type=int, default=None)
     # model (ignored with --resume: the checkpoint's cfg is used)
     a("--d-model", type=int, default=DEFAULT_CFG["d_model"])
@@ -852,14 +859,18 @@ class Trainer:
             self.actor.compile_damage()
         self.snapshots: dict[str, Net] = {}  # pool snapshot opponents on the device (LRU)
         self.pool_loads = PoolLoads()  # their loads (attempts / failures), checked after every update
+        self.opp_stacks: dict = {}  # --stacked-opp: architecture signature -> porygon.v2.stacked.OppStack
         if args.collector == "fastenv":
             from porygon.fastenv_v2 import FastCollector
             self.collector = FastCollector(self.workers.env, self.packer, self._act, self._opp_act,
                                            id_dropout=self.net.cfg["id_dropout"] > 0, seed=args.seed,
                                            pool_per_worker=self.workers.pool_per_worker, pool_dir=self.pool_dir,
                                            p_baseline=args.p_baseline, p_frozen=args.p_frozen,
-                                           on_policy=args.no_overlap)
+                                           on_policy=args.no_overlap,
+                                           opp_fn_many=self._opp_act_many if args.stacked_opp else None)
         else:
+            if args.stacked_opp:
+                print("warning: --stacked-opp only applies to --collector fastenv; ignored", flush=True)
             self.collector = Collector(self.workers, self.packer, self._act, self._opp_act,
                                        id_dropout=self.net.cfg["id_dropout"] > 0, stall_seconds=args.stall_seconds,
                                        seed=args.seed)
@@ -877,6 +888,9 @@ class Trainer:
         if self.distill is not None:
             self.log(f"distill: {self.distill.summary()}; coef {args.distill_coef}, batch {args.distill_batch}, "
                      f"reload every {args.distill_reload_every} updates (0 = never)")
+        if args.stacked_opp and args.collector == "fastenv":
+            self.log("stacked-opp: same-architecture pool opponents share one forward per collector step "
+                     "(perf/col_opp_fwds = forwards, perf/col_opp_fwd_nets = opponents served)")
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
@@ -903,6 +917,12 @@ class Trainer:
         """Sampled actions of pool snapshot `name` (cached on the device; uniform over legal actions if it cannot
         be loaded). Collector thread: every load (cache miss) and failure is only recorded in `self.pool_loads`;
         the main loop logs the failures and trips the pool guard after each update (`_pool_alarm`)."""
+        net = self._opp_net(name)
+        return self._opp_sample(None if net is None else self._opp_logits(net, batch), batch)
+
+    def _opp_net(self, name: str) -> Net | None:
+        """`_opp_act`'s net for `name`: the cached one (moved to most recently used), else loaded (recorded in
+        `self.pool_loads`, the least recently used evicted when the cache is full); None if it cannot be loaded."""
         net = self.snapshots.pop(name, None)
         if net is None:
             name = self._rotated(name)
@@ -921,17 +941,82 @@ class Trainer:
                 self.pool_loads.record(name, path)
             if len(self.snapshots) >= self.args.snapshot_cache:
                 self.snapshots.pop(next(iter(self.snapshots)))
-        mask = torch.from_numpy(batch["action_mask"]) > 0
-        if net is None:
-            logits = torch.where(mask, 0.0, torch.finfo(torch.float32).min)
-        else:
+        if net is not None:
             self.snapshots[name] = net  # most recently used last
-            t = batch_to_tensors(batch, self.device, keys=model_keys(self.gen) + ["drop_seed"])
-            with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
-                logits = net(t, aux=False)["logits"].float().cpu()
+        return net
+
+    @torch.no_grad()
+    def _opp_logits(self, net: Net, batch: dict) -> torch.Tensor:
+        """One pool net's float32 CPU logits on its decision batch (one forward)."""
+        t = batch_to_tensors(batch, self.device, keys=model_keys(self.gen) + ["drop_seed"])
+        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
+            return net(t, aux=False)["logits"].float().cpu()
+
+    @staticmethod
+    def _opp_sample(logits: torch.Tensor | None, batch: dict) -> np.ndarray:
+        """Actions sampled from the logits (None: uniform over the legal actions; no legal action: uniform)."""
+        mask = torch.from_numpy(batch["action_mask"]) > 0
+        if logits is None:
+            logits = torch.where(mask, 0.0, torch.finfo(torch.float32).min)
         probs = torch.softmax(logits, -1)
         probs = torch.where(mask.any(-1, keepdim=True), probs, torch.full_like(probs, 1.0 / probs.shape[-1]))
         return torch.multinomial(probs, 1).squeeze(1).numpy()
+
+    @torch.no_grad()
+    def _opp_act_many(self, items: list[tuple[str, dict]]) -> tuple[list[np.ndarray], dict[str, float]]:
+        """--stacked-opp (fastenv collector): `_opp_act` for all the pool opponents of one collector step, items =
+        [(name, batch), ...] with distinct names. Nets are looked up / loaded / evicted / recorded exactly as by
+        `_opp_act` called per item in order; the loaded nets with the same architecture (`porygon.v2.stacked.
+        signature`: gen, cfg, shapes) share one stacked forward (`OppStack`, cached per architecture: slots
+        refilled only for nets new to it, released when a net leaves the snapshot cache), the rest take
+        `_opp_logits`, a net that cannot be loaded plays uniformly. Then each item samples as `_opp_act` does, in
+        order (same distributions; the CPU generator's draws differ from per-item calls only around a cache miss,
+        since loads now precede all draws). Returns the actions per item and counters for the collector's
+        perf/col_*: opp_fwds (device forwards, a stacked one counts once), opp_stacked_fwds / opp_stacked_nets,
+        opp_stack_refills, opp_uniform. A stacked forward that raises (e.g. out of memory) is noted in the log once
+        and the run continues with per-net forwards (opp_stack_errors)."""
+        from porygon.v2.stacked import OppStack, signature
+        stacks = self.__dict__.setdefault("opp_stacks", {})  # signature -> OppStack
+        nets = [self._opp_net(name) for name, _ in items]
+        groups: dict[tuple, list[int]] = {}
+        for i, net in enumerate(nets):
+            if net is not None:
+                groups.setdefault(signature(net), []).append(i)
+        logits: list[torch.Tensor | None] = [None] * len(items)
+        st = dict.fromkeys(("opp_fwds", "opp_stacked_fwds", "opp_stacked_nets", "opp_stack_refills"), 0)
+        st["opp_uniform"] = sum(net is None for net in nets)
+        cap = max(2, self.args.snapshot_cache)  # nets per stacked forward (bounds an OppStack's slots)
+        for sig, idx in groups.items():
+            for c in range(0, len(idx), cap):
+                chunk = idx[c:c + cap]
+                if len(chunk) > 1 and not self.__dict__.get("opp_stack_off"):
+                    try:
+                        stack = stacks.get(sig)
+                        if stack is None:
+                            stack = stacks[sig] = OppStack(nets[chunk[0]])
+                        with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
+                            out, refills = stack.logits([nets[i] for i in chunk], [items[i][1] for i in chunk])
+                    except Exception as e:  # the speed-up must not stop training: per-net forwards from now on
+                        self.__dict__["opp_stack_off"] = True
+                        stacks.clear()
+                        st["opp_stack_errors"] = 1
+                        self.pool_loads.note(("stacked-opp",), f"--stacked-opp: the stacked forward failed ({e!r:.300}"
+                                                               "); per-net opponent forwards from now on")
+                    else:
+                        for i, lg in zip(chunk, out):
+                            logits[i] = lg
+                        st["opp_fwds"] += 1
+                        st["opp_stacked_fwds"] += 1
+                        st["opp_stacked_nets"] += len(chunk)
+                        st["opp_stack_refills"] += refills
+                        continue
+                for i in chunk:
+                    logits[i] = self._opp_logits(nets[i], items[i][1])
+                    st["opp_fwds"] += 1
+        live = {id(net) for net in self.snapshots.values()}
+        for sig in [s for s, stack in stacks.items() if not stack.release(live)]:
+            del stacks[sig]  # none of its nets is cached any more: free its weights
+        return [self._opp_sample(lg, batch) for lg, (_, batch) in zip(logits, items)], st
 
     def _rotated(self, name: str) -> str:
         """`name`, unless it is a frozen/best-*.pt that --frozen-best replaced while a battle still plays it (the file
