@@ -15,7 +15,7 @@ PYTHONPATH=$ROOT/combo/src $PY scripts/fastenv/compare_runs.py runs/g9smoke-fe-o
 echo "$(date -u +%T) persample done"
 export PYTHONPATH=$ROOT/src OMP_NUM_THREADS=1 PORYGON_PS=$G/pokemon-showdown PORYGON_NODE=$G/.node/bin/node PATH=$G/.node/bin:$PATH
 W=runs/gapW-${SLURM_JOB_ID:-x}; mkdir -p $W
-$PY -m porygon.train --fastenv 5x48 --fastenv-lockstep --fastenv-wait-rows --format gen4randombattle --total-steps 52000000 \
+$PY -m porygon.train --fastenv 5x48 --fastenv-lockstep --format gen4randombattle --total-steps 52000000 \
   --max-hours 1.0 --eval-every 0 --checkpoint-every 2500000 --run-dir $W > $W/train.log 2>&1
 echo "$(date -u +%T) L-W exit $?"
 $PY scripts/fastenv/tb_scalars.py $W time/fps train/explained_variance train/entropy_loss train/clip_fraction train/approx_kl

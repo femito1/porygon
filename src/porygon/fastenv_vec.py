@@ -5,10 +5,12 @@ action is ignored. Episodes auto-reset (SB3 convention: the returned obs of a do
 first observation; info["terminal_observation"] holds the last one). For plain `stable_baselines3.PPO` and for
 checking the async path (`fastenv_sb3.FastBattles` + AsyncPPO) against SB3's own rollout code.
 
-With `FastEnv(wait_rows=True)` the wait observation is poke-env's exactly: the waiting side's *current* observation
-and the reward since its previous step (host.js WAIT rows, parity-checked against poke-env at every wait point).
-Without it the wait step repeats the side's previous observation with reward 0 and the reward arrives one step
-later (an approximation that under-credits the KO-ing decision by ~γλ).
+With `FastEnv(wait_rows=True)` (what `porygon.train --fastenv-lockstep` uses) the wait observation is poke-env's
+exactly: the waiting side's *current* observation and the reward since its previous step (host.js WAIT rows,
+parity-checked against poke-env at every wait point). Without it the wait step repeats the side's previous observation
+with reward 0 and the reward arrives one step later: that under-credits the KO-ing decision by ~γλ and was the whole
+~11-point gap of diag 2's lockstep arm to the Oct-19 run (gap Test 1, 2026-11-09: with wait rows 48.7% ± 2.3 vs the
+Oct-19 run at 2.5M, 58.5% ± 2.2 vs the stale-wait arm).
 """
 
 from __future__ import annotations
