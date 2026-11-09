@@ -607,6 +607,8 @@ def parse_args(argv=None):
     a("--clip-range", type=float, default=0.1)
     a("--guard-anchor-drop", type=float, default=0.0, help="stop when the eval score is this far below its best twice")
     a("--guard-entropy-max", type=float, default=0.0, help="stop when the policy entropy exceeds this for 5 updates")
+    a("--guard-pg-mean", type=int, default=0,
+      help="stop when the PPO surrogate pg averaged over the last N updates of this process is > 0 (0 = off)")
     a("--guard-entropy-min", type=float, default=0.0,
       help="collapse guard: stop when the policy entropy is below this for 5 updates")
     a("--guard-ptop-max", type=float, default=0.0,
@@ -1021,6 +1023,12 @@ class Trainer:
                     self.ent_bad = getattr(self, "ent_bad", 0) + 1 if st.get("loss/ent", 0.0) > cap else 0
                     if self.ent_bad >= 5:
                         self.trip_guard(f"entropy > {cap:.3f} for 5 updates")
+                # guard: the PPO surrogate (before each minibatch's own step) positive on average over the last N
+                # updates = the updates no longer follow the advantages (R1's failure signature)
+                if a.guard_pg_mean > 0 and not heads_only and "loss/pg" in st:
+                    self.pg_hist = (getattr(self, "pg_hist", []) + [st["loss/pg"]])[-a.guard_pg_mean:]
+                    if len(self.pg_hist) == a.guard_pg_mean and float(np.mean(self.pg_hist)) > 0:
+                        self.trip_guard(f"pg mean {np.mean(self.pg_hist):+.5f} > 0 over {a.guard_pg_mean} updates")
                 # collapse guards (two-sided entropy control): entropy below --guard-entropy-min, or the share of
                 # near-deterministic choices above --guard-ptop-max, for 5 updates in a row; not during the warm-up
                 if updates_here > 5 and not heads_only:
