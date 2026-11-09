@@ -135,3 +135,12 @@ def test_own_engine_pool():
     spec = NS.load_spec("netsearch:x.pt,margin=0.02,workers=3,own_pool=0", net_loader=lambda path, device: FakeNet(),
                         battle_format=fmt, start_listening=False)
     assert spec.pool is shared and spec.margin == 0.02
+
+
+def test_paired_difference(tmp_path):
+    block(tmp_path, 1, 1, [(1, 1), (1, 0), (0, 0)], name="paone")
+    block(tmp_path, 2, 1, [(1, 0), (1, 0), (1, 1), (0, 0)], name="patwo")  # one more pair than arm 1
+    r = SL.paired(tmp_path, 1, 2)
+    assert r["pairs"] == 3 and r["only_b"] == 1
+    assert r["diff"] == pytest.approx(((1 - 0.5) + (0.5 - 0.5) + (0 - 1)) / 3)
+    assert r["mean_a"] == pytest.approx(0.5) and r["mean_b"] == pytest.approx(2 / 3)

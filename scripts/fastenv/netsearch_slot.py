@@ -8,6 +8,7 @@ server's battles.jsonl, the client's results.jsonl / summary.json / evaluate.log
 
     python netsearch_slot.py look RUN K --blocks-max B [--futility 0.5]   # exit 20: arm K stops (futility)
     python netsearch_slot.py report RUN [--json OUT] [--go 0.515] [--tie 0.01] [--void-fallbacks 0.02]
+    python netsearch_slot.py paired RUN K1 K2 [--json OUT]   # Stage 3 Q3: arm K1 - arm K2 per team pair
     python netsearch_slot.py fake DIR --games N --p P --a NAME --seed TAG  # dry runs: synthetic block logs
 
 Scoring is netv2's (porygon.v2.evaluate.pair_means / interval, checked equal in tests/test_netsearch_slot.py): a pair
@@ -221,6 +222,36 @@ def format_report(r: dict) -> str:
     return "\n".join(lines)
 
 
+def pair_table(run: Path, arm: int) -> dict[tuple[int, int], float]:
+    """{(block number, pair id): pair mean} of one arm: block j of every arm is seeded TAG b<j>, so the same key is
+    the same team pair in every arm."""
+    out = {}
+    for b in blocks_of(run, arm):
+        results = load_jsonl(b / "results.jsonl")
+        ours = {norm_id(r.get("a")) for r in results} - {""}
+        by_pair: dict[int, dict[int, dict]] = defaultdict(dict)
+        for row in load_jsonl(b / "battles.jsonl"):
+            if {norm_id(row.get("p1")), norm_id(row.get("p2"))} & ours:
+                by_pair[int(row["pair"])][int(row["game"])] = row
+        j = int(b.name.split("-")[1])
+        for i, pr in by_pair.items():
+            if len(pr) == 2 and 0 in pr and 1 in pr:
+                out[(j, i)] = (game_score(pr[0].get("winner"), ours) + game_score(pr[1].get("winner"), ours)) / 2
+    return out
+
+
+def paired(run: Path, a: int, b: int) -> dict:
+    """Arm a minus arm b on the team pairs both completed: mean difference of pair means +- 1.96 sd / sqrt(n)."""
+    ta, tb = pair_table(run, a), pair_table(run, b)
+    keys = sorted(set(ta) & set(tb))
+    d = [ta[k] - tb[k] for k in keys]
+    m, hw = interval(d)
+    ma, _ = interval([ta[k] for k in keys])
+    mb, _ = interval([tb[k] for k in keys])
+    return {"arms": [a, b], "pairs": len(keys), "only_a": len(set(ta) - set(tb)), "only_b": len(set(tb) - set(ta)),
+            "mean_a": ma, "mean_b": mb, "diff": m, "hw": hw, "lo": m - hw, "hi": m + hw}
+
+
 # ---------------------------------------------------------------- dry runs
 
 def fake(out: Path, games: int, p: float, name: str, seed: str, opp: str = "pbfake") -> None:
@@ -258,6 +289,11 @@ def main() -> int:
     rp.add_argument("--go", type=float, default=0.515)
     rp.add_argument("--tie", type=float, default=0.01)
     rp.add_argument("--void-fallbacks", type=float, default=0.02)
+    pd = sub.add_parser("paired")
+    pd.add_argument("run", type=Path)
+    pd.add_argument("a", type=int)
+    pd.add_argument("b", type=int)
+    pd.add_argument("--json", type=Path)
     fk = sub.add_parser("fake")
     fk.add_argument("out", type=Path)
     fk.add_argument("--games", type=int, required=True)
@@ -274,6 +310,13 @@ def main() -> int:
         print(format_report(r))
         if a.json:
             a.json.write_text(json.dumps(r, indent=1, default=str) + "\n")
+        return 0
+    if a.cmd == "paired":
+        r = paired(a.run, a.a, a.b)
+        print(f"arm {a.a} - arm {a.b} on {r['pairs']} common team pairs: {r['diff']:+.1%} ± {r['hw']:.1%} "
+              f"(arm {a.a} {r['mean_a']:.1%}, arm {a.b} {r['mean_b']:.1%}; unmatched {r['only_a']} / {r['only_b']})")
+        if a.json:
+            a.json.write_text(json.dumps(r, indent=1) + "\n")
         return 0
     fake(a.out, a.games, a.p, norm_id(a.a), a.seed)
     return 0
