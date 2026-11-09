@@ -29,6 +29,12 @@ Options added for the value refit and search-label arms (2026-11-09):
   on the previous one: each part is a uniform random subset of the training rows and every row is seen exactly once
   per epoch, as with the in-memory loader (whose exact order it does not reproduce). Memory ≈ 2 parts + validation.
   Weight-0 sets are never read beyond their validation rows. 0 (default) = everything in memory, as before.
+- `--stream-parts shards` (2026-11-09, with `--stream-gb`): a part is a random set of WHOLE shards (shard order
+  permuted every epoch, cut into the same number of parts) with its training rows shuffled within the part, so each
+  shard is decompressed once per epoch instead of once per part (the default `rows` plan inflates every shard for
+  every part: 9 parts = 9x the decompression and NFS reads). Only for the shuffled layout (CONTRACTS.md: each
+  training shard is a uniform random sample of the training rows), checked from each set's meta.json; every
+  training row is still seen exactly once per epoch, and the value-row selection is unchanged.
 """
 
 import argparse
@@ -90,19 +96,35 @@ def is_val(game: np.ndarray, frac: float) -> np.ndarray:
     return (h % 10_000) < frac * 10_000
 
 
+def check_shuffled(paths: list[str]) -> None:
+    """`--stream-parts shards` needs shards that are uniform random samples of the training rows: data's shuffled
+    layout (meta.json `layout: shuffled` next to the shards, CONTRACTS.md). Refuses anything else."""
+    for d in sorted({str(Path(q).parent) for q in paths}):
+        try:
+            layout = json.loads((Path(d) / "meta.json").read_text()).get("layout")
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"--stream-parts shards: no readable {d}/meta.json ({e}); use --stream-parts rows")
+        if layout != "shuffled":
+            raise SystemExit(f"--stream-parts shards: {d} has layout {layout!r}, not 'shuffled'; use --stream-parts rows")
+
+
 class StreamSource:
     """`--stream-gb`: the same rows, split, weights and validation sets as `load_sets` + `is_val`, without holding the
     training rows in memory. Per row only (shard, row in shard, game, set, weight) is kept; validation rows are
     assembled once (`vdata`, `val_sets`: indices into it per set name, as in the in-memory path)."""
 
-    def __init__(self, primary: str, mix: list[str], gen: int, val_frac: float, part_gb: float, seed: int):
-        self.gen = gen
+    def __init__(self, primary: str, mix: list[str], gen: int, val_frac: float, part_gb: float, seed: int,
+                 parts: str = "rows"):
+        assert parts in ("rows", "shards"), parts
+        self.gen, self.parts = gen, parts
         specs = [(primary, 1.0)] + [(m.rsplit(":", 1)[0], float(m.rsplit(":", 1)[1])) for m in mix]
         self.paths, sid, row, game, src, weight = [], [], [], [], [], []
         self.names, self.counts = [], []
         for i, (g, wt) in enumerate(specs):
             paths = sorted(glob.glob(g))
             assert paths, f"no shards match {g}"
+            if parts == "shards":
+                check_shuffled(paths)
             for q in paths:
                 with np.load(q) as z:  # only the small per-row arrays are decompressed here
                     gm = z["game"].astype(np.int64)
@@ -129,6 +151,10 @@ class StreamSource:
         self.row_bytes = row_bytes
         self.passes = max(1, math.ceil(len(self.train_rows) * row_bytes / (part_gb * 2**30)))
         self.rng = np.random.default_rng([seed, 7_919])  # loader thread's own stream (permutations, value rows)
+        # --stream-parts shards: the training rows of each shard that has any (global row ids, in shard row order)
+        s_tr = self.sid[self.train_rows]
+        cut = np.flatnonzero(np.diff(s_tr)) + 1  # train_rows is sorted and row ids are grouped by shard
+        self.shard_train = [r for r in np.split(self.train_rows, cut) if len(r)]
 
     def assemble(self, rows: np.ndarray) -> dict[str, np.ndarray]:
         """Arrays of `rows` (global row ids) in that order, as `load_sets` would give them (weights with the set
@@ -165,8 +191,13 @@ class StreamSource:
                 first = sh[np.unique(self.game_codes[sh], return_index=True)[1]]
                 vsel = np.zeros(self.n_rows, np.float32)
                 vsel[first] = 1.0
-            perm = self.rng.permutation(self.train_rows)
-            for rows in np.array_split(perm, self.passes):
+            if self.parts == "shards":  # whole shards per part, rows shuffled within the part
+                order = self.rng.permutation(len(self.shard_train))
+                plan = [self.rng.permutation(np.concatenate([self.shard_train[i] for i in grp]))
+                        for grp in np.array_split(order, min(self.passes, len(order))) if len(grp)]
+            else:
+                plan = np.array_split(self.rng.permutation(self.train_rows), self.passes)
+            for rows in plan:
                 yield rows, (vsel[rows] if vsel is not None else None)
 
     def batches(self, bs: int, device, rng: np.random.Generator, one_per_game: bool, prefetch: int = 1):
@@ -286,7 +317,11 @@ def main():
     p.add_argument("--no-bf16", action="store_true", help="fp32 (+TF32) instead of bf16 autocast")
     p.add_argument("--stream-gb", type=float, default=0.0,
                    help="streaming loader with parts of about this many GiB (0 = every shard in memory)")
+    p.add_argument("--stream-parts", choices=("rows", "shards"), default="rows",
+                   help="streaming parts: random rows (every shard inflated per part) or random whole shards "
+                        "(each shard inflated once per epoch; shuffled-layout sets only)")
     args = p.parse_args()
+    assert args.stream_parts == "rows" or args.stream_gb > 0, "--stream-parts shards needs --stream-gb"
 
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -303,11 +338,13 @@ def main():
 
     stream = None
     if args.stream_gb > 0:  # only a row index + the validation rows in memory; `data` = the validation rows
-        stream = StreamSource(args.shards, args.mix, args.gen, args.val_frac, args.stream_gb, args.seed)
+        stream = StreamSource(args.shards, args.mix, args.gen, args.val_frac, args.stream_gb, args.seed,
+                              parts=args.stream_parts)
         data, names, counts = stream.vdata, stream.names, stream.counts
         train_idx, val_sets = stream.train_rows, stream.val_sets
         n_dec, n_games = stream.n_rows, len(np.unique(stream.game))
-        extra = {"stream": {"passes": stream.passes, "row_bytes": stream.row_bytes,
+        extra = {"stream": {"passes": stream.passes, "row_bytes": stream.row_bytes, "parts": stream.parts,
+                            "train_shards": len(stream.shard_train),
                             "part_gib": round(len(train_idx) * stream.row_bytes / stream.passes / 2**30, 2)}}
     else:
         # every shard in memory once (shards are compressed npz; a v2 decision is ~12 KB uncompressed)

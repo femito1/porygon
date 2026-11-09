@@ -155,3 +155,87 @@ def test_main_runs_in_both_modes(tmp, monkeypatch):
         assert vals and all(np.isfinite(r["policy_ce"]) for r in vals)
         assert {"val/a/policy_ce", "val/b/policy_ce"} <= set(vals[-1])
         assert (out / "final.pt").exists() and (out / "best.pt").exists()
+
+
+def mark_shuffled(tmp, dirs=("p", "a", "b")):
+    for d in dirs:
+        (tmp / d / "meta.json").write_text(json.dumps({"layout": "shuffled"}))
+
+
+def test_stream_shard_parts_whole_shards_once_per_epoch(tmp, monkeypatch):
+    """--stream-parts shards: every training row once per epoch, each part = the training rows of whole shards
+    (rows shuffled within it), each shard decompressed once per epoch, value rows as in the row plan."""
+    primary, mix = make_sets(tmp)
+    mark_shuffled(tmp)
+    s = StreamSource(primary, mix, GEN, 0.2, part_gb=1e-9, seed=3, parts="shards")
+    n_sh = len(s.shard_train)
+    assert n_sh == 4  # primary 3 + mix A 1 (mix B has weight 0: no training rows)
+    s.passes = 3  # 4 shards into 3 parts
+    loads = []
+    orig = pretrain.load_shard
+    monkeypatch.setattr(pretrain, "load_shard", lambda path, gen: (loads.append(path), orig(path, gen))[1])
+    sid_of = {int(r): int(s.sid[r]) for r in s.train_rows}
+    train_of = {int(s.sid[r[0]]): set(r.tolist()) for r in s.shard_train}  # shard id -> its training rows
+    plans = s.plans(one_per_game=True)
+    for epoch in range(2):
+        rows_ep, shards_ep = [], []
+        for _ in range(3):
+            rows, vs = next(plans)
+            shards = {sid_of[int(r)] for r in rows}
+            for sh in shards:  # whole shards: all of a touched shard's training rows are in this part
+                assert train_of[sh] <= set(rows.tolist())
+            shards_ep.append(shards)
+            rows_ep.append(rows)
+            assert vs is not None and len(vs) == len(rows)
+        allr = np.concatenate(rows_ep)
+        assert np.array_equal(np.sort(allr), s.train_rows)  # every training row exactly once
+        assert sum(len(x) for x in shards_ep) == n_sh  # parts touch disjoint shard sets
+    # rows are shuffled within a part (not in shard row order)
+    assert any(not np.array_equal(r, np.sort(r)) for r in rows_ep)
+    # assembling one epoch's parts decompresses each training shard once
+    loads.clear()
+    for _ in range(3):
+        rows, _ = next(plans)
+        s.assemble(rows)
+    assert len(loads) == len(set(loads)) == n_sh
+
+
+def test_stream_shard_parts_batches_cover_epoch(tmp):
+    primary, mix = make_sets(tmp)
+    mark_shuffled(tmp)
+    s = StreamSource(primary, mix, GEN, 0.2, part_gb=1e-9, seed=4, parts="shards")
+    s.passes = 2
+    train_tags = np.sort(tags_of(s.assemble(s.train_rows)))
+    it = s.batches(7, torch.device("cpu"), np.random.default_rng(0), one_per_game=True)
+    seen, left = [], len(s.train_rows)
+    while left > 0:
+        t = next(it)["field_num"][:, 0].long().numpy()
+        seen.append(t)
+        left -= len(t)
+    assert left == 0 and np.array_equal(np.sort(np.concatenate(seen)), train_tags)
+    it.close()
+
+
+def test_stream_shard_parts_refuses_unshuffled(tmp):
+    primary, mix = make_sets(tmp)
+    with pytest.raises(SystemExit, match="meta.json"):
+        StreamSource(primary, mix, GEN, 0.2, part_gb=1e-9, seed=0, parts="shards")
+    mark_shuffled(tmp, dirs=("p", "a"))
+    (tmp / "b" / "meta.json").write_text(json.dumps({"layout": "source"}))
+    with pytest.raises(SystemExit, match="not 'shuffled'"):
+        StreamSource(primary, mix, GEN, 0.2, part_gb=1e-9, seed=0, parts="shards")
+
+
+def test_main_runs_with_shard_parts(tmp, monkeypatch):
+    primary, mix = make_sets(tmp)
+    mark_shuffled(tmp)
+    out = tmp / "out-shards"
+    argv = ["pretrain", "--shards", primary, "--mix", mix[0], "--gen", str(GEN), "--out", str(out), "--model-json",
+            json.dumps(TINY), "--epochs", "2", "--batch-size", "16", "--warmup", "2", "--eval-every", "5",
+            "--val-frac", "0.2", "--device", "cpu", "--no-bf16", "--stream-gb", "1e-9", "--stream-parts", "shards",
+            "--value-sample", "one-per-game"]
+    monkeypatch.setattr(sys, "argv", argv)
+    pretrain.main()
+    recs = [json.loads(x) for x in (out / "pretrain.log").read_text().splitlines()]
+    assert recs[0]["stream"]["parts"] == "shards" and recs[0]["stream"]["train_shards"] == 4
+    assert (out / "final.pt").exists()
