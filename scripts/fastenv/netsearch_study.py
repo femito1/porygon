@@ -10,6 +10,9 @@ battles with data's StreamReplayer (vendored read-only copy, vendor/SOURCES.txt)
          fresh search A, optional retest B (fresh, same settings), reference R (more samples x longer) and PUCT P,
          plus the original game's logged search when the record has one -> one JSON line per position
          (analysis: netsearch_analyze.py).
+  rescore  the same positions and searches with another network: replays each row of a `run` output (--rows) to its
+         decision and replaces only the network's probabilities and P(win). Pure search does not depend on the net,
+         so two nets compare on identical positions and searches.
 
     cd $C && PORYGON_GEN=9 PYTHONPATH=$G/.engine-gen9:$C/src $PY scripts/fastenv/netsearch_study.py check \
         --records "$D/datasets/searchlabels/records/gen9randombattle/part-*.jsonl.gz" --net NET.pt --positions 12
@@ -247,9 +250,37 @@ async def run(a, NS, S, R, gen: int) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- rescore
+
+async def rescore(a, NS, S, R, gen: int) -> int:
+    import numpy as np
+    import torch
+    torch.set_num_threads(1)
+    net = load_net(a.net, a.device)
+    rows = [json.loads(line) for line in open(a.rows) if line.strip()]
+    want: dict[str, dict[int, dict]] = {}
+    for r in rows:
+        want.setdefault(r["rec"], {})[r["idx"]] = r
+    recs = [r for r in records(a.records, a.source, a.seed) if r["id"] in want]
+    out, n = open(a.out, "w"), 0
+    for rec in recs:
+        async for d, battle, first, logged in replay_targets(rec, R, NS, gen, set(want[rec["id"]])):
+            row = dict(want[rec["id"]][d.msg])
+            probs, mask, win = NS.net_forward(net, battle)
+            assert (np.array(row["mask"]) > 0).tolist() == (mask > 0).tolist(), f"mask changed at {rec['id']}@{d.msg}"
+            row["probs"] = [round(float(x), 6) for x in probs]
+            row["win"] = round(win, 5)
+            row["net"] = a.net
+            out.write(json.dumps(row) + "\n")
+            n += 1
+    out.close()
+    print(f"rescored {n} of {len(rows)} rows with {a.net} -> {a.out}")
+    return 0 if n == len(rows) else 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=["check", "run"])
+    p.add_argument("mode", choices=["check", "run", "rescore"])
     p.add_argument("--records", nargs="+", required=True, help="F2 record files (globs)")
     p.add_argument("--source", help="only records whose source contains this (e.g. a run's job id)")
     p.add_argument("--net", required=True, help="v2 checkpoint")
@@ -266,12 +297,16 @@ def main() -> int:
     p.add_argument("--concurrency", type=int, default=2, help="records in flight")
     p.add_argument("--device", default="cpu")
     p.add_argument("--out")
+    p.add_argument("--rows", help="rescore: a run output whose positions and searches are kept")
     a = p.parse_args()
     NS, S, R = setup(a.format)
     gen = int(re.match(r"gen(\d+)", a.format).group(1))
     if a.mode == "run":
         assert a.out, "--out"
         return asyncio.run(run(a, NS, S, R, gen))
+    if a.mode == "rescore":
+        assert a.out and a.rows, "--rows and --out"
+        return asyncio.run(rescore(a, NS, S, R, gen))
     return asyncio.run(check(a, NS, S, R, gen))
 
 
