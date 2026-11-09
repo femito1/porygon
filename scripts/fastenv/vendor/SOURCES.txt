@@ -1,0 +1,2 @@
+Read-only copies of other streams' modules, byte-identical to their source (never edited here):
+- data_replay.py = ws/data src/porygon/replay.py at 4ff8d71 (md5 3714b925bbda1aa26f07bbf59cdda97f, same as $D/code on 2026-11-09).
