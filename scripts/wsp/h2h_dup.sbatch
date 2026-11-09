@@ -1,7 +1,7 @@
 #!/bin/bash
 # Duplicate-pair raw-network head-to-heads: every MODEL A_i vs the reference B, one duplicate Showdown server
 # (gloria's .showdown-eval, run read-only, never rebuilt) and one pairing process per A_i, all in parallel.
-#   sbatch --partition=long -c 24 scripts/wsp/h2h_dup.sbatch N_BATTLES B A1 [A2 ...]   (an arg A@B2 uses reference B2)
+#   sbatch --partition=training -c 24 scripts/wsp/h2h_dup.sbatch N_BATTLES B A1 [A2 ...]   (an arg A@B2 uses reference B2)
 # Output: $WSP/out/h2h/<job>/<name>/{battles.jsonl,log.txt}; summary.txt (duplicate-pair 95% CIs).
 #SBATCH --job-name=ws-wsp-h2h
 #SBATCH --cpus-per-task=24

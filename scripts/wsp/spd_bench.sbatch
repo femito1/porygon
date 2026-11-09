@@ -6,7 +6,7 @@
 # spd_h2h.sbatch shards 0-3), A/A 500M vs 500M, 500M at temperature 0.5 vs 500M (should equal 500M_temp05).
 # Showdown: SD_PAIRINGS x (500M_temp05 vs 500M), SD_GAMES games each, all in parallel. CPU = the job cgroup's usage.
 #SBATCH --job-name=ws-wsp-spdbench
-#SBATCH --partition=long
+#SBATCH --partition=training
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

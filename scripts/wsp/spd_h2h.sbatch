@@ -9,7 +9,7 @@
 # $WSP/spd/netv2-<commit>/src), random; B also heuristic | max_power. Relative paths are relative to $WSP.
 # Throughput (8 CPUs = 7 workers x 48 battles + this process, one T4/A16): see .orchestra/wsp/STATUS.md "spd".
 #SBATCH --job-name=ws-wsp-spd
-#SBATCH --partition=long
+#SBATCH --partition=training
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24G
