@@ -85,3 +85,35 @@ def test_env_side_bot_battles():
             sides |= {(int(s) // 2, int(s) % 2) for s in b.slot}
             b = env.step(random_actions(b.mask[b.needs_action], rng))
         assert {(0, 1), (1, 1)}.isdisjoint(sides) and {(2, 1), (3, 1), (0, 0)} <= sides
+
+
+def test_wait_rows():
+    """WAIT rows (wait_rows=True): only for a side without a decision in that batch, mask = action 0, and they only
+    move rewards earlier: same seeds and actions give the same battles and the same per-slot reward sums."""
+    from porygon.fastenv import WAIT, FastEnv, random_actions
+
+    sums, waits = {}, {}
+    for wr in (False, True):
+        rng = np.random.default_rng(0)
+        total, run = np.zeros(2 * 6), np.zeros(2 * 6)
+        n_wait = 0
+        with FastEnv("gen4randombattle", 1, 6, seed=3, encoder="v1", wait_rows=wr) as env:
+            b = env.reset()
+            for _ in range(400):
+                w = (b.flags & WAIT) > 0
+                if w.any():
+                    n_wait += int(w.sum())
+                    dec = set(b.slot[b.needs_action].tolist())
+                    assert not dec & set(b.slot[w].tolist()), "a WAIT row for a side that decides"
+                    m = b.mask[w]
+                    assert m[:, 0].all() and not m[:, 1:].any(), "wait mask = action 0 only"
+                    assert np.abs(b.obs[w]).sum() > 0, "wait rows carry the current observation"
+                for i in range(len(b)):  # completed episodes only (a cut-off episode may end on a WAIT row)
+                    run[b.slot[i]] += b.reward[i]
+                    if b.flags[i] & 2:
+                        total[b.slot[i]] += run[b.slot[i]]
+                        run[b.slot[i]] = 0.0
+                b = env.step(random_actions(b.mask[b.needs_action], rng))
+        sums[wr], waits[wr] = total, n_wait
+    assert waits[False] == 0 and waits[True] > 0
+    np.testing.assert_allclose(sums[True], sums[False], atol=1e-5)

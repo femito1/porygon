@@ -152,6 +152,8 @@ def main():
     p.add_argument("--seed", type=int, default=0, help="--fastenv team/battle seed")
     p.add_argument("--fastenv-lockstep", action="store_true",
                    help="--fastenv through SB3's lockstep PPO (fastenv_vec.FastVecEnv) instead of AsyncPPO")
+    p.add_argument("--fastenv-wait-rows", action="store_true",
+                   help="--fastenv-lockstep with poke-env's exact wait steps (fresh obs + reward; host.js WAIT rows)")
     p.add_argument("--autocast", choices=["bf16"], help="async PPO: bf16 autocast in the update (~1.4x on A16)")
     p.add_argument("--overlap-update", action="store_true",
                    help="with --async-envs: keep battles running during the PPO update (data <= 1 update old)")
@@ -200,7 +202,9 @@ def main():
         from porygon.fastenv_sb3 import FastBattles
         assert not args.pool_battles, "--fastenv is self-play only (pool opponents: not yet)"
         n_workers, per_worker = map(int, args.fastenv.lower().split("x"))
-        fast = FastEnv(args.format, n_workers, per_worker, seed=args.seed, shaping=tuple(args.shaping))
+        fast = FastEnv(args.format, n_workers, per_worker, seed=args.seed, shaping=tuple(args.shaping),
+                       wait_rows=args.fastenv_wait_rows)
+        assert not args.fastenv_wait_rows or args.fastenv_lockstep, "--fastenv-wait-rows needs --fastenv-lockstep"
         args.n_battles = n_workers * per_worker  # --ports: only for --eval-every
         if args.fastenv_lockstep:  # SB3's own rollout code over poke-env-style lockstep sub-envs (fastenv_vec)
             from porygon.fastenv_vec import FastVecEnv

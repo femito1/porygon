@@ -155,6 +155,7 @@ class Stats:
     def __init__(self):
         self.battles = self.decisions = self.obs_bad = self.mask_bad = self.choice_bad = self.value_bad = 0
         self.heur = self.heur_bad = 0
+        self.waits = self.wait_bad = self.waits_missing = 0  # wait points (host.js --wait-rows)
         self.final_bad = self.align_bad = self.crash_both = self.crash_bad = 0
         self.slots = Counter()
         self.kinds = Counter()  # protocol coverage: message kinds (and a few effect/ability markers) seen
@@ -173,6 +174,7 @@ def check_side(rec, s, side, st: Stats, limit: int):
     battle = Battle(tag, username, logging.getLogger("parity"), gen=gen)
     handle(battle, f"|init|battle\n|title|p1 vs. p2\n|j|☆p1\n|j|☆p2")
     decs = side["dec"]
+    waits = {w["e"]: w for w in side.get("wait", [])}
     k = 0
     py_crash = None
     for i, (kind, text) in enumerate(side["ev"]):
@@ -193,6 +195,26 @@ def check_side(rec, s, side, st: Stats, limit: int):
             break
         if side["crash"] and side["crash"]["e"] == i:
             break
+        if i in waits:  # host.js --wait-rows: the waiting side's row = poke-env's wait step (obs, mask, reward state)
+            w = waits.pop(i)
+            st.waits += 1
+            if not battle._wait:
+                st.wait_bad += 1
+                st.note(f"{tag} p{s + 1} ev {i}: JS wait row but poke-env is not waiting", limit)
+            else:
+                obs = enc.embed_battle(battle)
+                js = dense(w["obs"])
+                bad = np.flatnonzero(np.abs(obs - js) > 1e-6 * np.maximum(1.0, np.abs(obs)))
+                mask = SinglesEnv.get_action_mask(battle)
+                v = state_value(battle)
+                if len(bad) or mask != w["mask"] or abs(v - w["v"]) > 1e-9:
+                    st.wait_bad += 1
+                    st.note(f"{tag} p{s + 1} ev {i} wait: obs slots " + ", ".join(
+                        f"{j}:{SLOTS[j]} py={obs[j]:.6g} js={js[j]:.6g}" for j in bad[:6])
+                        + f" mask {mask == w['mask']} value py={v} js={w['v']}", limit)
+        elif kind == "R" and battle._wait and not decision and "wait" in side:
+            st.waits_missing += 1
+            st.note(f"{tag} p{s + 1} ev {i}: poke-env waits, no JS wait row", limit)
         if not decision:
             continue
         if k >= len(decs) or decs[k]["e"] != i:
@@ -266,6 +288,8 @@ def report(st: Stats, label: str) -> bool:
     print(f"  obs mismatching decisions {st.obs_bad}, mask {st.mask_bad}, action->choice {st.choice_bad}, "
           f"state value {st.value_bad}, final value {st.final_bad}, alignment {st.align_bad}, "
           f"crash mismatches {st.crash_bad} (both-raise {st.crash_both}); heuristic bot {st.heur_bad} of {st.heur}")
+    print(f"  wait points {st.waits}: mismatching {st.wait_bad}, poke-env waits without a JS wait row "
+          f"{st.waits_missing}")
     if st.slots:
         print("  mismatching obs slots (count over decisions x tokens):")
         for k, v in st.slots.most_common(30):
@@ -277,7 +301,7 @@ def report(st: Stats, label: str) -> bool:
     for e in st.examples:
         print("  -", e)
     return not (st.obs_bad or st.mask_bad or st.choice_bad or st.value_bad or st.final_bad or st.align_bad
-                or st.crash_bad or st.heur_bad)
+                or st.crash_bad or st.heur_bad or st.wait_bad or st.waits_missing)
 
 
 def main():

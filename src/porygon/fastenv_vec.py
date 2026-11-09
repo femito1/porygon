@@ -4,6 +4,11 @@ gets a *wait* observation (its last observation, mask = only action 0, like poke
 action is ignored. Episodes auto-reset (SB3 convention: the returned obs of a done sub-env is the next battle's
 first observation; info["terminal_observation"] holds the last one). For plain `stable_baselines3.PPO` and for
 checking the async path (`fastenv_sb3.FastBattles` + AsyncPPO) against SB3's own rollout code.
+
+With `FastEnv(wait_rows=True)` the wait observation is poke-env's exactly: the waiting side's *current* observation
+and the reward since its previous step (host.js WAIT rows, parity-checked against poke-env at every wait point).
+Without it the wait step repeats the side's previous observation with reward 0 and the reward arrives one step
+later (an approximation that under-credits the KO-ing decision by ~γλ).
 """
 
 from __future__ import annotations
@@ -48,6 +53,9 @@ class FastVecEnv(VecEnv):
                 self.obs[s] = b.obs[i]
                 self.mask[s] = b.mask[i]
                 self.pending[s] = True
+            elif b.flags[i] & 16:  # WAIT row (wait_rows): fresh obs, mask = action 0, reward already added
+                self.obs[s] = b.obs[i]
+                self.mask[s] = b.mask[i]
         wait = ~self.pending
         self.mask[wait] = 0
         self.mask[wait, 0] = 1

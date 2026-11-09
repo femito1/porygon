@@ -11,6 +11,8 @@
 //   {format, id, seed, winner, turns, sides: [{ev: [[kind, text], ...], dec: [...], final, crash}, x2]}
 //   ev kind: 'L' log chunk, 'R' request JSON, 'E' error text; dec: {e: index into ev of the triggering event,
 //   obs: [base64 uint16 indices, base64 float32 values], mask: [...], ch: [choice per action], v: state value, a: action}
+//   wait: v1 only, at every request that makes a side wait (the opponent is force-switching): {e, obs, mask, v}
+//   = what host.js --wait-rows emits there (poke-env's wait step: fresh obs, mask = action 0, state value).
 // --bench: no output file; prints timing of tracker updates and encode() only.
 'use strict';
 const fs = require('fs');
@@ -68,7 +70,7 @@ function playBattle(format, id, seed, record) {
   const s4 = () => [0, 0, 0, 0].map(() => Math.floor(rng() * 65536));
   const teams = [Teams.generate(format, {seed: s4()}), Teams.generate(format, {seed: s4()})];
   const gen = parseInt(format[3], 10), nA = E.nActions(gen);
-  const sides = [0, 1].map(s => ({t: new SideTracker({format, side: s}), ev: [], dec: [], final: null, crash: null,
+  const sides = [0, 1].map(s => ({t: new SideTracker({format, side: s}), ev: [], dec: [], wait: [], final: null, crash: null,
     obs: new Float32Array(E.OBS_DIM), mask: new Uint8Array(nA),
     o2: V2 ? E2.allocate(E2.fields(gen), 1) : null, a2: V2 ? E2.allocate(E2.auxFields(gen), 1) : null}));
   const queue = [];
@@ -104,6 +106,7 @@ function playBattle(format, id, seed, record) {
     S.dec.push(d);
     timing.decisions++;
   };
+  const waits = [];
   const drain = () => {
     const due = [];
     while (queue.length) {
@@ -125,11 +128,19 @@ function playBattle(format, id, seed, record) {
         timing.trackNs += process.hrtime.bigint() - t0; timing.trackCalls++;
       }
       if (S.t.decisionPending && kind !== 'L') due.push([s, S.ev.length - 1]);
+      else if (!V2 && kind === 'R' && S.t.wait && !S.t.decisionPending) waits.push([s, S.ev.length - 1]);
     }
     for (const [s, e] of due) {
       if (sides[s].crash || !sides[s].t.decisionPending) continue;
       if (sides[s].ev.length - 1 !== e) throw new Error('events after a decision within one update');
       decide(s, e);
+    }
+    for (const [s, e] of waits.splice(0)) {  // wait points: encoded after the update, as host.js --wait-rows does
+      const S = sides[s];
+      if (S.crash || S.ev.length - 1 !== e || !S.t.wait) continue;
+      E.encode(S.t, S.obs, 0);
+      E.actionMask(S.t, S.mask, 0);
+      if (record) S.wait.push({e, obs: sparse(S.obs), mask: Array.from(S.mask), v: E.stateValue(S.t, SHAPING)});
     }
   };
   b.start();
@@ -160,7 +171,7 @@ function playBattle(format, id, seed, record) {
     for (const d of S.dec) delete d.done;
   }
   return {format, id, seed, winner: b.winner, turns: b.turn, defaults,
-    sides: sides.map(S => ({ev: S.ev, dec: S.dec, final: S.final, crash: S.crash}))};
+    sides: sides.map(S => ({ev: S.ev, dec: S.dec, wait: S.wait, final: S.final, crash: S.crash}))};
 }
 
 function main() {

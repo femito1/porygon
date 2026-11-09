@@ -31,7 +31,7 @@ JS = Path(__file__).resolve().parents[2] / "fastenv" / "js"
 MAGIC, MAGIC_HELLO = 0x50594746, 0x4c454846
 DTYPES = {"f32": "<f4", "i32": "<i4", "u32": "<u4", "i16": "<i2", "u16": "<u2", "u8": "u1", "i8": "i1"}
 SHAPING = (0.05, 0.05, 0.0)  # porygon.env.SHAPING: (fainted, hp, status)
-NEEDS_ACTION, DONE, FIRST, REJECTED = 1, 2, 4, 8
+NEEDS_ACTION, DONE, FIRST, REJECTED, WAIT = 1, 2, 4, 8, 16
 
 
 class Batch:
@@ -99,7 +99,8 @@ def node_binary() -> str:
 
 class Worker:
     def __init__(self, index: int, fmt: str, battles: int, seed: int, encoder: str, shaping, node: str,
-                 max_turns: int, duplicate: bool, bot: str, bot_battles: int, dyn_bots: str = ""):
+                 max_turns: int, duplicate: bool, bot: str, bot_battles: int, dyn_bots: str = "",
+                 wait_rows: bool = False):
         self.index, self.battles = index, battles
         to_child_r, self.to_child = os.pipe()
         self.from_child, from_child_w = os.pipe()
@@ -107,7 +108,7 @@ class Worker:
                "--seed", str(seed), "--encoder", encoder, "--fd-in", str(to_child_r), "--fd-out", str(from_child_w),
                "--shaping", ",".join(map(str, shaping[:3])), "--max-turns", str(max_turns),
                "--duplicate", str(int(duplicate))] + (["--bot", bot, "--bot-battles", str(bot_battles)] if bot else []) \
-            + (["--bots", dyn_bots] if dyn_bots else [])
+            + (["--bots", dyn_bots] if dyn_bots else []) + (["--wait-rows", "1"] if wait_rows else [])
         self.proc = subprocess.Popen(cmd, pass_fds=(to_child_r, from_child_w), stdin=subprocess.DEVNULL)
         os.close(to_child_r)
         os.close(from_child_w)
@@ -203,7 +204,7 @@ class FastEnv:
     def __init__(self, battle_format: str = "gen9randombattle", n_workers: int = 4, battles_per_worker: int = 64,
                  seed: int = 0, encoder: str | None = None, shaping=SHAPING, node: str | None = None,
                  max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0,
-                 dyn_bots: str = ""):
+                 dyn_bots: str = "", wait_rows: bool = False):
         """bot: an env-side baseline ('heuristic' / 'max_power' = poke-env SimpleHeuristicsPlayer /
         MaxBasePowerPlayer, 'random') playing side two of the first bot_battles battles of every worker (those
         sides emit no rows); a comma list ('heuristic,max_power') assigns the bots to workers round-robin
@@ -211,7 +212,9 @@ class FastEnv:
         dyn_bots: bots ('heuristic,max_power') the caller may hand side two of any battle to, one battle at a time,
         by answering that side's row with action -2-k (`bot_action(k)`); the bot then plays the side until the
         battle ends and the side emits no more rows (not even its terminal row). FastCollector uses it for netv2's
-        pool mix."""
+        pool mix.
+        wait_rows: also emit WAIT rows (flag 16, no action) for a side waiting while its opponent decides alone:
+        its current obs (mask = action 0) and reward since its previous row, as poke-env's wait step."""
         encoder = encoder or os.environ.get("PORYGON_FASTENV_ENCODER", "v1")
         self.bots = [b for b in bot.split(",") if b] if bot else []
         self.dyn_bots = [b for b in dyn_bots.split(",") if b]
@@ -221,9 +224,10 @@ class FastEnv:
         self.seed, self.restarts = seed, 0
         self.restart_dead = False  # True: a dead worker is reported in `dead` (and restartable) instead of raising
         self.dead: list[tuple[int, str]] = []
+        self.wait_rows = wait_rows
         self._new_worker = lambda i, s: Worker(i, battle_format, battles_per_worker, s, encoder, shaping, node,
                                                max_turns, duplicate, self.worker_bot(i), self.bot_battles,
-                                               ",".join(self.dyn_bots))
+                                               ",".join(self.dyn_bots), wait_rows)
         self.workers = [self._new_worker(i, seed * 1000 + i) for i in range(n_workers)]
         self.span = 2 * battles_per_worker
         self._pending: dict[int, Batch] = {}  # worker -> batch whose decisions are not answered yet
