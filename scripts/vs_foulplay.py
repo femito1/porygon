@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from functools import partial
 
@@ -41,6 +42,7 @@ from porygon.decisions import LoggedSearchPlayer
 from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args, load_model
 
 log = logging.getLogger("vs_foulplay")
+TIMINGS: list[dict] = []  # per battle: pre-game wait, challenge / start / end times, retries
 
 
 def guard_pool(pool, timeout: float) -> None:
@@ -64,23 +66,129 @@ async def send(player, message: str, room: str = "") -> None:
     await handle_threaded_coroutines(player.ps_client.send_message(message, room), player.ps_client.loop)
 
 
-async def one_battle(player, opp: str, args) -> tuple[str, object]:
+def to_id(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+ROOM_AUTH = re.compile(r"^[^a-z0-9]+")  # userdetails room keys carry the user's room-auth symbol (players: ☆)
+
+
+def battle_rooms(details: dict) -> list[str] | None:
+    """Battle rooms the server lists for a userdetails reply; None if the user is offline."""
+    rooms = details.get("rooms")
+    if not isinstance(rooms, dict):
+        return None
+    return [ROOM_AUTH.sub("", r) for r in rooms if ROOM_AUTH.sub("", r).startswith("battle-")]
+
+
+class ServerQueries:
+    """The Showdown server's view of other users (`/cmd userdetails NAME`, exempt from the chat throttle) for one
+    poke-env player, plus a count of popups (rejected challenges arrive as popups). Hooks the player's websocket
+    message handler, which runs on poke-env's own event-loop thread; this script's loop reads `details`."""
+
+    def __init__(self, player):
+        self.player = player
+        self.details: dict[str, tuple[float, dict]] = {}  # userid -> (monotonic time received, reply)
+        self.popups: list[str] = []
+        self.checked = False  # the opponent's battle room was looked for once during a battle
+        self.blind = False    # ... and the server did not list it: fixed sleeps for this opponent
+        client = player.ps_client
+        handle = client._handle_message
+
+        async def hooked(message: str):
+            if message.startswith("|queryresponse|userdetails|"):
+                try:
+                    d = json.loads(message.split("|", 3)[3])
+                    if isinstance(d, dict):
+                        self.details[to_id(str(d.get("userid") or d.get("id") or ""))] = (time.monotonic(), d)
+                except ValueError:
+                    pass
+                return
+            if message.startswith("|popup|"):
+                self.popups.append(message[7:])
+            await handle(message)
+        client._handle_message = hooked
+
+    async def userdetails(self, name: str, timeout: float = 2.0) -> dict | None:
+        uid, t0 = to_id(name), time.monotonic()
+        await send(self.player, f"/cmd userdetails {name}")
+        while time.monotonic() - t0 < timeout:
+            got = self.details.get(uid)
+            if got and got[0] >= t0:
+                return got[1]
+            await asyncio.sleep(0.02)
+        return None
+
+
+async def wait_ready(player, queries: ServerQueries, opp: str, args) -> tuple[str, float]:
+    """Before challenging `opp`: wait until the server has it online and in no battle room. Foul Play leaves a finished
+    battle with /leave and then reads (and drops) everything until that room's |deinit|; once the server has processed
+    the /leave, the |deinit| is already queued on its connection ahead of our challenge, so the challenge reaches its
+    accept loop instead of being swallowed. Returns (state, seconds waited): "ready"; "busy" (still in a battle room
+    after --ready-timeout s) or "offline" (not connected for --offline-timeout s, e.g. restarting): challenge anyway
+    and let the retries handle it, as before; "noreply" (no userdetails answer) or "blind" (the server did not list
+    the opponent's battle room during the first game): the old fixed sleep.
+    --pre-game-wait sleep: the old fixed --pre-game-sleep before every challenge."""
+    t0 = time.monotonic()
+    if args.pre_game_wait == "sleep" or queries.blind:
+        await asyncio.sleep(args.pre_game_sleep)
+        return "sleep" if args.pre_game_wait == "sleep" else "blind", time.monotonic() - t0
+    misses, warned = 0, False
+    while True:
+        d = await queries.userdetails(opp)
+        waited = time.monotonic() - t0
+        if d is None:
+            misses += 1
+            if misses >= 3:  # the server does not answer userdetails: fixed sleeps for this opponent from now on
+                queries.blind = True
+                await asyncio.sleep(args.pre_game_sleep)
+                return "noreply", time.monotonic() - t0
+            continue
+        rooms = battle_rooms(d)
+        if rooms is not None:
+            if not rooms:
+                return "ready", waited
+            if waited > args.ready_timeout:
+                log.warning("%s still in a battle room after %.0f s: challenging anyway", opp, waited)
+                return "busy", waited
+        else:
+            if not warned:
+                log.warning("%s is offline: waiting up to %.0f s for it to come back", opp, args.offline_timeout)
+                warned = True
+            if waited > args.offline_timeout:
+                return "offline", waited
+        await asyncio.sleep(0.1)
+
+
+async def one_battle(player, queries: ServerQueries, opp: str, args, timing: dict) -> tuple[str, object]:
     """Challenge `opp` once; returns (status, battle). Re-challenges if Foul Play misses the challenge."""
     known = set(player.battles)
     for _ in range(args.retries):
+        timing["t_challenge"] = time.time()
         task = asyncio.ensure_future(player.send_challenges(opp, 1))
         deadline = time.time() + args.accept_timeout
         while time.time() < deadline and not (set(player.battles) - known) and not task.done():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(args.start_poll)
         if set(player.battles) - known:
             break
         task.cancel()
         await send(player, f"/cancelchallenge {opp}")
         log.warning("%s did not accept the challenge, retrying", opp)
-        await asyncio.sleep(3)
+        timing["retries"] = timing.get("retries", 0) + 1
+        state, waited = await wait_ready(player, queries, opp, args)
+        timing["retry_wait"] = timing.get("retry_wait", 0.0) + waited
     else:
         return "no_accept", None
+    timing["t_start"] = time.time()
     battle = player.battles[next(iter(set(player.battles) - known))]
+    if args.pre_game_wait == "ready" and not queries.checked:
+        # once per series: the server must list Foul Play's battle room while it plays, or "ready" would mean nothing
+        d = await queries.userdetails(opp)
+        queries.checked = True
+        timing["fp_room_visible"] = bool(d and battle.battle_tag in (battle_rooms(d) or []))
+        if not timing["fp_room_visible"]:
+            queries.blind = True  # fall back to the fixed sleep for this opponent
+            log.warning("%s: userdetails does not list its battle room (%s): fixed --pre-game-sleep from now on", opp, d)
     try:
         await asyncio.wait_for(asyncio.shield(task), args.battle_timeout)
     except asyncio.TimeoutError:
@@ -91,23 +199,34 @@ async def one_battle(player, opp: str, args) -> tuple[str, object]:
         except asyncio.TimeoutError:
             task.cancel()
         return "timeout", battle
+    finally:
+        timing["t_end"] = time.time()
     return ("win" if battle.won else "tie" if battle.won is None else "loss"), battle
 
 
 async def series(player, opp: str, args, out) -> dict[str, int]:
     counts = {"win": 0, "loss": 0, "tie": 0, "timeout": 0, "no_accept": 0}
+    queries = ServerQueries(player)
+    # the old fixed sleep also covered the player's own login; userdetails queries need the websocket up
+    await handle_threaded_coroutines(player.ps_client.logged_in.wait(), player.ps_client.loop)
     for i in range(args.n):
-        await asyncio.sleep(3)  # let Foul Play leave the last battle room and go back to accepting
-        status, battle = await one_battle(player, opp, args)
+        state, waited = await wait_ready(player, queries, opp, args)  # Foul Play has left its last battle room
+        timing = {"pre_wait": waited, "pre_state": state}
+        status, battle = await one_battle(player, queries, opp, args, timing)
         counts[status] += 1
+        TIMINGS.append(timing)
         rec = {"opponent": opp, "player": player.username, "status": status,
-               "battle": battle and battle.battle_tag, "turns": battle and battle.turn}
+               "battle": battle and battle.battle_tag, "turns": battle and battle.turn,
+               **{k: round(v, 3) if isinstance(v, float) else v for k, v in timing.items()},
+               "popups": len(queries.popups)}
         out.write(json.dumps(rec) + "\n")
         out.flush()
         print(f"[{opp} {i + 1}/{args.n}] {status} {rec['battle']} ({rec['turns']} turns)", flush=True)
         if status == "no_accept":
             log.error("%s is not accepting challenges, giving up on it", opp)
             break
+    if queries.popups:
+        log.warning("%s: %d popups: %s", opp, len(queries.popups), queries.popups[:5])
     return counts
 
 
@@ -131,6 +250,13 @@ async def main():
     p.add_argument("--search-timeout", type=float, default=30, help="seconds beyond --ms before a search is killed")
     p.add_argument("--accept-timeout", type=float, default=45)
     p.add_argument("--retries", type=int, default=3)
+    p.add_argument("--pre-game-wait", choices=["ready", "sleep"], default="ready",
+                   help="before each challenge: ready = until the server shows Foul Play online and out of its last "
+                        "battle room (event-based); sleep = the old fixed --pre-game-sleep")
+    p.add_argument("--pre-game-sleep", type=float, default=3.0, help="seconds (sleep mode, and the no-reply fallback)")
+    p.add_argument("--ready-timeout", type=float, default=20, help="ready: challenge anyway after this long in a battle room")
+    p.add_argument("--offline-timeout", type=float, default=600, help="ready: wait this long for an offline Foul Play")
+    p.add_argument("--start-poll", type=float, default=0.1, help="seconds between checks for the battle start (was 0.5)")
     p.add_argument("--battle-timeout", type=float, default=1800)
     p.add_argument("--results", default="foulplay_results.jsonl", help="per-battle JSONL (appended)")
     p.add_argument("--log-dir", help="search: record decisions and replays here (porygon.decisions)")
@@ -166,6 +292,13 @@ async def main():
     print(f"{desc} vs Foul Play: won {tot['win']}/{n} = {tot['win'] / max(n, 1):.1%} (±{1.96 * se:.1%})  "
           f"losses {tot['loss']}, ties {tot['tie']}, timeouts {tot['timeout']}, "
           f"not accepted {tot['no_accept']}, {time.time() - start:.0f}s")
+    w = [t["pre_wait"] for t in TIMINGS]
+    acc = [t["t_start"] - t["t_challenge"] for t in TIMINGS if "t_start" in t]
+    states = {k: sum(t["pre_state"] == k for t in TIMINGS) for k in {t["pre_state"] for t in TIMINGS}}
+    if w:
+        print(f"pre-game wait ({a.pre_game_wait}): mean {np.mean(w):.2f} s, max {np.max(w):.2f} s, {states}; "
+              f"challenge to battle start: mean {np.mean(acc) if acc else float('nan'):.2f} s; "
+              f"retries {sum(t.get('retries', 0) for t in TIMINGS)}")
     if a.player == "search":
         s = {k: sum(pl.stats[k] for pl in players) for k in players[0].stats}
         print(f"decisions {s['decisions']}, searched {s['searched']}, fallbacks {s['fallbacks']}, "
