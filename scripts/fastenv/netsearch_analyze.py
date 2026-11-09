@@ -202,6 +202,16 @@ def analyse(NS, rows):
                              "result_mean": float(y.mean()),
                              "corr_with_search_root": float(np.corrcoef(
                                  [p["r"]["win"] for p in per], [p["A"].root for p in per])[0, 1])}
+    # visits: how much evidence each Q rests on
+    vis = np.concatenate([p["A"].n[p["A"].ok].sum(1) for p in per])
+    logged_vis = [p["r"]["logged"]["visits"] for p in per if (p["r"].get("logged") or {}).get("visits")]
+    min_legal = [p["A"].n[p["A"].ok][:, p["mask"]].min() for p in per]
+    out["visits"] = {"per_det_median": float(np.median(vis)), "per_det_p10": float(np.quantile(vis, 0.1)),
+                     "per_det_p90": float(np.quantile(vis, 0.9)),
+                     "logged_per_det_median": float(np.median(logged_vis)) if logged_vis else math.nan,
+                     "all_legal_have_q": float(np.mean([np.isfinite(p["qA"][p["mask"]]).all() for p in per])),
+                     "min_legal_visits_median": float(np.median(min_legal)),
+                     "min_legal_visits_p10": float(np.quantile(min_legal, 0.1))}
     # timing
     out["timing"] = {"t_net_ms": mean_se([p["r"]["t_net_ms"] for p in per])[0],
                      "t_search_A_s": mean_se([p["r"]["A"]["t"] for p in per])[0],
@@ -220,7 +230,7 @@ def fmt(x):
 def report(name, s):
     print(f"== {name}: {s.get('positions')} positions, {s.get('usable')} usable, legal {fmt(s.get('legal_mean', 0))}, "
           f"forced {fmt(s.get('kind_forced_share', 0))}")
-    for k in ("agree", "gap_A_when_disagree_argmax", "noise", "puct", "value_head", "timing"):
+    for k in ("agree", "gap_A_when_disagree_argmax", "noise", "puct", "value_head", "visits", "timing"):
         if k in s:
             print(f"  {k}: " + json.dumps(s[k], default=fmt))
     if "margins" in s:
