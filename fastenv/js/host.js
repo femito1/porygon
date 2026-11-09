@@ -22,6 +22,10 @@
 //   side-two row with action -2-k makes bots[k] play that side until the battle ends (it emits no more rows, not
 //   even the terminal one). porygon.fastenv_v2 uses it for netv2's pool mix (a baseline with p_baseline, else a
 //   snapshot; a baseline whenever no snapshot exists yet).
+// --wait-rows 1: also emit a WAIT row (flag 16, no action expected) for a side that is waiting while its opponent
+//   decides alone (a forced switch): its current observation (mask = action 0, as poke-env's wait step) and the
+//   reward since its previous row, i.e. exactly what poke-env's SinglesEnv returns to the waiting agent (verified by
+//   scripts/fastenv/parity_v1.py wait points). For fastenv_vec.FastVecEnv's poke-env lockstep semantics.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -34,13 +38,15 @@ const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 
 function parseArgs(argv) {
   const a = {format: 'gen9randombattle', battles: 64, seed: 1, encoder: 'v1', fdIn: 0, fdOut: 1,
-    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0, bots: ''};
+    shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0, bots: '',
+    waitRows: 0};
   for (let i = 2; i < argv.length; i += 2) {
     const k = argv[i].replace(/^--/, '').replace(/-(.)/g, (_, c) => c.toUpperCase());
     a[k] = argv[i + 1];
   }
   a.battles = +a.battles; a.seed = +a.seed; a.fdIn = +a.fdIn; a.fdOut = +a.fdOut;
   a.victory = +a.victory; a.maxTurns = +a.maxTurns; a.duplicate = +a.duplicate; a.botBattles = +a.botBattles;
+  a.waitRows = +a.waitRows;
   const [f, h, s] = String(a.shaping).split(',').map(Number);
   a.shapingW = {fainted: f, hp: h, status: s, victory: a.victory};
   return a;
@@ -143,14 +149,14 @@ const obsOut = () => Object.fromEntries(OBS_FIELDS.map(([k], i) => [k, V[obsCols
 const auxOut = () => Object.fromEntries(AUX_FIELDS.map(([k], i) => [k, V[auxCols[i].name]]));
 
 let n = 0;
-function row(slot, side, needsAction, done) {
+function row(slot, side, needsAction, done, wait = false) {
   ensure(n + 1);
   const t = slot.trackers[side];
   const v = E.stateValue(t, args.shapingW);
   V.reward[n] = v - slot.value[side];
   slot.value[side] = v;
   V.slot[n] = slot.i * 2 + side;
-  let f = (needsAction ? 1 : 0) | (done ? 2 : 0);
+  let f = (needsAction ? 1 : 0) | (done ? 2 : 0) | (wait ? 16 : 0);
   if (slot.first[side] && needsAction) { f |= 4; slot.first[side] = false; }
   if (slot.rejected[side]) { f |= 8; slot.rejected[side] = false; }
   V.flags[n] = f;
@@ -162,7 +168,7 @@ function row(slot, side, needsAction, done) {
   slot.oppPrev[side] = [-1, 0, 0, 0];
   aux.writeOpponentTeam(t, slot.auxTeams[1 - side], V.opp_team, n * 48, V.opp_revealed, n * 6);
   const A_ = A;
-  if (needsAction) {
+  if (needsAction || wait) {
     if (E.fields) E.encodeFields(t, obsOut(), n);
     else E.encode(t, V[obsCols[0].name], n * obsCols[0].width);
     E.actionMask(t, V.mask, n * A_);
@@ -226,6 +232,12 @@ function emitSlot(slot) {
     if (isBot(slot)) botAct(slot);
   }
   for (const side of isBot(slot) ? [0] : [0, 1]) if (slot.trackers[side].decisionPending) row(slot, side, true, false);
+  if (args.waitRows && !slot.battle.ended && !slot.crashed) {
+    for (const side of isBot(slot) ? [0] : [0, 1]) {
+      const t = slot.trackers[side];
+      if (!t.decisionPending && t.wait && slot.trackers[1 - side].decisionPending) row(slot, side, false, false, true);
+    }
+  }
 }
 
 function flush() {
