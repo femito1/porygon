@@ -8,7 +8,7 @@ mkdir -p $D/ck $D/out
 START=$(date -d "$START_FROM" +%s)
 # queue the next pass first (after this one ends, at least 20 min from now), so a pass that hits the time limit
 # cannot break the chain
-if squeue -h -u $USER -o %j | grep -q -E "$JOBRE"; then
+if [ -z "${NO_CHAIN:-}" ] && squeue -h -u $USER -o %j | grep -q -E "$JOBRE"; then
   sbatch --begin=now+20minutes --dependency=afterany:$SLURM_JOB_ID --partition=long scripts/wsp/v2diag_run.sbatch \
     scripts/wsp/v2diag_watch_any.sh $CONF | tail -1
 else
