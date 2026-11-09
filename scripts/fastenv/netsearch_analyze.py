@@ -58,6 +58,49 @@ def mean_se(xs):
     return float(xs.mean()), float(xs.std(ddof=1) / math.sqrt(len(xs))) if len(xs) > 1 else math.nan, len(xs)
 
 
+def margin_table(NS, per, dec):
+    """Per margin: override rates and judged values when search `dec` ("A", or "P" = PUCT) takes the decision.
+    "hybrid_minus_search" is always against pure search's move (A's pick)."""
+    table = []
+    for delta in MARGINS:
+        row = {"margin": delta}
+        ov05, ovarg = [], []
+        for p in per:
+            st = p["A"] if dec == "A" else p["X"][dec]
+            ov05.append(sum(p["p05"][a] * NS.gate(int(a), st, p["mask"], delta).override
+                            for a in np.flatnonzero(p["mask"])))
+            ovarg.append(NS.gate(p["arg"], st, p["mask"], delta).override)
+        row["override_T05"] = float(np.mean(ov05))
+        row["override_argmax"] = float(np.mean(ovarg))
+        for k in ("B", "R"):
+            sub = [p for p in per if k in p["X"] and k != dec]
+            if not sub:
+                continue
+            g_net, g_search, stable = [], [], []
+            for p in sub:
+                st = p["A"] if dec == "A" else p["X"][dec]
+                qk, mask = p["X"][k].q, p["mask"]
+                if not np.isfinite(qk[mask]).all():
+                    continue
+                vn = vh = 0.0
+                for a in np.flatnonzero(mask):
+                    c = NS.gate(int(a), st, mask, delta).action
+                    vh += p["p05"][a] * qk[c]
+                    vn += p["p05"][a] * qk[a]
+                g_net.append(vh - vn)  # hybrid minus raw network, judged by k
+                g_search.append(vh - qk[p["sA"]])  # hybrid minus pure search
+                if k == "B" and dec == "A":
+                    stable.append(NS.gate(p["arg"], st, mask, delta).override
+                                  == NS.gate(p["arg"], p["X"]["B"], mask, delta).override)
+            m1, s1, n1 = mean_se(g_net)
+            m2, s2, _ = mean_se(g_search)
+            row[f"judge_{k}"] = {"hybrid_minus_net": m1, "se1": s1, "hybrid_minus_search": m2, "se2": s2, "n": n1}
+            if stable:
+                row["override_argmax_same_in_B"] = float(np.mean(stable))
+        table.append(row)
+    return table
+
+
 def analyse(NS, rows):
     out = {"positions": len(rows)}
     per = []
@@ -139,44 +182,9 @@ def analyse(NS, rows):
     out["noise"] = noise
 
     # the margin grid: override rates, stability, judged value (exact expectation over the T-0.5 draw)
-    table = []
-    for delta in MARGINS:
-        row = {"margin": delta}
-        ov05, ovarg = [], []
-        for p in per:
-            e = 0.0
-            for a in np.flatnonzero(p["mask"]):
-                e += p["p05"][a] * NS.gate(int(a), p["A"], p["mask"], delta).override
-            ov05.append(e)
-            ovarg.append(NS.gate(p["arg"], p["A"], p["mask"], delta).override)
-        row["override_T05"] = float(np.mean(ov05))
-        row["override_argmax"] = float(np.mean(ovarg))
-        for k in ("B", "R"):
-            sub = [p for p in per if k in p["X"]]
-            if not sub:
-                continue
-            g_net, g_search, stable = [], [], []
-            for p in sub:
-                qk, mask = p["X"][k].q, p["mask"]
-                if not np.isfinite(qk[mask]).all():
-                    continue
-                vn = vh = 0.0
-                for a in np.flatnonzero(mask):
-                    c = NS.gate(int(a), p["A"], mask, delta).action
-                    vh += p["p05"][a] * qk[c]
-                    vn += p["p05"][a] * qk[a]
-                g_net.append(vh - vn)  # hybrid minus raw network, judged by k
-                g_search.append(vh - qk[p["sA"]])  # hybrid minus pure search
-                if k == "B":
-                    stable.append(NS.gate(p["arg"], p["A"], mask, delta).override
-                                  == NS.gate(p["arg"], p["X"]["B"], mask, delta).override)
-            m1, s1, n1 = mean_se(g_net)
-            m2, s2, _ = mean_se(g_search)
-            row[f"judge_{k}"] = {"hybrid_minus_net": m1, "se1": s1, "hybrid_minus_search": m2, "se2": s2, "n": n1}
-            if stable:
-                row["override_argmax_same_in_B"] = float(np.mean(stable))
-        table.append(row)
-    out["margins"] = table
+    out["margins"] = margin_table(NS, per, "A")
+    if any("P" in p["X"] for p in per):  # the gate on top of the PUCT search (variant V2 + V0)
+        out["margins_on_P"] = margin_table(NS, [p for p in per if "P" in p["X"]], "P")
 
     # V1: the network as a prior at weight w (pick = argmax share + w * p, as porygon.search.combine), from search A
     v1 = []
@@ -249,9 +257,11 @@ def report(name, s):
     for k in ("agree", "gap_A_when_disagree_argmax", "noise", "prior_weight", "puct", "value_head", "visits", "timing"):
         if k in s:
             print(f"  {k}: " + json.dumps(s[k], default=fmt))
-    if "margins" in s:
-        print("  margin | override T0.5 / argmax | stable(B) | judge B: hyb-net, hyb-search | judge R: hyb-net, hyb-search")
-        for r in s["margins"]:
+    for key in ("margins", "margins_on_P"):
+        if key not in s:
+            continue
+        print(f"  [{key}] margin | override T0.5 / argmax | stable(B) | judge B: hyb-net, hyb-search | judge R: hyb-net, hyb-search")
+        for r in s[key]:
             jb, jr = r.get("judge_B", {}), r.get("judge_R", {})
             print(f"  {fmt(r['margin']):>6} | {r['override_T05']:.3f} / {r['override_argmax']:.3f} | "
                   f"{fmt(r.get('override_argmax_same_in_B', math.nan))} | "
