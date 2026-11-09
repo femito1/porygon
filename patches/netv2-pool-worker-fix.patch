@@ -1,0 +1,58 @@
+--- a/src/porygon/v2/workers.py
++++ b/src/porygon/v2/workers.py
+@@ -270,7 +270,11 @@
+     def __init__(self, specs: list[WorkerSpec]):
+         self.specs = specs
+         self.ctx = mp.get_context("forkserver")
+-        self.ctx.set_forkserver_preload(["porygon.v2.workers"])
++        # No preload of this module: importing poke_env starts its POKE_LOOP thread, and a child forked from the
++        # forkserver would inherit the loop object but not the thread, so every poke-env Player built in a worker
++        # (PoolOpponent's SimpleHeuristicsPlayer / MaxBasePowerPlayer: create_in_poke_loop) blocks forever. That hung
++        # every pool worker of R1 (2026-11-08/09; fastenv scripts/fastenv/debug_pool_worker.py reproduces it). Each
++        # worker now imports poke_env itself (a few seconds per start). SinglesEnv runs its own loop + thread.
+         self.conns: list[Connection | None] = [None] * len(specs)
+         self.procs: list = [None] * len(specs)
+         self.restarts = 0
+--- a/src/porygon/v2/train.py
++++ b/src/porygon/v2/train.py
+@@ -664,6 +664,9 @@
+     a("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
+     a("--max-updates", type=int, help="stop after this many updates in this process (tests)")
+     a("--no-overlap", action="store_true", help="pause battles during the PPO update")
++    a("--pool-alarm-updates", type=int, default=5,
++      help="pool battles configured but no pool episode finished for this many updates in a row: log and fail "
++           "(0 = off); a silently missing opponent mix (R1's hung pool workers) must not recur")
+     from porygon.fastenv_v2 import add_args as fastenv_args
+     fastenv_args(a)  # --collector showdown|fastenv, --fastenv-workers / -battles / -pool-share
+     a("--grad-ratio-every", type=int, default=10,
+@@ -1029,6 +1032,22 @@
+             self.distill = new
+             self.log(f"distill: reloaded {new.summary()}")
+ 
++    def _pool_alarm(self, eps: list[dict], st: dict) -> None:
++        """Pool share of the rollout's finished episodes; fail loudly when pool battles are configured but none
++        finished for --pool-alarm-updates updates in a row (a hung or misrouted pool must not train silently)."""
++        n_pool = sum(e["kind"] == "pool" for e in eps)
++        st["perf/pool_episode_share"] = n_pool / max(len(eps), 1)
++        expected = self.args.pool_battles > 0 and getattr(self.workers, "pool_per_worker", 1) != 0
++        if not expected or self.args.pool_alarm_updates <= 0:
++            return
++        self.pool_dry = 0 if n_pool else getattr(self, "pool_dry", 0) + 1
++        if self.pool_dry >= self.args.pool_alarm_updates:
++            msg = (f"POOL ALARM: {self.args.pool_battles} pool battles configured but no pool episode finished in "
++                   f"{self.pool_dry} updates in a row (worker restarts {self.workers.restarts}); stopping")
++            self.log(msg)
++            (self.run_dir / "POOL_ALARM").write_text(msg + "\n")
++            raise RuntimeError(msg)
++
+     def trip_guard(self, why: str) -> None:
+         """Stop training (final_model.pt is saved as usual) and leave GUARD_TRIPPED in the run dir."""
+         self.log(f"GUARD TRIPPED: {why}; stopping (best model: best_model.pt)")
+@@ -1091,6 +1110,7 @@
+                 c["updates"] += 1
+                 updates_here += 1
+                 st.update(self._episode_stats(eps, wall))
++                self._pool_alarm(eps, st)
+                 st.update(getattr(self.collector, "last_stats", {}))  # fastenv: stale / drained shares, drain time
+                 st["diag/policy_lag_mean"], st["diag/policy_lag_max"] = lag_mean, float(lag_max)
+                 st["perf/steps_per_s"] = n / max(wall, 1e-9)
