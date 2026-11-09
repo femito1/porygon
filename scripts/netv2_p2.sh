@@ -3,7 +3,7 @@
 # <= 14 GB, streaming loader). Launch from the login node (like data's own steps):
 #   nohup srun --jobid=677193 --overlap --ntasks=1 -c 2 --gres=gpu:1 --mem=14G --job-name=nv2-p2 \
 #     bash $C/scripts/netv2_p2.sh ARM... > $C/logs/p2-$(date +%Y%m%d-%H%M%S).out 2>&1 &
-# ARMs (pre-registered in .orchestra/netv2/STATUS.md, 2026-11-09 04:50), run in the order given; an arm whose
+# ARMs (pre-registered in .orchestra/netv2/STATUS.md, 2026-11-09 04:33), run in the order given; an arm whose
 # final.pt exists is skipped:
 #   p2ft   P1 fine-tuned on the gen9 search labels (human held-out rows reported, not trained on)
 #   c005   VR-c005: P1's recipe, value coef 0.05            1pg   VR-1pg: value loss on one position per game
@@ -35,7 +35,7 @@ run() {  # NAME pretrain-args...
   rmdir "$out.lock"
 }
 
-# VR rule (pre-registered 02:05, interpretation fixed 04:50): qualifying = final held-out value BCE <= 0.62 and final
+# VR rule (pre-registered 02:05, interpretation fixed 04:33): qualifying = final held-out value BCE <= 0.62 and final
 # policy CE <= 1.126; the qualifying arm with the lower final value BCE sets P2's value recipe; no arm reaches 0.62 ->
 # value_trunk_grad 0; an arm reaches 0.62 but misses the CE bar -> the lower-BCE such arm, flagged (ctrl tells
 # whether fp32 / streaming moved the CE).
