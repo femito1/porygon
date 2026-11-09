@@ -14,6 +14,15 @@ Loss (per minibatch): clipped PPO surrogate (advantages normalised per minibatch
 clip((λ-return + 1) / 2, 0, 1)) (no value clipping) + aux_coef · Σ aux heads (CE item / ability / tera, BCE per
 candidate move, BCE unseen species / 6, soft CE of the opponent's policy mapped to our frame).
 
+Options for runs that start from a supervised net (gen9 G9, 2026-11-09): `--kl-anchor CKPT` adds
+β(t) · KL(π_anchor ‖ π) over legal actions (kickstarting-style forward KL to a frozen net, e.g. the human-BC init;
+β(t) = --kl-anchor-coef · max(0, 1 − steps / --kl-anchor-decay-steps), anchor log-probs from one no-grad pass per
+rollout); `--critic-warmup-steps N`: until N env steps only the value and aux heads train (policy and trunk frozen,
+so the init's policy acts unchanged while the critic fits its games); `--frozen CKPT...` + `--p-frozen p`: pool
+battles play a frozen net (copied to pool_dir/frozen/) with probability p, `--frozen-best` adds each new best_model
+there (anti-cycling); `--guard-entropy-rel R`: entropy guard at R × the mean entropy of this process's first 5
+updates.
+
 lr: warmup–stable–decay on absolute env steps: linear warmup over --warmup-steps, constant --lr, and (only with
 --cooldown-start) cosine down to --final-lr-frac · lr at --total-steps. Resuming keeps the schedule.
 
@@ -27,7 +36,9 @@ import asyncio
 import copy
 import json
 import math
+import os
 import queue
+import shutil
 import signal
 import sys
 import threading
@@ -232,11 +243,17 @@ def ppo_losses(out: dict, mb: dict, args, normalized: bool = False) -> dict[str,
     za = -(logp_safe.sum(-1) / mask.sum(-1).clamp(min=1)).mean()
     target = ((mb["ret"] + 1) / 2).clamp(0, 1)
     vf = F.binary_cross_entropy_with_logits(out["win_logit"].float(), target)
+    if "logp_anchor" in mb:  # forward KL(anchor || pi) over legal actions (anchor log-probs precomputed, masked)
+        la = mb["logp_anchor"]
+        kla = (torch.where(mask, la.exp() * (la - logp_all), torch.zeros_like(la))).sum(-1).mean()
+    else:
+        kla = torch.zeros((), device=logp_all.device)
     with torch.no_grad():
         kl = ((ratio - 1) - log_ratio).mean()
         clip = ((ratio - 1).abs() > args.clip_range).float().mean()
         r_mean, r_std = ratio.mean(), ratio.std() if ratio.numel() > 1 else torch.zeros_like(ratio.mean())
-    return {"pg": pg, "ent": ent, "za": za, "vf": vf, "kl": kl, "clip": clip, "ratio_mean": r_mean, "ratio_std": r_std}
+    return {"pg": pg, "ent": ent, "za": za, "vf": vf, "kl": kl, "clip": clip, "ratio_mean": r_mean, "ratio_std": r_std,
+            "kla": kla}
 
 
 def _trunk_grad(loss: torch.Tensor, params: list) -> torch.Tensor:
@@ -281,7 +298,25 @@ def rollout_damage(net: Net, tensors: dict, keys: list[str], chunk: int = 4096) 
     return {k: torch.cat([p[k] for p in parts]) for k in parts[0]}
 
 
-def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio: bool) -> dict[str, float]:
+def anchor_logp(anchor: Net, tensors: dict, keys: list[str], dmg_all: dict | None, device, chunk: int = 4096):
+    """[N, A] log-probs of the frozen anchor net on the rollout (eval mode, every id visible, no grad)."""
+    parts = []
+    n = len(tensors["action"])
+    with torch.no_grad():
+        for c0 in range(0, n, chunk):
+            sl = slice(c0, c0 + chunk)
+            o = {k: (tensors[k][sl].long() if not tensors[k].is_floating_point() and tensors[k].dtype != torch.bool
+                     else tensors[k][sl]) for k in keys if k != "drop_seed"}
+            out = anchor(o, dmg=None if dmg_all is None else {k: v[sl] for k, v in dmg_all.items()}, aux=False)
+            parts.append(torch.log_softmax(out["logits"].float(), -1))
+    return torch.cat(parts)
+
+
+HEADS_ONLY = ("value_head.", "aux_")  # what trains during --critic-warmup-steps
+
+
+def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio: bool, anchor: Net | None = None,
+               anchor_coef: float = 0.0, heads_only: bool = False) -> dict[str, float]:
     keys = model_keys(net.gen) + ["drop_seed"]
     tensors = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in data.items()}
     n = len(data["action"])
@@ -306,7 +341,15 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
         m.add("diag/behaviour_ratio_sd", rho.std().item())
         m.add("diag/behaviour_off_clip", ((rho - 1).abs() > args.clip_range).float().mean().item())
     m.add("perf/damage_s", time.time() - t0)
+    if anchor is not None:
+        tensors["logp_anchor"] = anchor_logp(anchor, tensors, keys, dmg_all, device)
     net.train()
+    frozen_now = []
+    if heads_only:  # critic warm-up: policy and trunk frozen (no grad -> AdamW skips them: no decay, no moments)
+        for name, prm in net.named_parameters():
+            if prm.requires_grad and not name.startswith(HEADS_ONLY):
+                prm.requires_grad_(False)
+                frozen_now.append(prm)
 
     def minibatch(idx):
         mb = {k: v[idx] for k, v in tensors.items()}
@@ -314,7 +357,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                for k in keys}
         return obs, (None if dmg_all is None else {k: v[idx] for k, v in dmg_all.items()}), mb
 
-    if measure_ratio:
+    if measure_ratio and not heads_only:  # (trunk frozen during the critic warm-up)
         perm = torch.randperm(n, device=device)
         bs = min(args.micro_batch or args.batch_size, args.batch_size, n // 2)  # GPU memory: one chunk each
         if bs >= 2:
@@ -346,10 +389,13 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                     m.add("diag/first_clip", L["clip"].item())
                     m.add("diag/first_kl", L["kl"].item())
                 aux = aux_losses(out, mb, m if epoch == 0 else None)
-                total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"] + args.vf_coef * L["vf"]
-                         + args.aux_coef * aux)
+                if heads_only:
+                    total = args.vf_coef * L["vf"] + args.aux_coef * aux
+                else:
+                    total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"]
+                             + args.vf_coef * L["vf"] + args.aux_coef * aux + anchor_coef * L["kla"])
                 (total * w).backward()
-                for k in ("pg", "ent", "za", "vf", "kl", "clip"):
+                for k in ("pg", "ent", "za", "vf", "kl", "clip", "kla"):
                     sums[k] = sums.get(k, 0.0) + w * L[k].detach()
                 sums["aux"] = sums.get("aux", 0.0) + w * aux.detach()
                 sums["total"] = sums.get("total", 0.0) + w * total.detach()
@@ -357,10 +403,17 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
             opt.step()
             for k in ("pg", "ent", "za", "vf", "kl", "clip"):
                 m.add(f"loss/{k}", float(sums[k]))
+            if anchor is not None:
+                m.add("loss/kl_anchor", float(sums["kla"]))
             m.add("loss/aux", float(sums["aux"]))
             m.add("loss/total", float(sums["total"]))
             m.add("diag/grad_norm", gn.item())
+    for prm in frozen_now:
+        prm.requires_grad_(True)
     st = m.means()
+    if anchor is not None:
+        st["perf/kl_anchor_coef"] = anchor_coef
+    st["perf/heads_only"] = float(heads_only)
     v, ret = data["value"], data["ret"]
     var = ret.var()
     st["diag/explained_variance"] = float(1 - (ret - v).var() / var) if var > 0 else float("nan")
@@ -426,6 +479,15 @@ def parse_args(argv=None):
     a("--clip-range", type=float, default=0.1)
     a("--guard-anchor-drop", type=float, default=0.0, help="stop when the eval score is this far below its best twice")
     a("--guard-entropy-max", type=float, default=0.0, help="stop when the policy entropy exceeds this for 5 updates")
+    a("--guard-entropy-rel", type=float, default=0.0,
+      help="entropy guard at this multiple of the mean entropy of this process's first 5 updates (if no max)")
+    a("--kl-anchor", type=Path, help="frozen v2 net: add beta(t) * KL(anchor || pi) to the loss")
+    a("--kl-anchor-coef", type=float, default=0.0, help="beta at step 0 (linear decay to 0)")
+    a("--kl-anchor-decay-steps", type=int, default=50_000_000, help="env steps (lineage counter) at which beta = 0")
+    a("--critic-warmup-steps", type=int, default=0, help="until this many env steps only value + aux heads train")
+    a("--frozen", type=Path, nargs="*", default=[], help="frozen opponents for pool battles (copied to pool/frozen)")
+    a("--p-frozen", type=float, default=0.0, help="share of pool battles vs a frozen opponent")
+    a("--frozen-best", action="store_true", help="each new best_model.pt also becomes a frozen opponent")
     a("--decoupled", action="store_true", help="decoupled PPO: clip vs the update-start policy, truncated IS weights")
     a("--decoupled-rho", type=float, default=2.0, help="decoupled PPO: truncation of pi_prox / pi_behaviour")
     a("--ent-coef", type=float, default=0.01)
@@ -527,7 +589,7 @@ class Trainer:
         shaping = dict(zip(("fainted_value", "hp_value", "status_value"), args.shaping))
         specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping) for i in range(args.n_battles)]
                  + [WorkerSpec("pool", ports[::-1][i % len(ports)], args.format, shaping, str(self.pool_dir),
-                               args.p_baseline) for i in range(args.pool_battles)])
+                               args.p_baseline, p_frozen=args.p_frozen) for i in range(args.pool_battles)])
         self.workers = BattleWorkers(specs)  # before CUDA init (forkserver anyway)
 
         torch.set_num_threads(args.threads)
@@ -551,6 +613,21 @@ class Trainer:
             self.opt.load_state_dict(ck["optimizer"])
         self.actor = copy.deepcopy(self.net).eval()
         self.actor_lock = threading.Lock()
+        if args.frozen:  # fixed opponents for the whole run (anti-cycling); the trainer loads them by relative name
+            fdir = self.pool_dir / "frozen"
+            fdir.mkdir(parents=True, exist_ok=True)
+            for f in args.frozen:
+                dst = fdir / f.name
+                if not dst.exists():
+                    tmp = fdir / (f.name + ".tmp")
+                    shutil.copyfile(f, tmp)
+                    os.replace(tmp, dst)
+        self.anchor = None
+        if args.kl_anchor is not None:
+            self.anchor = load(args.kl_anchor, self.device).eval()
+            for prm in self.anchor.parameters():
+                prm.requires_grad_(False)
+            assert self.anchor.gen == self.gen, f"anchor gen {self.anchor.gen}"
         self.ema = EMA(self.net, args.ema_decay) if args.ema_decay > 0 else None
         if self.ema is not None and ck is not None and "ema" in ck:
             self.ema.load_state_dict(ck["ema"])
@@ -669,6 +746,14 @@ class Trainer:
         if score > self.counters["best"]:
             self.counters["best"] = score
             save(self.net, self.run_dir / "best_model.pt", counters=dict(self.counters), eval=res)
+            if a.frozen_best:  # a new name each time (the trainer caches snapshot nets by name); older bests removed
+                fdir = self.pool_dir / "frozen"
+                fdir.mkdir(parents=True, exist_ok=True)
+                name = f"best-{steps:011d}.pt"
+                save(self.net, fdir / name)
+                for old in fdir.glob("best-*.pt"):
+                    if old.name != name:
+                        old.unlink(missing_ok=True)
         # guard: the eval score fell more than --guard-anchor-drop below its best for 2 evals in a row -> stop
         if a.guard_anchor_drop > 0 and score < self.counters["best"] - a.guard_anchor_drop:
             self.guard_evals = getattr(self, "guard_evals", 0) + 1
@@ -728,7 +813,12 @@ class Trainer:
                 for g in self.opt.param_groups:
                     g["lr"] = lr
                 measure = a.grad_ratio_every > 0 and c["updates"] % a.grad_ratio_every == 0
-                st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure)
+                beta = (a.kl_anchor_coef * max(0.0, 1.0 - c["steps"] / max(1, a.kl_anchor_decay_steps))
+                        if self.anchor is not None else 0.0)
+                use_anchor = self.anchor is not None and (beta > 0 or measure)  # after the decay: monitor only
+                heads_only = c["steps"] < a.critic_warmup_steps
+                st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure,
+                                anchor=self.anchor if use_anchor else None, anchor_coef=beta, heads_only=heads_only)
                 if self.ema is not None:
                     self.ema.update(self.net)
                 c["updates"] += 1
@@ -746,11 +836,19 @@ class Trainer:
                 for k, v in st.items():
                     self.writer.add_scalar(k, v, c["steps"])
                 self.log(self._line(n, st))
-                # guard: entropy above --guard-entropy-max for 5 updates in a row (drift towards uniform) -> stop
-                if a.guard_entropy_max > 0 and updates_here > 5:
-                    self.ent_bad = getattr(self, "ent_bad", 0) + 1 if st.get("loss/ent", 0.0) > a.guard_entropy_max else 0
+                # guard: entropy above --guard-entropy-max (or --guard-entropy-rel x the first 5 updates' mean) for 5
+                # updates in a row (drift towards uniform) -> stop
+                if a.guard_entropy_rel > 0 and not a.guard_entropy_max and updates_here <= 5:
+                    self.ent_first = getattr(self, "ent_first", []) + [st.get("loss/ent", 0.0)]
+                    if updates_here == 5:
+                        self.ent_cap = a.guard_entropy_rel * float(np.mean(self.ent_first))
+                        self.log(f"entropy guard: cap {self.ent_cap:.3f} = {a.guard_entropy_rel} x "
+                                 f"{np.mean(self.ent_first):.3f} (first 5 updates)")
+                cap = a.guard_entropy_max or getattr(self, "ent_cap", 0.0)
+                if cap > 0 and updates_here > 5:
+                    self.ent_bad = getattr(self, "ent_bad", 0) + 1 if st.get("loss/ent", 0.0) > cap else 0
                     if self.ent_bad >= 5:
-                        self.trip_guard(f"entropy > {a.guard_entropy_max} for 5 updates")
+                        self.trip_guard(f"entropy > {cap:.3f} for 5 updates")
                 if c["steps"] >= next_snap:
                     next_snap = nxt(a.snapshot_every)
                     save(self.net, self.pool_dir / f"{c['steps']:011d}.pt")
@@ -775,7 +873,7 @@ class Trainer:
             return st
         st["episode/turns"] = float(np.mean([e["turns"] for e in eps]))
         st["episode/decisions"] = float(np.mean([d for e in eps for d in e["decisions"]]))
-        for label in ("heuristic", "max_power", "snapshot"):
+        for label in ("heuristic", "max_power", "snapshot", "frozen"):
             res = [e["result"][0] for e in eps if e["kind"] == "pool" and e["opp"] == label]
             if res:
                 st[f"pool/win_rate_{label}"] = float(np.mean([r == 1 for r in res]))
@@ -794,7 +892,9 @@ class Trainer:
                 f"ratio {g('diag/trunk_grad_ratio')} cos_pg {g('diag/grad_cos_policy')} "
                 f"cos_vf {g('diag/grad_cos_value')} r0 {g('diag/first_ratio_mean')}±{g('diag/first_ratio_std')} "
                 f"clip0 {g('diag/first_clip')} beh_off {g('diag/behaviour_off_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
-                f"len {g('episode/decisions', '{:.1f}')} "
+                f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
+                f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
+                f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
 

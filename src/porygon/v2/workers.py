@@ -121,25 +121,33 @@ def empty_like_blob(packer: Packer) -> bytes:
 # ---------------------------------------------------------------- opponent pool
 
 class PoolOpponent:
-    """Each battle: a baseline bot with p_baseline (SimpleHeuristicsPlayer / MaxBasePowerPlayer), else a v2 snapshot
-    from pool_dir (`*.pt`, by mtime): half the time one of the `recent` newest, otherwise uniform. Snapshots are not
-    run here: `snapshot` names the file and the worker asks the trainer, which batches every pool battle's snapshot
-    decisions on its device (the damage layer alone costs ~0.2 s per call on one CPU thread)."""
+    """Each battle: a frozen opponent with p_frozen (uniform over `pool_dir/frozen/*.pt`: fixed strong nets kept for
+    the whole run against self-play cycling, e.g. the supervised init and the best checkpoint), a baseline bot with
+    p_baseline (SimpleHeuristicsPlayer / MaxBasePowerPlayer), else a v2 snapshot from pool_dir (`*.pt`, by mtime):
+    half the time one of the `recent` newest, otherwise uniform (no snapshot yet: a frozen net if any, else a
+    baseline). Snapshots are not run here: `snapshot` names the file (relative to pool_dir) and the worker asks the
+    trainer, which batches every pool battle's snapshot decisions on its device (the damage layer alone costs ~0.2 s
+    per call on one CPU thread)."""
 
     def __init__(self, pool_dir: Path | None, battle_format: str, *, p_baseline: float = 0.2, recent: int = 4,
-                 rng=None):
+                 p_frozen: float = 0.0, rng=None):
         self.pool_dir = Path(pool_dir) if pool_dir else None
-        self.format, self.p_baseline, self.recent = battle_format, p_baseline, recent
+        self.format, self.p_baseline, self.recent, self.p_frozen = battle_format, p_baseline, recent, p_frozen
         common = dict(battle_format=battle_format, start_listening=False)
         self.baselines = {"heuristic": SimpleHeuristicsPlayer(**common), "max_power": MaxBasePowerPlayer(**common)}
         self.rng = rng or np.random.default_rng()
         self.label, self.snapshot = "heuristic", None
 
     def new_battle(self) -> None:
-        snaps = []
+        snaps, frozen = [], []
         if self.pool_dir is not None and self.pool_dir.is_dir():
             snaps = sorted(self.pool_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
-        if snaps and self.rng.random() >= self.p_baseline:
+            if self.p_frozen > 0:
+                frozen = sorted((self.pool_dir / "frozen").glob("*.pt"))
+        r = self.rng.random()
+        if frozen and (r < self.p_frozen or (not snaps and r >= self.p_frozen + self.p_baseline)):
+            self.label, self.snapshot = "frozen", "frozen/" + frozen[self.rng.integers(len(frozen))].name
+        elif snaps and r >= self.p_frozen + self.p_baseline:
             pick = snaps[-self.recent:] if self.rng.random() < 0.5 else snaps
             self.label, self.snapshot = "snapshot", pick[self.rng.integers(len(pick))].name
         else:
@@ -162,6 +170,7 @@ class WorkerSpec:
     pool_dir: str | None = None
     p_baseline: float = 0.2
     recent: int = 4
+    p_frozen: float = 0.0
 
 
 def battle_worker(conn: Connection, spec: WorkerSpec) -> None:
@@ -186,7 +195,7 @@ def _battle_loop(conn: Connection, spec: WorkerSpec) -> None:
                 log_level=40, open_timeout=None, challenge_timeout=None, strict=False)
     pool = spec.kind == "pool"
     opponent = PoolOpponent(spec.pool_dir, spec.battle_format, p_baseline=spec.p_baseline,
-                            recent=spec.recent) if pool else None
+                            recent=spec.recent, p_frozen=spec.p_frozen) if pool else None
     n_sides = 1 if pool else 2
     a1, a2 = env.possible_agents
     decisions = [0, 0]

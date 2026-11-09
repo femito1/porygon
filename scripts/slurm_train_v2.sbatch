@@ -13,7 +13,10 @@
 #   POOL_SEED=<dir>  v2 snapshots hard-linked into the run's pool when it is empty
 #   CHAIN=<n>        follow-up jobs once this one ends short of TOTAL (counter kept per run in runs/RUN_NAME/chain_left)
 #   TRAIN_ARGS="..." extra porygon.v2.train args for every job of every run (positional args after RUN_NAME win)
-# netv2.env may branch on $RUN_NAME for per-run settings.
+#   PRE_CMD="..."    run once per run before the first training start (e.g. a supervised refit that picks the init);
+#                    marker runs/RUN_NAME/pre_done; netv2.env is sourced again afterwards
+#   MIN_CORES / N_SELFPLAY / N_POOL: smaller jobs (default: refuse < 24 CPUs; 2 self-play + 1 pool battle per CPU)
+# netv2.env may branch on $RUN_NAME for per-run settings (it is sourced under set -e: end it with a true command).
 #
 # Layout: runs/RUN_NAME/<date>-<job>/ (train.log, stdout.log, tb/, checkpoints/, final_model.pt, best_model.pt) and
 # runs/RUN_NAME/pool/ (snapshots). Every job resumes from the newest checkpoint / final model under runs/RUN_NAME, so
@@ -87,6 +90,14 @@ echo "CPUs: nproc $(env -u OMP_NUM_THREADS nproc), SLURM_CPUS_ON_NODE ${SLURM_CP
 MIN_CORES=${MIN_CORES:-24}
 if [ "$CORES" -lt "$MIN_CORES" ]; then
   echo "ERROR: only $CORES CPUs on $(hostname -s) ($SLURM_JOB_PARTITION), need >= $MIN_CORES: not starting" >&2; exit 3
+fi
+# once per run: PRE_CMD (netv2.env), e.g. G9's value-head refit that writes the RL init; then re-read netv2.env
+if [ -n "${PRE_CMD:-}" ] && [ ! -f "$ROOT/runs/$RUN_NAME/pre_done" ]; then
+  mkdir -p "$ROOT/runs/$RUN_NAME"
+  echo "$(date -u +%T) PRE_CMD: $PRE_CMD"
+  if (export ROOT RUN_NAME PY; eval "$PRE_CMD"); then touch "$ROOT/runs/$RUN_NAME/pre_done"; else echo "PRE_CMD failed (continuing)" >&2; fi
+  [ -f netv2.env ] && source netv2.env
+  echo "$(date -u +%T) PRE_CMD done; RESUME=${RESUME:-}"
 fi
 N_SERVERS=$(( CORES / 3 )); SELFPLAY=${N_SELFPLAY:-$(( CORES * 2 ))}; POOL_BATTLES=${N_POOL:-$CORES}  # netv2.env may cap them (memory)
 BASE=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 )); LAST=$(( BASE + N_SERVERS - 1 ))

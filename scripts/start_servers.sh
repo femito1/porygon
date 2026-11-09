@@ -12,7 +12,9 @@ if [ ! -f "$PS/config/config.js" ]; then
   printf '\nexports.nofswriting = true;\nexports.repl = false;\n' >> "$PS/config/config.js"
 fi
 mkdir -p "$ROOT/logs" "$PS/logs/repl"
-(cd "$PS" && node build)  # once; concurrent per-server builds clobber each other
+# once; concurrent per-server builds clobber each other, and a rebuild under another job's running servers can break
+# their simulator children: skip it when the checkout is already built (FORCE_BUILD=1 rebuilds)
+if [ -n "${FORCE_BUILD:-}" ] || [ ! -f "$PS/dist/server/index.js" ]; then (cd "$PS" && node build); fi
 for ((i = 0; i < N; i++)); do
   PORT=$((BASE + i))
   (cd "$PS" && setsid nohup node pokemon-showdown start --skip-build --no-security "$PORT" < /dev/null > "$ROOT/logs/showdown-$PORT.log" 2>&1 &)
