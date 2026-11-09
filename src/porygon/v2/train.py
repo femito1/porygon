@@ -23,6 +23,14 @@ battles play a frozen net (copied to pool_dir/frozen/) with probability p, `--fr
 there (anti-cycling); `--guard-entropy-rel R`: entropy guard at R × the mean entropy of this process's first 5
 updates.
 
+Distillation (2026-11-09): `--distill GLOB` loads v2 supervised shards (`porygon.v2.pretrain`'s format; rows without
+target mass on a legal action dropped) into CPU memory once, split by game with `pretrain.is_val` (--distill-val-frac;
+the held-out games are only monitored). With --distill-coef C > 0 every PPO minibatch adds one pass of C · CE(target
+renormalised over legal actions, π) on --distill-batch train rows (id dropout on; not during the critic warm-up),
+logged as loss/distill. Every --grad-ratio-every updates, at the update's starting weights, CE and top-1 agreement on
+≤ 4096 fixed held-out / train rows are logged (diag/distill_{val,train}_{ce,top1}): C = 0 monitors without changing
+training. `--distill-reload-every U`: every U updates re-glob and reload if a shard was added, removed or rewritten.
+
 lr: warmup–stable–decay on absolute env steps: linear warmup over --warmup-steps, constant --lr, and (only with
 --cooldown-start) cosine down to --final-lr-frac · lr at --total-steps. Resuming keeps the schedule.
 
@@ -34,6 +42,7 @@ vs --anchor if given, else vs SimpleHeuristicsPlayer), pool snapshots every --sn
 import argparse
 import asyncio
 import copy
+import glob
 import json
 import math
 import os
@@ -53,7 +62,7 @@ from porygon.env import local_server
 from porygon.v2.model import (
     COL, DEFAULT_CFG, Net, batch_to_tensors, load, model_keys, net_from_checkpoint, save,
 )
-from porygon.v2.spec import VOCAB_SIZES
+from porygon.v2.spec import VOCAB_SIZES, n_actions
 from porygon.v2.workers import (
     ACT, DONE, LOGP, NEXT_V, OBS, OPP_C, OPP_T, REW, SEED, VAL, BattleWorkers, Collector, Packer, WorkerSpec, gen_of,
 )
@@ -312,11 +321,108 @@ def anchor_logp(anchor: Net, tensors: dict, keys: list[str], dmg_all: dict | Non
     return torch.cat(parts)
 
 
+# ---------------------------------------------------------------- distillation (--distill)
+
+class DistillSet:
+    """Labelled positions in CPU memory from v2 supervised shards (the format `porygon.v2.pretrain.load_shard` reads):
+    the model fields, `target` and `game` of every row with target mass on a legal action, split by game with
+    `pretrain.is_val` (train rows are sampled for the loss, held-out rows only monitored). `rng`: the generator
+    `sample` draws from (never the global ones)."""
+
+    MONITOR = 4096  # fixed rows per split for diag/distill_*
+
+    def __init__(self, pattern: str, gen: int, val_frac: float, rng: np.random.Generator | None = None):
+        from porygon.v2.pretrain import is_val, load_shard  # not at module level: pretrain imports this module
+        self.pattern, self.gen, self.val_frac = pattern, gen, val_frac
+        self.rng = np.random.default_rng() if rng is None else rng
+        self.paths = sorted(glob.glob(pattern))
+        assert self.paths, f"--distill {pattern}: no shards match"
+        self.signature = self._signature(self.paths)
+        for meta in {Path(p).with_name("meta.json") for p in self.paths}:  # the data stream's per-directory meta
+            g = json.loads(meta.read_text()).get("gen") if meta.exists() else None
+            assert g is None or int(g) == gen, f"{meta}: gen {g} shards, trainer gen {gen}"
+        keys, parts = model_keys(gen) + ["target", "game"], []
+        for p in self.paths:
+            d = load_shard(p, gen)
+            assert d["action_mask"].shape[1:] == d["target"].shape[1:] == (n_actions(gen),), \
+                f"{p}: action_mask {d['action_mask'].shape}, target {d['target'].shape}: not gen{gen} shards"
+            keep = (d["target"] * (d["action_mask"] > 0)).sum(-1) > 0  # all-zero (or illegal-only) target = none
+            parts.append({k: d[k][keep] for k in keys})
+        self.data = {k: np.concatenate([q.pop(k) for q in parts]) for k in keys}
+        games, inv = np.unique(self.data["game"], return_inverse=True)
+        val_game = is_val(games, val_frac)
+        self.n_games, self.n_val_games = len(games), int(val_game.sum())
+        self.train_idx, self.val_idx = np.flatnonzero(~val_game[inv]), np.flatnonzero(val_game[inv])
+        assert len(self.train_idx), f"--distill {pattern}: no training rows"
+        pick = np.random.default_rng(0)  # fixed monitoring rows: comparable across updates
+        self.monitor = {s: np.sort(pick.choice(ix, min(self.MONITOR, len(ix)), replace=False))
+                        for s, ix in (("val", self.val_idx), ("train", self.train_idx))}
+
+    @staticmethod
+    def _signature(paths: list[str]) -> tuple:
+        return tuple((p, s.st_size, s.st_mtime_ns) for p, s in ((p, os.stat(p)) for p in paths))
+
+    def summary(self) -> str:
+        return (f"{self.pattern}: {len(self.paths)} shards, {len(self.train_idx):,} train / {len(self.val_idx):,} "
+                f"held-out rows, {self.n_games:,} games ({self.n_val_games:,} held out)")
+
+    def rows(self, idx: np.ndarray) -> dict[str, np.ndarray]:
+        return {k: v[idx] for k, v in self.data.items() if k != "game"}
+
+    def sample(self, n: int, rng: np.random.Generator | None = None) -> dict[str, np.ndarray]:
+        """n rows drawn uniformly (with replacement) from the train split, with random nonzero `drop_seed`s (id
+        dropout as in pretraining)."""
+        rng = self.rng if rng is None else rng
+        b = self.rows(self.train_idx[rng.integers(0, len(self.train_idx), n)])
+        b["drop_seed"] = rng.integers(1, 2**31 - 1, n)
+        return b
+
+    def reload(self) -> "DistillSet | None":
+        """Re-glob: a freshly loaded set (same generator) if a shard was added, removed or rewritten, else None.
+        Raises on a bad shard (the trainer then keeps the current set)."""
+        if self._signature(sorted(glob.glob(self.pattern))) == self.signature:
+            return None
+        return DistillSet(self.pattern, self.gen, self.val_frac, self.rng)
+
+
+def distill_ce(logits: torch.Tensor, mask: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per row: CE(target renormalised over the legal actions, log π) and top-1 agreement with the target's argmax
+    (`porygon.v2.pretrain.losses`' policy term, unweighted); rows without target mass on a legal action are left out."""
+    mask = mask > 0
+    logp = torch.log_softmax(logits.float(), -1)
+    tgt = target * mask
+    has = tgt.sum(-1) > 0
+    t = tgt[has] / tgt[has].sum(-1, keepdim=True)
+    ce = -(t * torch.where(mask[has], logp[has], torch.zeros_like(logp[has]))).sum(-1)
+    return ce, logits[has].argmax(-1) == tgt[has].argmax(-1)
+
+
+def distill_metrics(net: Net, distill: DistillSet, device, amp: bool) -> dict[str, float]:
+    """diag/distill_{val,train}_{ce,top1} on the set's fixed monitoring rows (eval mode, every id visible, no grad;
+    the net is left in train mode)."""
+    st = {}
+    net.eval()
+    with torch.no_grad():
+        for split, rows in distill.monitor.items():
+            if not len(rows):
+                continue
+            b = batch_to_tensors(distill.rows(rows), device)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                out = net(b, aux=False)
+            ce, hit = distill_ce(out["logits"], b["action_mask"], b["target"])
+            if ce.numel():
+                st[f"diag/distill_{split}_ce"] = ce.mean().item()
+                st[f"diag/distill_{split}_top1"] = hit.float().mean().item()
+    net.train()
+    return st
+
+
 HEADS_ONLY = ("value_head.", "aux_")  # what trains during --critic-warmup-steps
 
 
 def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio: bool, anchor: Net | None = None,
-               anchor_coef: float = 0.0, heads_only: bool = False) -> dict[str, float]:
+               anchor_coef: float = 0.0, heads_only: bool = False,
+               distill: DistillSet | None = None) -> dict[str, float]:
     keys = model_keys(net.gen) + ["drop_seed"]
     tensors = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in data.items()}
     n = len(data["action"])
@@ -350,6 +456,10 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
             if prm.requires_grad and not name.startswith(HEADS_ONLY):
                 prm.requires_grad_(False)
                 frozen_now.append(prm)
+    if distill is not None and measure_ratio:  # labelled-set agreement at the update's starting weights
+        for k, v in distill_metrics(net, distill, device, amp).items():
+            m.add(k, v)
+    distill_on = distill is not None and args.distill_coef > 0 and args.distill_batch > 0 and not heads_only
 
     def minibatch(idx):
         mb = {k: v[idx] for k, v in tensors.items()}
@@ -399,6 +509,15 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                     sums[k] = sums.get(k, 0.0) + w * L[k].detach()
                 sums["aux"] = sums.get("aux", 0.0) + w * aux.detach()
                 sums["total"] = sums.get("total", 0.0) + w * total.detach()
+            if distill_on:  # --distill: one extra pass on labelled train rows, added to this step's gradient
+                db = batch_to_tensors(distill.sample(args.distill_batch), device)
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                    dout = net(db, aux=False)
+                ce = distill_ce(dout["logits"], db["action_mask"], db["target"])[0]
+                if ce.numel():
+                    ce = ce.mean()
+                    (args.distill_coef * ce).backward()
+                    m.add("loss/distill", ce.item())
             gn = torch.nn.utils.clip_grad_norm_(net.parameters(), args.max_grad_norm)
             opt.step()
             for k in ("pg", "ent", "za", "vf", "kl", "clip"):
@@ -488,6 +607,11 @@ def parse_args(argv=None):
     a("--frozen", type=Path, nargs="*", default=[], help="frozen opponents for pool battles (copied to pool/frozen)")
     a("--p-frozen", type=float, default=0.0, help="share of pool battles vs a frozen opponent")
     a("--frozen-best", action="store_true", help="each new best_model.pt also becomes a frozen opponent")
+    a("--distill", help="glob of v2 supervised shards (porygon.v2.pretrain format): distillation term + monitor")
+    a("--distill-coef", type=float, default=0.0, help="weight of CE(target, pi) per minibatch (0 = monitor only)")
+    a("--distill-batch", type=int, default=512, help="labelled train rows per PPO minibatch")
+    a("--distill-val-frac", type=float, default=0.06, help="held-out share of the --distill games (monitored only)")
+    a("--distill-reload-every", type=int, default=0, help="re-glob and reload --distill every N updates (0 = never)")
     a("--decoupled", action="store_true", help="decoupled PPO: clip vs the update-start policy, truncated IS weights")
     a("--decoupled-rho", type=float, default=2.0, help="decoupled PPO: truncation of pi_prox / pi_behaviour")
     a("--ent-coef", type=float, default=0.01)
@@ -628,6 +752,9 @@ class Trainer:
             for prm in self.anchor.parameters():
                 prm.requires_grad_(False)
             assert self.anchor.gen == self.gen, f"anchor gen {self.anchor.gen}"
+        self.distill = None
+        if args.distill:
+            self.distill = DistillSet(args.distill, self.gen, args.distill_val_frac, np.random.default_rng(args.seed))
         self.ema = EMA(self.net, args.ema_decay) if args.ema_decay > 0 else None
         if self.ema is not None and ck is not None and "ema" in ck:
             self.ema.load_state_dict(ck["ema"])
@@ -649,6 +776,9 @@ class Trainer:
         self.log(f"v2 trainer: {args.format} gen{self.gen}, {args.n_battles} self-play + {args.pool_battles} pool "
                  f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
                  f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, steps={self.counters['steps']:,}")
+        if self.distill is not None:
+            self.log(f"distill: {self.distill.summary()}; coef {args.distill_coef}, batch {args.distill_batch}, "
+                     f"reload every {args.distill_reload_every} updates (0 = never)")
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
@@ -763,6 +893,17 @@ class Trainer:
         else:
             self.guard_evals = 0
 
+    def _reload_distill(self) -> None:
+        """--distill-reload-every: pick up added / rewritten shards; on any error keep training on the current set."""
+        try:
+            new = self.distill.reload()
+        except Exception as e:  # e.g. a shard being written right now: retried at the next reload
+            self.log(f"distill: reload failed ({e!r:.300}); keeping the current set")
+            return
+        if new is not None:
+            self.distill = new
+            self.log(f"distill: reloaded {new.summary()}")
+
     def trip_guard(self, why: str) -> None:
         """Stop training (final_model.pt is saved as usual) and leave GUARD_TRIPPED in the run dir."""
         self.log(f"GUARD TRIPPED: {why}; stopping (best model: best_model.pt)")
@@ -818,7 +959,8 @@ class Trainer:
                 use_anchor = self.anchor is not None and (beta > 0 or measure)  # after the decay: monitor only
                 heads_only = c["steps"] < a.critic_warmup_steps
                 st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure,
-                                anchor=self.anchor if use_anchor else None, anchor_coef=beta, heads_only=heads_only)
+                                anchor=self.anchor if use_anchor else None, anchor_coef=beta, heads_only=heads_only,
+                                distill=self.distill)
                 if self.ema is not None:
                     self.ema.update(self.net)
                 c["updates"] += 1
@@ -858,6 +1000,9 @@ class Trainer:
                 if a.eval_battles > 0 and c["steps"] >= next_eval:
                     next_eval = nxt(a.eval_every)
                     self.evaluate()
+                if (self.distill is not None and a.distill_reload_every > 0
+                        and updates_here % a.distill_reload_every == 0):
+                    self._reload_distill()
         finally:
             self.stop.set()
             thread.join(30)  # the collector notices `stop` within ~1 s unless a forward is running
@@ -895,6 +1040,7 @@ class Trainer:
                 f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
                 f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
                 f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} "
+                f"dst {g('loss/distill')} dval {g('diag/distill_val_ce')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
 
