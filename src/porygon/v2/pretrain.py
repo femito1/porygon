@@ -22,12 +22,21 @@ Options added for the value refit and search-label arms (2026-11-09):
   everything else / re-initialise those modules first (refit a head on a fixed trunk; the policy stays bit-identical).
 - `--select total|value|policy`: what best.pt minimises on the primary set's validation split.
 - `--no-bf16`: fp32 (+TF32 matmuls) instead of bf16 autocast.
+- `--stream-gb G` (2026-11-09): streaming loader for sets that do not fit in memory (a v2 decision is ~12 KB in
+  RAM, ~140 B compressed). Only a row index (shard, row, game) and the validation rows stay in memory; every epoch
+  the training rows are permuted and cut into P = ceil(train bytes / G GiB) equal parts, and a background thread
+  assembles each part (decompresses every shard, gathers the part's rows in permutation order) while the GPU trains
+  on the previous one: each part is a uniform random subset of the training rows and every row is seen exactly once
+  per epoch, as with the in-memory loader (whose exact order it does not reproduce). Memory ≈ 2 parts + validation.
+  Weight-0 sets are never read beyond their validation rows. 0 (default) = everything in memory, as before.
 """
 
 import argparse
 import glob
 import json
 import math
+import queue
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -79,6 +88,132 @@ def is_val(game: np.ndarray, frac: float) -> np.ndarray:
     """Deterministic split by game id (crc32 of the id), so every run and shard agrees."""
     h = np.array([zlib.crc32(int(g).to_bytes(8, "little", signed=True)) for g in game], dtype=np.uint64)
     return (h % 10_000) < frac * 10_000
+
+
+class StreamSource:
+    """`--stream-gb`: the same rows, split, weights and validation sets as `load_sets` + `is_val`, without holding the
+    training rows in memory. Per row only (shard, row in shard, game, set, weight) is kept; validation rows are
+    assembled once (`vdata`, `val_sets`: indices into it per set name, as in the in-memory path)."""
+
+    def __init__(self, primary: str, mix: list[str], gen: int, val_frac: float, part_gb: float, seed: int):
+        self.gen = gen
+        specs = [(primary, 1.0)] + [(m.rsplit(":", 1)[0], float(m.rsplit(":", 1)[1])) for m in mix]
+        self.paths, sid, row, game, src, weight = [], [], [], [], [], []
+        self.names, self.counts = [], []
+        for i, (g, wt) in enumerate(specs):
+            paths = sorted(glob.glob(g))
+            assert paths, f"no shards match {g}"
+            for q in paths:
+                with np.load(q) as z:  # only the small per-row arrays are decompressed here
+                    gm = z["game"].astype(np.int64)
+                    w = z["weight"].astype(np.float32) if "weight" in z.files else np.ones(len(gm), np.float32)
+                n = len(gm)
+                sid.append(np.full(n, len(self.paths), np.int32))
+                row.append(np.arange(n, dtype=np.int32))
+                game.append(gm)
+                src.append(np.full(n, i, np.int64))
+                weight.append(w * wt)
+                self.paths.append(q)
+            self.names.append("primary" if i == 0 else Path(g).parent.name or f"mix{i}")
+            self.counts.append(len(paths))
+        self.sid, self.row, self.game = np.concatenate(sid), np.concatenate(row), np.concatenate(game)
+        self.src, self.weight = np.concatenate(src), np.concatenate(weight)
+        val = is_val(self.game, val_frac)
+        self.n_rows = len(val)
+        self.train_rows = np.flatnonzero(~val & (self.weight > 0))
+        self.game_codes = np.unique(self.game, return_inverse=True)[1]
+        val_rows = np.flatnonzero(val)
+        self.vdata = self.assemble(val_rows)
+        self.val_sets = {nm: np.flatnonzero(self.vdata["src"] == i) for i, nm in enumerate(self.names)}
+        row_bytes = sum(v.dtype.itemsize * int(np.prod(v.shape[1:])) for v in self.vdata.values())
+        self.row_bytes = row_bytes
+        self.passes = max(1, math.ceil(len(self.train_rows) * row_bytes / (part_gb * 2**30)))
+        self.rng = np.random.default_rng([seed, 7_919])  # loader thread's own stream (permutations, value rows)
+
+    def assemble(self, rows: np.ndarray) -> dict[str, np.ndarray]:
+        """Arrays of `rows` (global row ids) in that order, as `load_sets` would give them (weights with the set
+        multiplier, `src`); each shard is decompressed once."""
+        s_of = self.sid[rows]
+        order = np.argsort(s_of, kind="stable")
+        shards, starts = np.unique(s_of[order], return_index=True)
+        ends = np.append(starts[1:], len(order))
+        out = None
+        for s, a, b in zip(shards, starts, ends):
+            pos = order[a:b]  # output positions of this shard's rows
+            d = load_shard(self.paths[s], self.gen)
+            r = self.row[rows[pos]]
+            if out is None:
+                out = {k: np.empty((len(rows), *v.shape[1:]), v.dtype) for k, v in d.items()}
+            for k, v in d.items():
+                out[k][pos] = v[r]
+            del d
+        if out is None:  # no rows: empty arrays with the right shapes from the first shard
+            d = load_shard(self.paths[0], self.gen)
+            out = {k: v[:0].copy() for k, v in d.items()}
+        out["weight"] = self.weight[rows]
+        out["src"] = self.src[rows]
+        return out
+
+    def plans(self, one_per_game: bool):
+        """Endless: per epoch a permutation of the training rows cut into `passes` equal parts -> (rows in
+        permutation order, their `vsel` or None: one random training position per game per epoch carries the value
+        loss). Cheap: nothing is decompressed here."""
+        while True:
+            vsel = None
+            if one_per_game:
+                sh = self.rng.permutation(self.train_rows)
+                first = sh[np.unique(self.game_codes[sh], return_index=True)[1]]
+                vsel = np.zeros(self.n_rows, np.float32)
+                vsel[first] = 1.0
+            perm = self.rng.permutation(self.train_rows)
+            for rows in np.array_split(perm, self.passes):
+                yield rows, (vsel[rows] if vsel is not None else None)
+
+    def batches(self, bs: int, device, rng: np.random.Generator, one_per_game: bool, prefetch: int = 1):
+        """Endless training minibatches (as `batches(..., rng, vsel)` yields them) from parts assembled by a
+        background thread; at most `prefetch` + 1 parts are in memory (a slot is taken before a part is built)."""
+        slots = threading.Semaphore(prefetch + 1)
+        q: queue.Queue = queue.Queue()
+        stop = threading.Event()
+
+        def work():
+            try:
+                for rows, vs in self.plans(one_per_game):
+                    while not slots.acquire(timeout=1.0):
+                        if stop.is_set():
+                            return
+                    if stop.is_set():
+                        return
+                    part = self.assemble(rows)
+                    if vs is not None:
+                        part["vsel"] = vs
+                    q.put(part)
+                    del part
+            except BaseException as e:  # surfaced in the training thread
+                q.put(e)
+
+        t = threading.Thread(target=work, name="stream-loader", daemon=True)
+        t.start()
+        try:
+            while True:
+                part = q.get()
+                if isinstance(part, BaseException):
+                    raise part
+                n = len(part["z"])
+                for i in range(0, n, bs):
+                    sl = slice(i, i + bs)
+                    mb = batch_to_tensors({k: v[sl] for k, v in part.items() if k not in ("game", "src", "vsel")},
+                                          device)
+                    if "vsel" in part:
+                        mb["vsel"] = torch.from_numpy(part["vsel"][sl]).to(device)
+                    m = len(part["z"][sl])
+                    mb["opp_cls"] = torch.full((m,), -1, dtype=torch.long, device=device)
+                    mb["drop_seed"] = torch.from_numpy(rng.integers(1, 2**31 - 1, m)).to(device)
+                    yield mb
+                del part
+                slots.release()
+        finally:
+            stop.set()
 
 
 def losses(net: Net, mb: dict, args, m: Meter | None) -> torch.Tensor:
@@ -149,6 +284,8 @@ def main():
     p.add_argument("--reinit", default="", help="comma list of module-name prefixes to re-initialise first")
     p.add_argument("--select", choices=("total", "value", "policy"), default="total")
     p.add_argument("--no-bf16", action="store_true", help="fp32 (+TF32) instead of bf16 autocast")
+    p.add_argument("--stream-gb", type=float, default=0.0,
+                   help="streaming loader with parts of about this many GiB (0 = every shard in memory)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -164,15 +301,24 @@ def main():
         print(line, flush=True)
         log.write(line + "\n")
 
-    # every shard in memory once (shards are compressed npz; a v2 decision is ~12 KB uncompressed)
-    data, names, counts = load_sets(args.shards, args.mix, args.gen)
-    val = is_val(data["game"], args.val_frac)
-    # training rows: weight > 0 only (a weight-0 set is reported on validation, never trained on)
-    train_idx = np.flatnonzero(~val & (data["weight"] > 0))
-    val_sets = {nm: np.flatnonzero(val & (data["src"] == i)) for i, nm in enumerate(names)}
-    val_idx = val_sets["primary"]
-    emit({"event": "data", "shards": counts, "sets": names, "decisions": int(len(val)), "train": int(len(train_idx)),
-          "val": {k: int(len(v)) for k, v in val_sets.items()}, "games": int(len(np.unique(data["game"]))),
+    stream = None
+    if args.stream_gb > 0:  # only a row index + the validation rows in memory; `data` = the validation rows
+        stream = StreamSource(args.shards, args.mix, args.gen, args.val_frac, args.stream_gb, args.seed)
+        data, names, counts = stream.vdata, stream.names, stream.counts
+        train_idx, val_sets = stream.train_rows, stream.val_sets
+        n_dec, n_games = stream.n_rows, len(np.unique(stream.game))
+        extra = {"stream": {"passes": stream.passes, "row_bytes": stream.row_bytes,
+                            "part_gib": round(len(train_idx) * stream.row_bytes / stream.passes / 2**30, 2)}}
+    else:
+        # every shard in memory once (shards are compressed npz; a v2 decision is ~12 KB uncompressed)
+        data, names, counts = load_sets(args.shards, args.mix, args.gen)
+        val = is_val(data["game"], args.val_frac)
+        # training rows: weight > 0 only (a weight-0 set is reported on validation, never trained on)
+        train_idx = np.flatnonzero(~val & (data["weight"] > 0))
+        val_sets = {nm: np.flatnonzero(val & (data["src"] == i)) for i, nm in enumerate(names)}
+        n_dec, n_games, extra = len(val), len(np.unique(data["game"])), {}
+    emit({"event": "data", "shards": counts, "sets": names, "decisions": int(n_dec), "train": int(len(train_idx)),
+          "val": {k: int(len(v)) for k, v in val_sets.items()}, "games": int(n_games), **extra,
           "spec": SPEC_VERSION, "args": {k: str(v) for k, v in vars(args).items()}})
 
     net = load(args.init, device) if args.init else Net(args.gen, **json.loads(args.model_json)).to(device)
@@ -232,38 +378,51 @@ def main():
     if args.init:  # the starting point is a candidate too (e.g. a refit that only makes things worse)
         best = evaluate(0)
         save(net, args.out / "best.pt", pretrain_step=0, val_score=best)
-    game_codes = np.unique(data["game"], return_inverse=True)[1] if args.value_sample == "one-per-game" else None
-    while step < total:
-        vsel = None
-        if game_codes is not None:  # one random training position per game this epoch carries the value loss
-            sh = rng.permutation(train_idx)
-            first = sh[np.unique(game_codes[sh], return_index=True)[1]]
-            vsel = np.zeros(len(data["z"]), np.float32)
-            vsel[first] = 1.0
-        for mb in batches(data, train_idx, args.batch_size, device, rng, vsel):
+
+    def train_step(mb: dict) -> None:
+        nonlocal step, best, m
+        for g in opt.param_groups:
+            g["lr"] = lr_at(step)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            loss = losses(net, mb, args, m)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_([q for q in net.parameters() if q.requires_grad], args.max_grad_norm)
+        opt.step()
+        m.add("grad_norm", gn.item())
+        step += 1
+        if step % 200 == 0:
+            emit({"event": "train", "step": step, "lr": lr_at(step), "samples_per_s":
+                  round(step * args.batch_size / (time.time() - start), 1),
+                  **{k: round(v, 5) for k, v in m.means().items()}})
+            m = Meter()
+        if step % args.eval_every == 0 or step == total:
+            score = evaluate(step)
+            save(net, args.out / "last.pt", pretrain_step=step)
+            if score < best:
+                best = score
+                save(net, args.out / "best.pt", pretrain_step=step, val_score=score)
+
+    if stream is not None:
+        it = stream.batches(args.batch_size, device, rng, args.value_sample == "one-per-game")
+        for mb in it:
             if step >= total:
                 break
-            for g in opt.param_groups:
-                g["lr"] = lr_at(step)
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                loss = losses(net, mb, args, m)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_([q for q in net.parameters() if q.requires_grad], args.max_grad_norm)
-            opt.step()
-            m.add("grad_norm", gn.item())
-            step += 1
-            if step % 200 == 0:
-                emit({"event": "train", "step": step, "lr": lr_at(step), "samples_per_s":
-                      round(step * args.batch_size / (time.time() - start), 1),
-                      **{k: round(v, 5) for k, v in m.means().items()}})
-                m = Meter()
-            if step % args.eval_every == 0 or step == total:
-                score = evaluate(step)
-                save(net, args.out / "last.pt", pretrain_step=step)
-                if score < best:
-                    best = score
-                    save(net, args.out / "best.pt", pretrain_step=step, val_score=score)
+            train_step(mb)
+        it.close()
+    else:
+        game_codes = np.unique(data["game"], return_inverse=True)[1] if args.value_sample == "one-per-game" else None
+        while step < total:
+            vsel = None
+            if game_codes is not None:  # one random training position per game this epoch carries the value loss
+                sh = rng.permutation(train_idx)
+                first = sh[np.unique(game_codes[sh], return_index=True)[1]]
+                vsel = np.zeros(len(data["z"]), np.float32)
+                vsel[first] = 1.0
+            for mb in batches(data, train_idx, args.batch_size, device, rng, vsel):
+                if step >= total:
+                    break
+                train_step(mb)
     save(net, args.out / "final.pt", pretrain_step=step)
 
 
