@@ -1,5 +1,5 @@
 #!/bin/bash
-# G9s vs G9p at a matched step (pre-registered in .orchestra/netv2/STATUS.md 05:20): waits for each lineage's first
+# G9s vs G9p at a matched step (pre-registered in .orchestra/netv2/STATUS.md 05:15): waits for each lineage's first
 # pool snapshot at >= STEP, copies both to runs/cmp/<N>M/, then plays 100-pair shards of the in-process head to head
 # (wsp's spd_h2h.py, vendored copy ws/wsp ee76994; duplicate pairs, gen9randombattle, A = G9s, B = G9p, both raw at
 # T 0.5, --seed SEED). After every shard (= one look) it runs both one-sided gain tests of wsp's approved sequential
