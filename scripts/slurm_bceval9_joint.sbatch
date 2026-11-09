@@ -8,6 +8,8 @@
 #   D. the better net vs Foul Play --gen 9, 400 games
 #   sbatch [--dependency=afterany:J] scripts/slurm_bceval9_joint.sbatch BC_ZIP P1_PT [ORDER]
 # ORDER = stage letters in run order (default CABD). D's "better net" is stage C's winner if C has run, else P1.
+# D uses scripts/netv2_foulplay_fp9.sbatch (netv2's Foul Play script + gloria's gen9 engine path for Foul Play).
+# BETTER_NET=<path> as a 4th argument overrides D's net (follow-up runs).
 # BC_ZIP may not exist yet at submit time (training inside another job): the job waits up to 1 h for it.
 #SBATCH --job-name=ws-data-bceval9
 #SBATCH --partition=long
@@ -17,7 +19,7 @@
 #SBATCH --time=8:00:00
 #SBATCH --output=/vol/bitbucket/fr1226/porygon-ws-data/logs/slurm-%j.out
 set -uo pipefail
-BC=$1 P1=$2 ORDER=${3:-CABD}
+BC=$1 P1=$2 ORDER=${3:-CABD} BETTER_OVERRIDE=${4:-}
 NV=/vol/bitbucket/fr1226/porygon-ws-netv2
 LOG=/vol/bitbucket/fr1226/porygon-ws-data/logs/bceval9-$SLURM_JOB_ID.txt
 for _ in $(seq 60); do [ -f "$BC" ] && break; echo "waiting for $BC"; sleep 60; done
@@ -36,7 +38,7 @@ stage() {  # NAME SCRIPT ARGS...: runs one netv2 stage, appends its result line 
 }
 echo "BC=$BC P1=$P1 job $SLURM_JOB_ID $(date -Is)" | tee -a "$LOG"
 SEARCH=(ms=1000 samples=4 eval_config=stock prior_weight=0)
-BETTER=$P1
+BETTER=${BETTER_OVERRIDE:-$P1}
 echo "order $ORDER" | tee -a "$LOG"
 for X in $(echo "$ORDER" | grep -o .); do
   case $X in
@@ -47,7 +49,7 @@ for X in $(echo "$ORDER" | grep -o .); do
     A) stage A scripts/netv2_vs_search.sbatch "$BC$T" 400 --gen 9 "${SEARCH[@]}" ;;
     B) stage B scripts/netv2_vs_search.sbatch "$P1$T" 400 --gen 9 "${SEARCH[@]}" ;;
     D) echo "stage D net: $BETTER" | tee -a "$LOG"
-       stage D scripts/netv2_foulplay.sbatch "$BETTER" 400 --gen 9 --temperature 0.5 ;;
+       stage D /vol/bitbucket/fr1226/porygon-ws-data/code/scripts/netv2_foulplay_fp9.sbatch "$BETTER" 400 --gen 9 --temperature 0.5 ;;
     *) echo "unknown stage $X" | tee -a "$LOG" ;;
   esac
 done
