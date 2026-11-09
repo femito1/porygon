@@ -650,6 +650,8 @@ def do_unit(job: tuple) -> dict:
             if spec == "v2pre":  # CONTRACTS.md "v2 supervised shards": obs/<field>, aux/<field>, f32 target, i64 game
                 arrays["target"] = arrays["target"].astype(np.float32)
                 arrays["game"] = np.asarray(c["game"], dtype=np.int64)
+                if arrays.get("searched") is not None and arrays["searched"].any():  # sharper policy targets
+                    arrays.update(sharpened_targets(arrays["target"]))  # (raw visit shares are flat; netv2 D1)
                 arrays.update({f"obs/{k}": np.stack([o["obs"][k] for o in obs]) for k in obs[0]["obs"]})
                 arrays.update({f"aux/{k}": np.stack([o["aux"][k] for o in obs]) for k in obs[0]["aux"]})
             elif isinstance(obs[0], dict):  # a structured encoder (netv2's v2): one array per field, own dtypes
@@ -699,6 +701,20 @@ def link_previous(prev: Path, new: Path) -> None:
             os.link(f, new / f.name)
         except OSError:
             shutil.copy2(f, new / f.name)
+
+
+def sharpened_targets(target: np.ndarray) -> dict[str, np.ndarray]:
+    """Extra policy targets for search labels (v2pre extras, raw shares stay in `target`): `target_argmax` = one-hot
+    of the most visited action, `target_t05` = shares**(1/0.5) renormalised (temperature 0.5). Rows without a policy
+    target (all zero) stay zero."""
+    t = np.clip(target.astype(np.float32), 0, None)
+    has = t.sum(1) > 0
+    am = np.zeros_like(t)
+    am[np.flatnonzero(has), t[has].argmax(1)] = 1
+    sq = t ** 2
+    z = sq.sum(1, keepdims=True)
+    t05 = np.divide(sq, z, out=np.zeros_like(sq), where=z > 0)
+    return {"target_argmax": am.astype(np.float16), "target_t05": t05.astype(np.float16)}
 
 
 def main() -> None:
@@ -824,7 +840,9 @@ def main() -> None:
                      "netv2_commit": netv2_commit(a.extra_src), "data_commit": meta["code_commit"],
                      "game_id": "crc32 of the battle id (`game`), shared by all of a game's decisions",
                      "extras": "q f16[N,A], root_value f16, visits f32, searched u8, action i16, mask i8, turn, "
-                               "forced, n_legal (ignored by porygon.v2.pretrain)"}
+                               "forced, n_legal; search labels also target_argmax f16[N,A] (one-hot of the most "
+                               "visited action) and target_t05 f16[N,A] (shares sharpened at temperature 0.5); "
+                               "all ignored by porygon.v2.pretrain unless it selects them"}
         (Path(d) / "meta.json").write_text(json.dumps(
             {**meta, **extra, "encoder": spec, "encoder_name": encoder_name(spec), "obs_dim": obs_dim.get(spec)},
             indent=1))
