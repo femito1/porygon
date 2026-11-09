@@ -431,3 +431,74 @@ def test_end_to_end_on_fastenv(tmp, prod_nets):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "-s"]))
+
+
+# ---------------------------------------------------------------- --snapshot-cache-cpu (2026-11-09)
+
+def _spy_to(net, calls: list):
+    """Record every `net.to(...)` (device moves of the CPU tier) and delegate."""
+    orig = net.to
+    object.__setattr__(net, "to", lambda *a, **k: (calls.append(str(a[0]) if a else str(k)), orig(*a, **k))[1])
+
+
+def test_cpu_tier_off_is_unchanged(tmp):
+    """Default (no CPU tier): an evicted net is loaded from disk again, as before; no CPU-tier state or stats."""
+    t = fake_trainer(tmp, "--snapshot-cache", "2")
+    for i in range(3):
+        save(make_net(50 + i, 9, **SMALL), t.pool_dir / f"x{i}.pt")
+    rng = np.random.default_rng(11)
+    for name in ("x0.pt", "x1.pt", "x2.pt", "x0.pt"):
+        t._opp_act(name, synth_obs(9, 4, 6, rng))
+    loads, _ = t.pool_loads.take()
+    assert loads["pool/load_attempts_snapshot"] == 4 and set(t.snapshots) == {"x2.pt", "x0.pt"}
+    assert not t.__dict__.get("snapshots_cpu") and not any(k.startswith("pool/cpu_hits") for k in loads)
+
+
+def test_cpu_tier_brings_evicted_nets_back(tmp):
+    """--snapshot-cache-cpu: an evicted net is kept (same object), moved to the CPU at the next step, and comes back
+    without a disk load with the same logits; the tier is LRU-bounded; derived caches are dropped on the move."""
+    t = fake_trainer(tmp, "--snapshot-cache", "2", "--snapshot-cache-cpu", "2")
+    for i in range(4):
+        save(make_net(60 + i, 9, **SMALL), t.pool_dir / f"x{i}.pt")
+    rng = np.random.default_rng(12)
+    ob = synth_obs(9, 5, 6, rng)
+    t._opp_act("x0.pt", ob)
+    net0, calls = t.snapshots["x0.pt"], []
+    _spy_to(net0, calls)
+    with torch.no_grad():
+        ref = t._opp_logits(net0, ob)
+    t._opp_act("x1.pt", ob)
+    t._opp_act("x2.pt", ob)  # evicts x0 into the CPU tier (still on the device until the next step)
+    assert "x0.pt" in t.snapshots_cpu and calls == []
+    t._opp_act("x3.pt", ob)  # flush: x0 moves to the CPU (its cache dropped); x1 is evicted
+    assert calls == ["cpu"] and all("_cache" not in m.__dict__ for m in net0.modules())
+    assert list(t.snapshots_cpu) == ["x0.pt", "x1.pt"] and set(t.snapshots) == {"x2.pt", "x3.pt"}
+    loads, _ = t.pool_loads.take()
+    assert loads["pool/load_attempts_snapshot"] == 4
+    t._opp_act("x0.pt", ob)  # back from the CPU tier: the same object, no disk load
+    assert t.snapshots["x0.pt"] is net0 and calls == ["cpu", str(CPU)]
+    loads, _ = t.pool_loads.take()
+    assert (loads["pool/load_attempts_snapshot"], loads["pool/cpu_hits_snapshot"]) == (0, 1)
+    with torch.no_grad():
+        assert torch.equal(t._opp_logits(net0, ob), ref)
+    for name in ("x1.pt", "x2.pt", "x3.pt", "x0.pt", "x1.pt"):  # cycling 4 nets: tier never above its bound
+        t._opp_act(name, ob)
+        assert len(t.snapshots_cpu) <= 2 and len(t.snapshots) <= 2
+    assert not (set(t.snapshots) & set(t.snapshots_cpu))
+
+
+def test_cpu_tier_waits_for_the_step(tmp):
+    """In one stacked step a net evicted by a later lookup still plays that step on the device; it moves to the CPU
+    only at the next step (before its lookups)."""
+    t = fake_trainer(tmp, "--snapshot-cache", "2", "--snapshot-cache-cpu", "4")
+    for i in range(3):
+        save(make_net(80 + i, 9, **SMALL), t.pool_dir / f"x{i}.pt")
+    rng = np.random.default_rng(13)
+    t._opp_act("x0.pt", synth_obs(9, 4, 6, rng))
+    net0, calls = t.snapshots["x0.pt"], []
+    _spy_to(net0, calls)
+    acts, st = t._opp_act_many([(f"x{i}.pt", synth_obs(9, 4, 6, rng)) for i in range(3)])  # x0 evicted mid-step
+    assert all(len(a) == 4 for a in acts) and st["opp_uniform"] == 0
+    assert "x0.pt" in t.snapshots_cpu and calls == []  # not moved while its step was assembled
+    t._opp_act_many([("x1.pt", synth_obs(9, 4, 6, rng))])
+    assert calls == ["cpu"]

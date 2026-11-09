@@ -689,6 +689,9 @@ def parse_args(argv=None):
     a("--compile", action=argparse.BooleanOptionalAction, default=None,
       help="torch.compile the damage layer (default: on CUDA); falls back to eager if compilation fails")
     a("--snapshot-cache", type=int, default=8, help="pool snapshot opponents kept on the device")
+    a("--snapshot-cache-cpu", type=int, default=0,
+      help="pool snapshot opponents evicted from the device cache kept in CPU memory (LRU; 0 = off): a net found "
+           "there moves back to the device (milliseconds) instead of a load from disk (~0.1-0.3 s per net)")
     a("--stacked-opp", action="store_true",
       help="--collector fastenv: the pool opponents of one collector step share one forward when they have the same "
            "architecture (weights stacked, porygon.v2.stacked; ~one forward's kernel launches instead of one "
@@ -751,7 +754,9 @@ class PoolLoads:
         self.lock = threading.Lock()
         self.attempts = dict.fromkeys(self.KINDS, 0)
         self.failures = dict.fromkeys(self.KINDS, 0)
+        self.cpu_hits = dict.fromkeys(self.KINDS, 0)  # --snapshot-cache-cpu: nets brought back from CPU memory
         self._taken = (dict(self.attempts), dict(self.failures))
+        self._taken_cpu = dict(self.cpu_hits)
         self._noted: set = set()
         self._messages: list[str] = []
 
@@ -774,14 +779,21 @@ class PoolLoads:
         if error is not None:
             self.note(("failed", name), f"pool load FAILED {kind} {path}: {error!r}")
 
+    def record_cpu_hit(self, name: str) -> None:
+        with self.lock:
+            self.cpu_hits[self.kind(name)] += 1
+
     def take(self) -> tuple[dict[str, float], list[str]]:
         with self.lock:
             (a0, f0), now = self._taken, (dict(self.attempts), dict(self.failures))
-            self._taken, msgs, self._messages = now, self._messages, []
+            c0, cnow = self._taken_cpu, dict(self.cpu_hits)
+            self._taken, self._taken_cpu, msgs, self._messages = now, cnow, self._messages, []
         st = {}
         for k in self.KINDS:
             st[f"pool/load_attempts_{k}"] = float(now[0][k] - a0[k])
             st[f"pool/load_failures_{k}"] = float(now[1][k] - f0[k])
+            if cnow[k] or c0[k]:  # only with --snapshot-cache-cpu (unchanged stats otherwise)
+                st[f"pool/cpu_hits_{k}"] = float(cnow[k] - c0[k])
         return st, msgs
 
 
@@ -917,33 +929,68 @@ class Trainer:
         """Sampled actions of pool snapshot `name` (cached on the device; uniform over legal actions if it cannot
         be loaded). Collector thread: every load (cache miss) and failure is only recorded in `self.pool_loads`;
         the main loop logs the failures and trips the pool guard after each update (`_pool_alarm`)."""
+        self._flush_cpu()
         net = self._opp_net(name)
         return self._opp_sample(None if net is None else self._opp_logits(net, batch), batch)
 
     def _opp_net(self, name: str) -> Net | None:
-        """`_opp_act`'s net for `name`: the cached one (moved to most recently used), else loaded (recorded in
-        `self.pool_loads`, the least recently used evicted when the cache is full); None if it cannot be loaded."""
+        """`_opp_act`'s net for `name`: the cached one (moved to most recently used), else (--snapshot-cache-cpu)
+        the one kept in CPU memory, moved back to the device, else loaded (recorded in `self.pool_loads`); when the
+        device cache is full its least recently used net is evicted (to the CPU tier if on); None if it cannot be
+        loaded."""
         net = self.snapshots.pop(name, None)
         if net is None:
             name = self._rotated(name)
             net = self.snapshots.pop(name, None)
         if net is None:
-            path = self.pool_dir / name
-            try:
-                net = load(path, self.device)
-                assert net.gen == self.gen, f"gen {net.gen} snapshot"
-                if self.compile:  # same parameter-free layer: reuse the actor's compiled function (no recompiles)
-                    object.__setattr__(net, "_damage_compiled", getattr(self.actor, "_damage_compiled", None))
-            except Exception as e:
-                self.pool_loads.record(name, path, e)
-                net = None
+            cpu = self.__dict__.setdefault("snapshots_cpu", {})
+            net = cpu.pop(name, None)
+            if net is not None:  # the same object goes back (OppStack slots are matched by identity)
+                self.__dict__.setdefault("pending_cpu", {}).pop(id(net), None)
+                net.to(self.device)
+                self.pool_loads.record_cpu_hit(name)
             else:
-                self.pool_loads.record(name, path)
+                path = self.pool_dir / name
+                try:
+                    net = load(path, self.device)
+                    assert net.gen == self.gen, f"gen {net.gen} snapshot"
+                    if self.compile:  # same parameter-free layer: reuse the actor's compiled function (no recompiles)
+                        object.__setattr__(net, "_damage_compiled", getattr(self.actor, "_damage_compiled", None))
+                except Exception as e:
+                    self.pool_loads.record(name, path, e)
+                    net = None
+                else:
+                    self.pool_loads.record(name, path)
             if len(self.snapshots) >= self.args.snapshot_cache:
-                self.snapshots.pop(next(iter(self.snapshots)))
+                self._evict(next(iter(self.snapshots)))
         if net is not None:
             self.snapshots[name] = net  # most recently used last
         return net
+
+    def _evict(self, name: str) -> None:
+        """Drop `name` from the device cache; with --snapshot-cache-cpu keep it in the CPU tier (LRU, bounded). The
+        move to the CPU waits for the next collector step (`_flush_cpu`): a net evicted while its step is still
+        being assembled may be in that step's forward."""
+        net = self.snapshots.pop(name)
+        cap = getattr(self.args, "snapshot_cache_cpu", 0)
+        if cap > 0:
+            cpu = self.__dict__.setdefault("snapshots_cpu", {})
+            cpu[name] = net
+            self.__dict__.setdefault("pending_cpu", {})[id(net)] = net
+            while len(cpu) > cap:
+                old = cpu.pop(next(iter(cpu)))
+                self.pending_cpu.pop(id(old), None)
+
+    def _flush_cpu(self) -> None:
+        """Move the nets evicted during earlier collector steps to the CPU (called before a step's lookups)."""
+        pending = self.__dict__.get("pending_cpu")
+        if pending:
+            for net in list(pending.values()):
+                net.to("cpu")
+                for m in net.modules():  # derived device tensors (Entity.all_features' no-grad cache): recomputed later
+                    m.__dict__.pop("_cache", None)
+                    m.__dict__.pop("_cache_key", None)
+            pending.clear()
 
     @torch.no_grad()
     def _opp_logits(self, net: Net, batch: dict) -> torch.Tensor:
@@ -977,6 +1024,7 @@ class Trainer:
         and the run continues with per-net forwards (opp_stack_errors)."""
         from porygon.v2.stacked import OppStack, signature
         stacks = self.__dict__.setdefault("opp_stacks", {})  # signature -> OppStack
+        self._flush_cpu()
         nets = [self._opp_net(name) for name, _ in items]
         groups: dict[tuple, list[int]] = {}
         for i, net in enumerate(nets):
