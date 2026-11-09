@@ -670,6 +670,8 @@ class SearchPlayer(Player):
         assert fmt == inference.FORMAT, (f"battle format {fmt} but PORYGON_GEN={GEN_NUM} (conversion, action space and "
                                          f"engine build are {inference.FORMAT}'s): set PORYGON_GEN to match")
         self.policy, self.ms, self.samples = policy, ms, samples
+        if policy is not None and os.environ.get("PORYGON_TORCH_THREADS"):  # opt-in (label jobs): a B=1 prior forward
+            torch.set_num_threads(int(os.environ["PORYGON_TORCH_THREADS"]))  # is 2.5 ms on 1 thread vs 118 ms CPU on many
         self.prior_weight, self.top_k, self.value_weight = prior_weight, top_k, value_weight
         self.c_puct = c_puct
         assert root_game in (None, "max", "sample"), root_game
