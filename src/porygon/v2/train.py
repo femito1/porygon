@@ -26,7 +26,8 @@ rollout); `--critic-warmup-steps N`: until N env steps only the value and aux he
 so the init's policy acts unchanged while the critic fits its games); `--frozen CKPT...` + `--p-frozen p`: pool
 battles play a frozen net (copied to pool_dir/frozen/) with probability p, `--frozen-best` adds each new best_model
 there (anti-cycling); `--guard-entropy-rel R`: entropy guard at R × the mean entropy of this process's first 5
-updates.
+updates; collapse guards `--guard-entropy-min` / `--guard-ptop-max` (entropy too low, or too many choices with a top
+probability ≥ 0.9 — `ptop` in the log, over decisions with ≥ 2 legal actions — for 5 updates).
 
 Distillation (2026-11-09): `--distill GLOB` loads v2 supervised shards (`porygon.v2.pretrain`'s format; rows without
 target mass on a legal action dropped) into CPU memory once, split by game with `pretrain.is_val` (--distill-val-frac;
@@ -266,8 +267,11 @@ def ppo_losses(out: dict, mb: dict, args, normalized: bool = False) -> dict[str,
         kl = ((ratio - 1) - log_ratio).mean()
         clip = ((ratio - 1).abs() > args.clip_range).float().mean()
         r_mean, r_std = ratio.mean(), ratio.std() if ratio.numel() > 1 else torch.zeros_like(ratio.mean())
+        # sharpness: share of real choices (>= 2 legal actions) whose top action has probability >= 0.9
+        multi = mask.sum(-1) >= 2
+        ptop = ((probs.max(-1).values >= 0.9) & multi).float().sum() / multi.float().sum().clamp(min=1.0)
     return {"pg": pg, "ent": ent, "za": za, "vf": vf, "kl": kl, "clip": clip, "ratio_mean": r_mean, "ratio_std": r_std,
-            "kla": kla}
+            "kla": kla, "ptop": ptop}
 
 
 def _trunk_grad(loss: torch.Tensor, params: list) -> torch.Tensor:
@@ -510,7 +514,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                     total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"]
                              + args.vf_coef * L["vf"] + args.aux_coef * aux + anchor_coef * L["kla"])
                 (total * w).backward()
-                for k in ("pg", "ent", "za", "vf", "kl", "clip", "kla"):
+                for k in ("pg", "ent", "za", "vf", "kl", "clip", "kla", "ptop"):
                     sums[k] = sums.get(k, 0.0) + w * L[k].detach()
                 sums["aux"] = sums.get("aux", 0.0) + w * aux.detach()
                 sums["total"] = sums.get("total", 0.0) + w * total.detach()
@@ -525,7 +529,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                     m.add("loss/distill", ce.item())
             gn = torch.nn.utils.clip_grad_norm_(net.parameters(), args.max_grad_norm)
             opt.step()
-            for k in ("pg", "ent", "za", "vf", "kl", "clip"):
+            for k in ("pg", "ent", "za", "vf", "kl", "clip", "ptop"):
                 m.add(f"loss/{k}", float(sums[k]))
             if anchor is not None:
                 m.add("loss/kl_anchor", float(sums["kla"]))
@@ -603,6 +607,11 @@ def parse_args(argv=None):
     a("--clip-range", type=float, default=0.1)
     a("--guard-anchor-drop", type=float, default=0.0, help="stop when the eval score is this far below its best twice")
     a("--guard-entropy-max", type=float, default=0.0, help="stop when the policy entropy exceeds this for 5 updates")
+    a("--guard-entropy-min", type=float, default=0.0,
+      help="collapse guard: stop when the policy entropy is below this for 5 updates")
+    a("--guard-ptop-max", type=float, default=0.0,
+      help="collapse guard: stop when the share of choices (>= 2 legal actions) with top probability >= 0.9 exceeds "
+           "this for 5 updates")
     a("--guard-entropy-rel", type=float, default=0.0,
       help="entropy guard at this multiple of the mean entropy of this process's first 5 updates (if no max)")
     a("--kl-anchor", type=Path, help="frozen v2 net: add beta(t) * KL(anchor || pi) to the loss")
@@ -1012,6 +1021,19 @@ class Trainer:
                     self.ent_bad = getattr(self, "ent_bad", 0) + 1 if st.get("loss/ent", 0.0) > cap else 0
                     if self.ent_bad >= 5:
                         self.trip_guard(f"entropy > {cap:.3f} for 5 updates")
+                # collapse guards (two-sided entropy control): entropy below --guard-entropy-min, or the share of
+                # near-deterministic choices above --guard-ptop-max, for 5 updates in a row; not during the warm-up
+                if updates_here > 5 and not heads_only:
+                    if a.guard_entropy_min > 0:
+                        low = st.get("loss/ent", 1e9) < a.guard_entropy_min
+                        self.ent_low = getattr(self, "ent_low", 0) + 1 if low else 0
+                        if self.ent_low >= 5:
+                            self.trip_guard(f"collapse: entropy < {a.guard_entropy_min} for 5 updates")
+                    if a.guard_ptop_max > 0:
+                        sharp = st.get("loss/ptop", 0.0) > a.guard_ptop_max
+                        self.ptop_bad = getattr(self, "ptop_bad", 0) + 1 if sharp else 0
+                        if self.ptop_bad >= 5:
+                            self.trip_guard(f"collapse: P(top >= 0.9) > {a.guard_ptop_max} for 5 updates")
                 if c["steps"] >= next_snap:
                     next_snap = nxt(a.snapshot_every)
                     save(self.net, self.pool_dir / f"{c['steps']:011d}.pt")
@@ -1061,7 +1083,7 @@ class Trainer:
                 + (f"stale {st['perf/fastenv_stale_frac']:.3f} " if "perf/fastenv_stale_frac" in st else "")
                 + f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
                 f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
-                f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} "
+                f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} ptop {g('loss/ptop')} "
                 f"dst {g('loss/distill')} dval {g('diag/distill_val_ce')} "
                 f"upd_s {st['perf/update_s']:.1f} | {aux}")
 
