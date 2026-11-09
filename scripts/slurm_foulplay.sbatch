@@ -93,14 +93,19 @@ EOF
 OUT=runs/foulplay-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
 LOGS=${TMPDIR:-/tmp}/porygon-fp-$SLURM_JOB_ID; mkdir -p "$LOGS"  # Foul Play logs are chatty: keep them off the shared disk
 PORT=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 + 15 ))
-# duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged
+# duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged. The server writes
+# both synchronously (appendFileSync at every battle end, writeFileSync at every battle start): on the shared disk one
+# slow write froze the whole server, every battle and query, for 15-30 s, a few times per 100 games. So they go to the
+# node-local $LOGS and are copied to $OUT every 5 min and at the end (the oracle reads $PORYGON_DUPLICATE_TEAMS).
 [ -f .showdown-eval/dist/server/index.js ] || scripts/build_eval_server.sh
-export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$ROOT/$OUT/battles.jsonl
-export PORYGON_DUPLICATE_TEAMS=$ROOT/$OUT/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS"  # true teams (--oracle)
+export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$LOGS/battles.jsonl
+export PORYGON_DUPLICATE_TEAMS=$LOGS/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS" "$OUT/teams"  # true teams (--oracle)
 export PORYGON_DUPLICATE_GROUP='^fp'
+save_dup() { cp "$LOGS/battles.jsonl" "$OUT/" 2>/dev/null || true; cp -ru "$LOGS/teams/." "$OUT/teams/" 2>/dev/null || true; }
 scripts/start_servers.sh 1 "$PORT"
 LOOPS=()
-trap 'kill "${LOOPS[@]}" 2>/dev/null || true
+(while sleep 300; do save_dup; done) & LOOPS+=($!)
+trap 'kill "${LOOPS[@]}" 2>/dev/null || true; save_dup
       pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $PORT\$" || true
       pkill -u "$USER" -f "^[^ ]*python[0-9.]* run\.py --websocket-uri ws://localhost:$PORT/" || true
       cp "$LOGS"/fp0.log "$OUT"/ 2>/dev/null || true; rm -rf "$LOGS"' EXIT
@@ -146,6 +151,7 @@ WORKERS=$(( $(nproc) - K * FP_PAR - 3 ))
 echo "nproc $(nproc), $K Foul Play instances x $FP_PAR cores, $WORKERS engine workers for our search"
 .venv/bin/python scripts/vs_foulplay.py "$MODEL" --player search --port "$PORT" --opponents "${NAMES[@]}" \
   --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" --format "$FORMAT" "$@" 2>&1 | tee "$OUT/vs.log" || true
+save_dup
 .venv/bin/python scripts/analyze_benchmark.py "$OUT" 2>&1 | tee "$OUT/analysis.txt" || true
 python3 - "$OUT/results.jsonl" <<'EOF'
 import json, math, sys

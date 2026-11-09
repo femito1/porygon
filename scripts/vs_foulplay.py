@@ -136,20 +136,19 @@ async def wait_ready(player, queries: ServerQueries, opp: str, args) -> tuple[st
     the /leave, the |deinit| is already queued on its connection ahead of our challenge, so the challenge reaches its
     accept loop instead of being swallowed. Returns (state, seconds waited): "ready"; "busy" (still in a battle room
     after --ready-timeout s) or "offline" (not connected for --offline-timeout s, e.g. restarting): challenge anyway
-    and let the retries handle it, as before; "noreply" (no userdetails answer) or "blind" (the server did not list
-    the opponent's battle room during the first game): the old fixed sleep.
+    and let the retries handle it, as before; "noreply" (no userdetails answer for --noreply-timeout s) or "blind" (the
+    server did not list the opponent's battle room during a battle): the old fixed sleep.
     --pre-game-wait sleep: the old fixed --pre-game-sleep before every challenge."""
     t0 = time.monotonic()
     if args.pre_game_wait == "sleep" or queries.blind:
         await asyncio.sleep(args.pre_game_sleep)
         return "sleep" if args.pre_game_wait == "sleep" else "blind", time.monotonic() - t0
-    misses, warned = 0, False
+    warned = False
     while True:
-        d = await queries.userdetails(opp)
+        d = await queries.userdetails(opp, timeout=2.0)
         waited = time.monotonic() - t0
-        if d is None:
-            misses += 1
-            if misses >= 3:  # no answer: the old fixed sleep for this game (for good if it never answered at all)
+        if d is None:  # the server is busy (it froze 15-30 s on synchronous log writes to the shared disk): ask again
+            if waited > args.noreply_timeout:  # never answers: the old fixed sleep (for good if it never answered)
                 queries.blind = not queries.details
                 await asyncio.sleep(args.pre_game_sleep)
                 return "noreply", time.monotonic() - t0
@@ -265,6 +264,7 @@ async def main():
     p.add_argument("--pre-game-sleep", type=float, default=3.0, help="seconds (sleep mode, and the no-reply fallback)")
     p.add_argument("--ready-timeout", type=float, default=20, help="ready: challenge anyway after this long in a battle room")
     p.add_argument("--offline-timeout", type=float, default=600, help="ready: wait this long for an offline Foul Play")
+    p.add_argument("--noreply-timeout", type=float, default=60, help="ready: fixed sleep if the server does not answer")
     p.add_argument("--start-poll", type=float, default=0.1, help="seconds between checks for the battle start (was 0.5)")
     p.add_argument("--battle-timeout", type=float, default=1800)
     p.add_argument("--results", default="foulplay_results.jsonl", help="per-battle JSONL (appended)")
