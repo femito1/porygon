@@ -12,8 +12,11 @@ set -uo pipefail
 C=${NV2:-/vol/bitbucket/fr1226/porygon-ws-netv2}; V=$C/vendor/wsp-ee76994; PY=/vol/bitbucket/fr1226/gloria/.venv/bin/python
 STEP=$1 SEED=$2 WORKERS=${CMP_WORKERS:-3}
 D=$C/runs/cmp/$((STEP / 1000000))M
-S_DIRS="/tmp/ws-netv2-718701/run/G9s/pool $C/runs/r1/20261108-220401-718701/G9s/pool"
-P_DIRS="$C/runs/r1/handover-g9p/pool /tmp/ws-netv2-741849/run/G9/pool $C/runs/g9/20261109-021316-741849/G9/pool"
+# pool dirs of each lineage wherever it trained (node-local ones are only visible inside that job; the mirrors lag
+# <= 10 min); after the MAIN-RUN RULE swap (STATUS.md, agent 4) G9s trains in 741849 (run/G9s) and G9p in 718701
+# (run/G9p). Override with CMP_S_DIRS / CMP_P_DIRS.
+S_DIRS=${CMP_S_DIRS:-"/tmp/ws-netv2-718701/run/G9s/pool $C/runs/r1/20261108-220401-718701/G9s/pool /tmp/ws-netv2-741849/run/G9s/pool $C/runs/g9/20261109-021316-741849/G9s/pool"}
+P_DIRS=${CMP_P_DIRS:-"$C/runs/r1/handover-g9p/pool /tmp/ws-netv2-741849/run/G9/pool $C/runs/g9/20261109-021316-741849/G9/pool /tmp/ws-netv2-718701/run/G9p/pool $C/runs/r1/20261108-220401-718701/G9p/pool"}
 say() { echo "$(date -u +%T) $*"; }
 first_snap() {  # first snapshot (numeric name) >= STEP in the given pool dirs
   local d f n
