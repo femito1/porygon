@@ -11,6 +11,9 @@
 # PLAN.env (bash, sourced): NAME GEN TAG OPP ARMS=(spec ...) BLOCK_PAIRS BLOCKS CONC FUTILITY MIN_CPUS
 #   [BLOCK_TIMEOUT_MIN (default 240)] [DRY_P=(p ...): NS_DRY=1 writes synthetic games with these win rates instead
 #   of playing (laptop dry runs of the control flow)].
+# A block plays in a node-local directory (NS_LOCAL, default ${TMPDIR:-/tmp}/ws-fastenv-ns-<job>), copied to OUT at its
+# end: appends to the shared disk can stall an event loop for seconds (wsp measured ≈ 2 s per game for the server's
+# duplicate log), and the hybrid logs every searched decision. A block cut by a crash is lost (and voids the run).
 # Control: touch OUT/STOP = stop after the current block; OUT/STOP_NOW = kill the current block and stop.
 # Output: OUT/manifest.txt, OUT/looks.jsonl, OUT/result.txt + result.json (netsearch_slot.py report), arm-K/block-J/.
 set -uo pipefail
@@ -53,9 +56,11 @@ NARMS=${#ARMS[@]}
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$OUT/run.log"; }
 
 SERVER_W= SERVER_G= EVAL_W= EVAL_G=  # waiter pids (exit code = the command's) and session ids (to kill)
+LOCAL=${NS_LOCAL:-${TMPDIR:-/tmp}/ws-fastenv-ns-$JOB}
 cleanup() {
   [ -z "$EVAL_G" ] || kill -- -"$EVAL_G" 2>/dev/null
   [ -z "$SERVER_G" ] || kill -- -"$SERVER_G" 2>/dev/null
+  [ -z "$LOCAL" ] || rm -rf "$LOCAL"
 }
 # spawn PGIDFILE CMD...: CMD in its own session, in the background; $! = a waiter whose exit code is CMD's, and
 # PGIDFILE gets the session id (kill -- -ID stops CMD and its children). setsid --wait forks only when it must.
@@ -153,15 +158,23 @@ stop_server() {
   SERVER_W= SERVER_G=
 }
 
-play_block() {  # K J: arm K's block J; returns the client's exit code
-  local k=$1 j=$2 spec=${ARMS[$(($1 - 1))]} dir=$OUT/arm-$1/block-$2 seed=${TAG}b$2 rc waited=0
+play_block() {  # K J: arm K's block J (node-local, then copied to OUT/arm-K/block-J); returns the client's exit code
+  local k=$1 j=$2 spec=${ARMS[$(($1 - 1))]} dir=$LOCAL/arm-$1/block-$2 seed=${TAG}b$2 rc waited=0
   local n=$((2 * BLOCK_PAIRS)) tag=${JOB}a$1b$2
-  mkdir -p "$dir"
+  rm -rf "$dir"; mkdir -p "$dir" "$OUT/arm-$k"
   case "$spec" in netsearch:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
   if [ "$DRY" = 1 ]; then
     $SLOT fake "$dir" --games "$n" --p "${DRY_P[$(($1 - 1))]}" --a "pa$tag" --seed "$seed" > "$dir/evaluate.log" 2>&1
-    return
+    rc=$?
+  else
+    run_block "$dir" "$seed" "$spec" "$n" "$tag"; rc=$?
   fi
+  cp -a "$dir" "$OUT/arm-$k/block-$j.part" && mv "$OUT/arm-$k/block-$j.part" "$OUT/arm-$k/block-$j" && rm -rf "$dir"
+  return $rc
+}
+
+run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
+  local dir=$1 seed=$2 spec=$3 n=$4 tag=$5 rc waited=0
   start_server "$dir" "$seed" || return 1
   spawn "$dir/client.pgid" env PORYGON_DUPLICATE="$seed" PORYGON_DUPLICATE_LOG="$dir/battles.jsonl" \
     PORYGON_DUPLICATE_GROUP='^pa' "$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" "$spec" "$OPP" --n-battles "$n" \
