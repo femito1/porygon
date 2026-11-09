@@ -1,12 +1,13 @@
 """Held-out masks for porygon.bc (--val-mask) that reproduce another dataset's game split on paired shards.
 
-    python scripts/paired_val_mask.py V1_DIR PAIRED_DIR OUT_DIR [--frac 0.06] [--expect N]
+    python scripts/paired_val_mask.py V1_DIR PAIRED_DIR OUT_DIR [--frac 0.06] [--expect N] [--games FILE]
 
 V1_DIR and PAIRED_DIR hold shards of the same converter pass under the same file names (e.g. the v1 and v2pre
 encodings of one dataset version). Each pair must agree row by row on turn, action, mask, forced, z and target
 (and PAIRED's obs/action_mask, if present, must equal mask); any mismatch aborts. The split is netv2's
 porygon.v2.pretrain.is_val on PAIRED's int64 `game`: crc32(game as 8 little-endian signed bytes) % 10000
-< frac * 10000. Writes OUT_DIR/<shard stem>.npy (bool per row) and OUT_DIR/split.json (counts).
+< frac * 10000. --games FILE (one id per line, # comments): the val games must be exactly the listed ids present
+in PAIRED. Writes OUT_DIR/<shard stem>.npy (bool per row) and OUT_DIR/split.json (counts).
 """
 
 import argparse
@@ -31,6 +32,7 @@ def main(argv=None) -> None:
     ap.add_argument("out", type=Path)
     ap.add_argument("--frac", type=float, default=0.06)
     ap.add_argument("--expect", type=int, help="abort unless the val set has exactly this many decisions")
+    ap.add_argument("--games", type=Path, help="held-out game ids the val set must equal (within PAIRED)")
     a = ap.parse_args(argv)
     a.out.mkdir(parents=True, exist_ok=True)
     names = sorted(p.name for p in a.v1.glob("shard-*.npz"))
@@ -38,6 +40,7 @@ def main(argv=None) -> None:
     if names != other:
         sys.exit(f"shard names differ: {sorted(set(names) ^ set(other))[:10]}")
     tot = {"shards": len(names), "decisions": 0, "val_decisions": 0, "val_games": 0, "games": 0}
+    all_games, val_games = set(), set()
     for name in names:
         with np.load(a.v1 / name) as x, np.load(a.paired / name) as y:
             n = len(x["z"])
@@ -61,6 +64,15 @@ def main(argv=None) -> None:
         tot["val_decisions"] += int(m.sum())
         tot["games"] += len(np.unique(g2))
         tot["val_games"] += len(np.unique(g2[m]))
+        all_games.update(np.unique(g2).tolist())
+        val_games.update(np.unique(g2[m]).tolist())
+    if a.games:
+        listed = {int(x) for x in a.games.read_text().split("\n") if x.strip() and not x.startswith("#")}
+        want = listed & all_games
+        if val_games != want:
+            sys.exit(f"val games != listed games in the data: {len(val_games - want)} extra, "
+                     f"{len(want - val_games)} missing")
+        tot |= {"games_file": str(a.games), "listed": len(listed), "listed_in_data": len(want), "games_match": True}
     tot |= {"frac": a.frac, "v1": str(a.v1.resolve()), "paired": str(a.paired.resolve()),
             "rule": "netv2 porygon.v2.pretrain.is_val(paired game int64, frac)"}
     (a.out / "split.json").write_text(json.dumps(tot, indent=1))

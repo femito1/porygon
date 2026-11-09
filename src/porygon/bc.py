@@ -48,7 +48,8 @@ Memory plan for ~20M decisions (D = 4079): obs alone are 20M x 8.2 KB = 163 GB a
 (--mem ~64 GB: buffer + concat copy + prefetch); compressed shards are ~10x smaller, so copy them to node-local
 disk first (scripts/slurm_bc.sbatch). Up to ~5M decisions (40 GB) fit an a100's 80 GB with --loader gpu.
 
-Outputs in --out: best_model.zip (lowest val policy CE), final_model.zip, last_model.zip + last_state.pt (for
+Outputs in --out: best_model.zip (lowest val policy CE), best_value_model.zip (lowest val value log-loss),
+final_model.zip, last_model.zip + last_state.pt (for
 --resume after --max-hours), train_log.jsonl, config.json (args, data meta, code commit, host).
 """
 
@@ -759,10 +760,11 @@ def train(args) -> dict:
     print(f"model {type(policy).__name__} {n_params:,} params on {device} (amp {amp}, compile {args.compile}); "
           f"loader {loader}; {steps_per_epoch:,} steps/epoch x {args.epochs} = {total:,} steps", flush=True)
 
-    step, epoch, best = 0, 0, float("inf")
+    step, epoch, best, best_v = 0, 0, float("inf"), float("inf")
     if state:
         opt.load_state_dict(state["optimizer"])
         step, epoch, best = state["step"], state["epoch"] + int(state["epoch_done"]), state["best"]
+        best_v = state.get("best_value", float("inf"))
         print(f"resumed at step {step:,}, epoch {epoch}", flush=True)
     else:
         m = evaluate(net, val, device, args.eval_batch_size, amp, args.value_loss)
@@ -772,7 +774,7 @@ def train(args) -> dict:
     deadline = t0 + args.max_hours * 3600 if args.max_hours else None
 
     def checkpoint(epoch_done: bool) -> None:
-        nonlocal best
+        nonlocal best, best_v
         m = evaluate(net, val, device, args.eval_batch_size, amp, args.value_loss)
         rec = {"type": "val", "step": step, "epoch": epoch + int(epoch_done), "hours": (time.time() - t0) / 3600} | m
         log_line(log, rec)
@@ -783,9 +785,14 @@ def train(args) -> dict:
         if m["val_ce"] < best:
             best = m["val_ce"]
             model.save(out / "best_model")
+            log_line(log, {"type": "best", "metric": "val_ce", "step": step, "value": best})
+        if m["val_value_logloss"] < best_v:  # the value head overfits long before the policy does
+            best_v = m["val_value_logloss"]
+            model.save(out / "best_value_model")
+            log_line(log, {"type": "best", "metric": "val_value_logloss", "step": step, "value": best_v})
         model.save(out / "last_model")
         torch.save({"optimizer": opt.state_dict(), "step": step, "epoch": epoch, "epoch_done": epoch_done,
-                    "best": best}, out / "last_state.pt")
+                    "best": best, "best_value": best_v}, out / "last_state.pt")
 
     stopped = False
     while step < total and not stopped:
