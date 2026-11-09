@@ -10,4 +10,4 @@ set -uo pipefail
 source /vol/bitbucket/fr1226/porygon-ws-wsp/scripts/wsp/env.sh
 export PYTHONPATH=$WSP/v2diag/src:$WSP/scripts/wsp
 export OMP_NUM_THREADS=4
-bash "$1"
+S=$(mktemp /tmp/v2diag-XXXX.sh); cp "$1" $S; bash $S; rm -f $S

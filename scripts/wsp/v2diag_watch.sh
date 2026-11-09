@@ -14,8 +14,7 @@ SEGS=(--trainlog "$NV2/r1/20261108-220401-718701/train.log|2026-11-09 01:12:12|2
 # pool snapshots land in runs/<run>/pool/ or, since the swap, in the job dirs' pool<gen>/ (runs/g9/...741849/pool4/)
 for f in $(ls $NV2/r1/pool/*.pt $NV2/g9/pool/*.pt $NV2/*/2*/pool*/*.pt 2>/dev/null); do
   [ $(stat -c %Y $f) -le $START ] && continue
-  b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st; [[ $f == */g9/pool/* ]] && key=g9p_$st
-  [[ $f == */2*/pool*/* ]] && key=$(basename $(dirname $f))_$(basename $(dirname $(dirname $f)) | grep -o "[0-9]*$")_$st
+  b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st  # one row per step: the same snapshot can sit in several pool dirs
   [ -e $D/out/$key/done ] || [ -e $D/out/$key/skip ] && continue
   sleep 30
   mkdir -p $D/out/$key

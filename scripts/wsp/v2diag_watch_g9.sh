@@ -20,8 +20,7 @@ if [ -n "$REF" ]; then
   # pool snapshots land in runs/<run>/pool/ or, since the swap, in the job dirs' pool<gen>/ (runs/r1/...718701/pool9/)
   for f in $(ls $NV2/g9/pool/*.pt $NV2/r1/pool/*.pt $NV2/*/2*/pool*/*.pt 2>/dev/null); do
     [ $(stat -c %Y $f) -le $START ] && continue
-    b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st; [[ $f == */r1/pool/* ]] && key=r1p_$st
-    [[ $f == */2*/pool*/* ]] && key=$(basename $(dirname $f))_$(basename $(dirname $(dirname $f)) | grep -o "[0-9]*$")_$st
+    b=$(basename $f .pt); [[ $b =~ ^[0-9]+$ ]] || continue; st=$((10#$b)); key=$st  # one row per step: the same snapshot can sit in several pool dirs
     [ -e $D/out/$key/done ] || [ -e $D/out/$key/skip ] && continue
     sleep 30
     mkdir -p $D/out/$key
