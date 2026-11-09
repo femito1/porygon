@@ -40,8 +40,9 @@ EV="$PY -m porygon.fastenv_eval --format gen4randombattle --workers 20 --battles
 for st in 2500000:ppo_2499840_steps.pt 5000000:ppo_4999680_steps.zip; do
   n=${st%%:*}; ref=old-ckpts/${st#*:}
   for r in $L $A; do
-    c=$r/checkpoints/ppo_${n}_steps.zip
-    [ -f "$c" ] && { echo "=== $c vs $ref"; $EV --a "$c" --b "$ref" 2>&1 | tail -1; }
+    # lockstep checkpoints are named by num_timesteps, a multiple of the env count (e.g. ppo_2499840_steps)
+    c=$(ls $r/checkpoints/ppo_*_steps.zip 2>/dev/null | awk -F'ppo_|_steps' -v n=$n '{d=$2-n; if (d<0) d=-d; if (d<5000) print}' | head -1)
+    [ -n "$c" ] && { echo "=== $c vs $ref"; $EV --a "$c" --b "$ref" 2>&1 | tail -1; }
   done
   [ -f $L/checkpoints/ppo_${n}_steps.zip ] && [ -f $A/checkpoints/ppo_${n}_steps.zip ] && \
     $EV --a $L/checkpoints/ppo_${n}_steps.zip --b $A/checkpoints/ppo_${n}_steps.zip 2>&1 | tail -1
