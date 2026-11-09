@@ -206,3 +206,31 @@ def test_dynamic_pool_bots(tmp_path, with_snapshot):
         assert not any(s % 2 == 1 and (s // 2) < 3 for s in segs), "pool battles: learner side only"
     finally:
         workers.close()
+
+
+def test_worker_restart():
+    """A dead worker is replaced (restart_dead): collection goes on, closed transitions stay usable."""
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    from porygon.v2.workers import Packer
+
+    workers = FastWorkers(FastEnv("gen9randombattle", 2, 3, seed=12, encoder="v2", shaping=(0, 0, 0)))
+    workers.env.restart_dead = True
+    try:
+        col = FastCollector(workers.env, Packer(9), _versioned_act(np.random.default_rng(7), {"v": 0.0}), seed=0)
+        for _ in range(5):
+            col.step()
+        workers.env.workers[1].proc.kill()
+        for _ in range(200):
+            col.step()
+            if workers.restarts:
+                break
+        assert workers.restarts == 1
+        n0 = len(col.episodes)
+        while len(col.episodes) < n0 + 4:
+            col.step()
+        segs, _ = col.take()
+        data = v2.build_rollout(segs, Packer(9), 0.9999, 0.754)
+        assert len(data["action"]) > 0 and np.isfinite(data["adv"]).all()
+    finally:
+        workers.close()

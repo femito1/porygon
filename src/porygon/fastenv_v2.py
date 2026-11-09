@@ -32,6 +32,7 @@ here are exact for the weights that acted.
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -49,7 +50,11 @@ class FastWorkers:
     """Stands in for BattleWorkers where the trainer only reads counters and closes it."""
 
     def __init__(self, env: FastEnv, pool_per_worker: int = 0):
-        self.env, self.restarts, self.pool_per_worker = env, 0, pool_per_worker
+        self.env, self.pool_per_worker = env, pool_per_worker
+
+    @property
+    def restarts(self) -> int:  # dead fastenv workers replaced so far (the trainer logs perf/worker_restarts)
+        return self.env.restarts
 
     def close(self) -> None:
         self.env.close()
@@ -83,6 +88,7 @@ def build_env(args, seed: int | None = None) -> FastWorkers:
     seed = seed if seed is not None else int.from_bytes(os.urandom(3), "little")  # restarts must not replay teams
     env = FastEnv(args.format, n, args.fastenv_battles, seed=seed, encoder="v2", shaping=tuple(args.shaping),
                   dyn_bots="heuristic,max_power" if pool else "")
+    env.restart_dead = True  # a crashed worker is replaced (its battles start over) instead of ending training
     print(f"fastenv: {n} workers x {args.fastenv_battles} battles ({pool} pool battles per worker: baseline bot "
           f"with p {args.p_baseline} or while the pool is empty, else a snapshot), seed {seed}", flush=True)
     return FastWorkers(env, pool_per_worker=pool)
@@ -295,17 +301,47 @@ class FastCollector:
                 acts_out[bi][rk] = np.asarray(actions[k:k + len(rk)])
                 k += len(rk)
         for w, b, a in zip(ws, batches, acts_out):
-            self.env.send_to(w, b, a)
+            try:
+                self.env.send_to(w, b, a)
+            except OSError as e:  # the worker died since its batch arrived
+                if not self.env.restart_dead:
+                    raise
+                self.env.dead.append((w, repr(e)))
+                continue
             self.in_flight.add(w)
+
+    def _poll(self, timeout: float) -> None:
+        for w, b in self.env.poll(timeout):
+            self.in_flight.discard(w)
+            self._receive(b)
+            self.ready[w] = b
+        for w, why in self.env.take_dead():
+            self._restart(w, why)
+
+    def _restart(self, w: int, why: str) -> None:
+        """Worker w died: drop what was open for its slots (closed transitions stay), start a fresh process."""
+        lo, hi = w * self.env.span, (w + 1) * self.env.span
+        for s in [s for s in self.open if lo <= s < hi]:
+            self.open.pop(s)
+            self.born.pop(s, None)
+        for s in range(lo, hi):
+            self.decisions.pop(s, None)
+        for bt in range(lo // 2, hi // 2):
+            self.snapshot.pop(bt, None)
+            self.dynbot.pop(bt, None)
+        self.in_flight.discard(w)
+        self.ready.pop(w, None)
+        b = self.env.restart_worker(w)
+        print(f"fastenv: worker {w} died ({why}); restarted it ({self.env.restarts} restarts so far)",
+              file=sys.stderr, flush=True)
+        self._receive(b)
+        self.ready[w] = b
 
     # -- Collector interface
     def step(self, timeout: float = 1.0) -> None:
         if self.ready:
             self._act()
-        for w, b in self.env.poll(timeout):
-            self.in_flight.discard(w)
-            self._receive(b)
-            self.ready[w] = b
+        self._poll(timeout)
 
     def drain(self) -> None:
         """End of an on-policy rollout: receive every in-flight batch, then close each open learner transition whose
@@ -313,10 +349,7 @@ class FastCollector:
         decisions stay `ready` and are acted afresh by the next rollout's actor)."""
         t0 = time.time()
         while self.in_flight:
-            for w, b in self.env.poll(1.0):
-                self.in_flight.discard(w)
-                self._receive(b)
-                self.ready[w] = b
+            self._poll(1.0)
         picks = []  # (batch, row) of learner decisions that close an open transition
         for b in self.ready.values():
             for i in np.flatnonzero(b.needs_action):

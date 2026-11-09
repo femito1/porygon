@@ -167,6 +167,19 @@ class Worker:
             view = view[os.write(self.to_child, view):]
         self.waiting = True
 
+    def kill(self) -> None:
+        """Dead or misbehaving worker: kill it and release its pipes."""
+        try:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+        for fd in (self.from_child, self.to_child):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
     def close(self) -> None:
         os.close(self.from_child)  # a host blocked writing a batch gets EPIPE and exits
         try:
@@ -205,9 +218,13 @@ class FastEnv:
         self.bot, self.bot_battles = bot, (bot_battles if self.bots else 0)
         self.format, self.n_workers, self.battles_per_worker = battle_format, n_workers, battles_per_worker
         node = node or node_binary()
-        self.workers = [Worker(i, battle_format, battles_per_worker, seed * 1000 + i, encoder, shaping, node,
-                               max_turns, duplicate, self.worker_bot(i), self.bot_battles, ",".join(self.dyn_bots))
-                        for i in range(n_workers)]
+        self.seed, self.restarts = seed, 0
+        self.restart_dead = False  # True: a dead worker is reported in `dead` (and restartable) instead of raising
+        self.dead: list[tuple[int, str]] = []
+        self._new_worker = lambda i, s: Worker(i, battle_format, battles_per_worker, s, encoder, shaping, node,
+                                               max_turns, duplicate, self.worker_bot(i), self.bot_battles,
+                                               ",".join(self.dyn_bots))
+        self.workers = [self._new_worker(i, seed * 1000 + i) for i in range(n_workers)]
         self.span = 2 * battles_per_worker
         self._pending: dict[int, Batch] = {}  # worker -> batch whose decisions are not answered yet
 
@@ -230,10 +247,33 @@ class FastEnv:
         out = []
         for fd in ready:
             w = fds[fd]
-            b = w.read()
+            try:
+                b = w.read()
+            except (RuntimeError, OSError, AssertionError) as e:
+                if not self.restart_dead:
+                    raise
+                w.waiting = False
+                self.dead.append((w.index, repr(e)))
+                continue
             self._pending[w.index] = b
             out.append((w.index, b))
         return out
+
+    def take_dead(self) -> list[tuple[int, str]]:
+        """Workers found dead since the last call (restart_dead mode): (index, reason)."""
+        d, self.dead = self.dead, []
+        return d
+
+    def restart_worker(self, i: int) -> Batch:
+        """Replace worker i by a fresh process (new seed; all its battles start over) and return its first batch.
+        The caller drops whatever it held for that worker's slots."""
+        self.workers[i].kill()
+        self.restarts += 1
+        self._pending.pop(i, None)
+        self.workers[i] = self._new_worker(i, self.seed * 1000 + i + 7919 * self.restarts)
+        b = self.workers[i].read()
+        self._pending[i] = b
+        return b
 
     def send(self, worker: int, actions: np.ndarray) -> None:
         """Actions for every needs_action row of that worker's last batch, in row order."""

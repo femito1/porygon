@@ -102,7 +102,7 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
   }
 }
 
-const stats = {decisions: 0, rejected: 0, games: 0, turns: 0, truncated: 0, crashed: 0};
+const stats = {decisions: 0, rejected: 0, games: 0, turns: 0, truncated: 0, crashed: 0, botErrors: 0};
 const slots = Array.from({length: args.battles}, (_, i) => new Slot(i));
 
 // --- output batch ----------------------------------------------------------------------------------
@@ -193,7 +193,13 @@ const isBot = slot => slot.dynBot !== null || (BOT !== null && slot.i < args.bot
 function botAct(slot) {  // the bot answers every pending request of its side (several when the learner waits)
   const t = slot.trackers[1], b = slot.battle, bot = slot.dynBot ?? BOT;
   for (let guard = 0; guard < 20 && t.decisionPending && !b.ended && !slot.crashed; guard++) {
-    const c = bot(t);
+    let c;
+    try {
+      c = bot(t);
+    } catch (e) {  // a bot bug must not kill the worker: log it, play a random valid order instead
+      if (++stats.botErrors <= 5) process.stderr.write(`fastenv: bot error: ${e.stack.split('\n').slice(0, 3).join(' | ')}\n`);
+      c = randomValid(t);
+    }
     if (t.markChosen) t.markChosen(); else t.decisionPending = false;
     try {
       if (!b.choose(1, c) && !t.decisionPending && !b.ended && b.pendingSides().includes(1)) b.choose(1, 'default');

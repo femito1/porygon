@@ -19,8 +19,9 @@ const MV_ACC = 1, MV_CAT = 5, MV_HITS = 41;  // encoder_v1 move-feature slots (s
 
 function chartOf(t) { return loadGen(t.gen).chart; }
 
-function dmg(chart, moveType, mon) {  // Pokemon.damage_multiplier(type)
-  if (moveType === 'THREE_QUESTION_MARKS' || moveType === 'STELLAR') return 1;
+const NEUTRAL = new Set(['THREE_QUESTION_MARKS', 'STELLAR']);  // PokemonType.damage_multiplier returns 1 for these
+function dmg(chart, moveType, mon) {  // Pokemon.damage_multiplier(type): also 1 on a ??? / Stellar-tera'd target
+  if (NEUTRAL.has(moveType) || NEUTRAL.has(mon.t1)) return 1;
   let m = chart[mon.t1][moveType];
   if (mon.t2 !== null) m *= chart[mon.t2][moveType];
   return m;
