@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -170,6 +171,39 @@ def test_inputs() -> bool:
     x, meta = sm.ordered_scores(sm.read_records([str(spd)], "wspa"))
     ok &= check("spd: meta gives the first id; part + final files of a shard merge (no double count)",
                 len(x) == 2 * N and meta["complete_pairs"] == 2 * N and np.allclose(x[1::2], want[100:200]))
+    # --order sequential: shards played one after another (one shard per look) -> nested looks
+    seq = tmp / "seq"
+    seq.mkdir()
+    (seq / "shard-0000.meta.json").write_text(json.dumps({"first": 0, "end": N}))
+    _write(seq / "shard-0000.jsonl", [rec(0, i) for i in range(N)])
+    x0, _ = sm.ordered_scores(sm.read_records([str(seq)], "wspa"), order="sequential")
+    (seq / "shard-0001.meta.json").write_text(json.dumps({"first": N, "end": 2 * N}))
+    _write(seq / "shard-0001.part.jsonl", [rec(1, i) for i in rng.permutation(N) if i >= 40 or i < 30])  # 130 running
+    x1, meta = sm.ordered_scores(sm.read_records([str(seq)], "wspa"), order="sequential")
+    xr, _ = sm.ordered_scores(sm.read_records([str(seq)], "wspa"))
+    ok &= check("sequential: adding shard 1 leaves the first look's data unchanged (nested); round-robin re-draws it",
+                len(x0) == N and np.allclose(x1[:N], x0) and np.allclose(x1, want[:130]) and len(x1) == 130
+                and meta["shards"] == 2 and len(xr) == 61 and not np.allclose(xr, x0[:len(xr)]),
+                f"({len(x0)}, {len(x1)}, round-robin {len(xr)})")
+    x1, meta = sm.ordered_scores(sm.read_records([str(seq)], "wspa"), order="sequential", final=True)
+    ok &= check("sequential --final: all complete pairs in global id order", len(x1) == 190
+                and np.allclose(x1, np.concatenate([want[:130], want[140:200]])) and len(meta["dropped"]) == 10)
+    shutil.move(str(seq / "shard-0000.jsonl"), str(tmp / "held.jsonl"))
+    x1, _ = sm.ordered_scores(sm.read_records([str(seq)], "wspa"), order="sequential")
+    ok &= check("sequential: a shard with no records yet holds back the later ones (start at --first-id)", len(x1) == 0)
+    shutil.move(str(tmp / "held.jsonl"), str(seq / "shard-0000.jsonl"))
+    _write(seq / "shard-0002.jsonl", [dict(rec(1, i), shard=2) for i in range(5)])   # ids 100..104 again
+    try:
+        sm.ordered_scores(sm.read_records([str(seq)], "wspa"), order="sequential", shard_pairs=N)
+        ok &= check("sequential: overlapping id ranges are refused", False)
+    except SystemExit:
+        ok &= check("sequential: overlapping id ranges are refused", True)
+    # per-game files restart at pair 0: concatenated in path order
+    half = [r for r in games if r["pair"] < 150]
+    _write(tmp / "f0.jsonl", half)
+    _write(tmp / "f1.jsonl", [dict(r, pair=r["pair"] - 150) for r in games if r["pair"] >= 150])
+    x, _ = sm.ordered_scores(sm.read_records([str(tmp / "f0.jsonl"), str(tmp / "f1.jsonl")], "wspa"), order="sequential")
+    ok &= check("sequential: per-game files (ids from 0 each) concatenate in path order", len(x) == n and np.allclose(x, want))
     # decisions: an obviously strong A stops early for success; a null A never claims at look 1
     d = sd.solve(sd.preset("gain"))
     strong = np.array([1.0] * 40 + [0.5] * 60)

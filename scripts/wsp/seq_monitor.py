@@ -13,10 +13,15 @@ Input (files or run directories; a directory is searched recursively for --glob,
     (or a username, resolved with --a-prefix), "scores": [s0, s1], "a_score" (pair score) or "a_wins" (0, 1, 2).
 Ordering: complete pairs are taken in pair-id order within each shard, up to the first id that is not complete yet
 (a pair still being played holds back every later id; --stale N drops one that stays incomplete while N later ids
-complete, reported; --final drops all incomplete ones), and shards are interleaved round-robin. Look j uses the
-first j*k pairs of that sequence, so the data at a look never depend on which games happened to finish first and a
-later re-run reproduces the same decision. The decision is the first scheduled look at which a bound was crossed;
-pairs played after it (overrun) are reported but not used.
+complete, reported; --final drops all incomplete ones). Across shards, --order round-robin (default) interleaves the
+shards: right for a FIXED set of shards played in parallel from the start. --order sequential makes one global
+pair-id sequence from --first-id (spd_h2h ids are global; per-game files restart at 0 and are concatenated in path
+order): right for shards played one after another (e.g. one shard per look). Look j uses the first j*k pairs of the
+sequence, so the data at a look never depend on which games happened to finish first and a later re-run reproduces
+the same decision -- PROVIDED the order matches how the shards were played: round-robin over shards added one per
+look re-draws the data behind every earlier look each time a shard is added (looks not nested). Pre-register the
+order. The decision is the first scheduled look at which a bound was crossed; pairs played after it (overrun) are
+reported but not used.
 
     python scripts/wsp/seq_monitor.py OUT_DIR --design OUT_DIR/seq_design.json
     python scripts/wsp/seq_monitor.py out/h2h/688986/edits_500M_temp05_vs_m500 --preset gain [--final]
@@ -124,13 +129,42 @@ def first_ids(shards: dict, first_id: int = 0, shard_pairs: int | None = None) -
     return out
 
 
+def sequential(shards: dict, firsts: dict, first_id: int = 0) -> tuple[dict, dict]:
+    """All shards as ONE shard in global pair-id order (--order sequential). spd_h2h records ("shard" field) carry
+    global ids already; a file without shard fields restarts at 0, so it is offset to follow the previous file (path
+    order). The sequence starts at first_id, so a shard that has not written anything yet holds back the later ones."""
+    keys = sorted(shards, key=lambda k: (firsts[k], str(k[0]), k[1]))
+    merged: dict = {}
+    files: set = set()
+    end = first_id
+    for key in keys:
+        prs = shards[key]["pairs"]
+        off = end - min([firsts[key]] + list(prs)) if key[0] == "file" else 0
+        for i, v in prs.items():
+            if i + off in merged:
+                raise SystemExit(f"--order sequential: pair id {i + off} occurs in two shards ({key}); "
+                                 "overlapping id ranges")
+            merged[i + off] = v
+        files |= shards[key]["files"]
+        if prs:
+            end = max(end, max(prs) + off + 1)
+    key = ("seq", 0)
+    return {key: {"pairs": merged, "files": files, "shard": None}}, {key: first_id}
+
+
 def ordered_scores(shards: dict, stale: int = 0, final: bool = False, first_id: int = 0,
-                   shard_pairs: int | None = None):
-    """Pair scores in the canonical order (id order within shards, round-robin across shards), with bookkeeping.
-    Ids run first, first + 1, ... in each shard; a missing or incomplete id holds back all later ones (stale > 0:
-    unless that many later ids are complete; final: never)."""
+                   shard_pairs: int | None = None, order: str = "round-robin"):
+    """Pair scores in the canonical order, with bookkeeping. Ids run first, first + 1, ... in each shard; a missing
+    or incomplete id holds back all later ones (stale > 0: unless that many later ids are complete; final: never).
+    order "round-robin": shards interleaved (shards played in parallel, a fixed set from the start); "sequential":
+    one global pair-id sequence (shards played one after another, e.g. one shard per look)."""
     prefixes, dropped = [], []
     firsts = first_ids(shards, first_id, shard_pairs)
+    n_shards = len(shards)
+    if order == "sequential":
+        shards, firsts = sequential(shards, firsts, first_id)
+    elif order != "round-robin":
+        raise ValueError(f"unknown order {order!r}")
     for key in sorted(shards, key=lambda k: (str(k[0]), k[1])):
         prs = shards[key]["pairs"]
         ids = sorted(prs)
@@ -162,8 +196,8 @@ def ordered_scores(shards: dict, stale: int = 0, final: bool = False, first_id: 
             else:
                 break
     n_all = sum(1 for sh in shards.values() for v in sh["pairs"].values() if None not in v)
-    return np.array(seq), {"held_back": n_all - len(seq), "dropped": dropped, "shards": len(prefixes),
-                           "complete_pairs": n_all}
+    return np.array(seq), {"held_back": n_all - len(seq), "dropped": dropped, "shards": n_shards,
+                           "complete_pairs": n_all, "order": order}
 
 
 # --------------------------------------------------------------------------------------------------- deciding
@@ -205,7 +239,8 @@ def report(d: sd.Design, x: np.ndarray, meta: dict, final: bool = False) -> tupl
     L = [f"seq monitor -- design {d.name or d.kind}: theta0 {100 * d.theta0:.2f}%, theta1 {100 * d.theta1:.2f}%, "
          f"alpha {d.alpha}, power {1 - d.beta:.2f}, look every {d.k} pairs, n_max {d.n_max} pairs",
          f"  data: {len(x)} pairs usable in id order ({meta['complete_pairs']} complete, {meta['held_back']} held "
-         f"back behind running pairs, {len(meta['dropped'])} dropped as stale/incomplete, {meta['shards']} shard(s))",
+         f"back behind running pairs, {len(meta['dropped'])} dropped as stale/incomplete, {meta['shards']} shard(s), "
+         f"{meta.get('order', 'round-robin')} order)",
          "  look  pairs   win%    SE  |   Z0  succ if win% >= |   Z1  fut if win% <= | state"]
     for r in ev["looks"]:
         L.append(f"  {r['look']:4d} {r['pairs']:6d} {100 * r['mean']:6.2f} {100 * r['se']:5.2f} | {r['z0']:+5.2f}"
@@ -275,6 +310,11 @@ def main() -> int:
     ap.add_argument("--final", action="store_true", help="the run has ended: drop incomplete pairs, use all shards")
     ap.add_argument("--first-id", type=int, default=0, help="first pair id of a shard without meta/--shard-pairs")
     ap.add_argument("--shard-pairs", type=int, help="spd_h2h.py --pairs N: shard K's first pair id is K*N")
+    ap.add_argument("--order", choices=["round-robin", "sequential"], default="round-robin",
+                    help="round-robin (default): shards interleaved, for a fixed set of shards played in parallel; "
+                         "sequential: one global pair-id sequence from --first-id, for shards played one after "
+                         "another (e.g. one shard per look). Looks are nested only with the order that matches "
+                         "how the shards were played: pre-register it")
     ap.add_argument("--glob", default="*.jsonl", help="files to read inside a run directory (e.g. 'pairs*.jsonl' "
                                                       "if a run writes both per-game and per-pair records)")
     ap.add_argument("--json", action="store_true", help="also print a machine-readable line")
@@ -289,7 +329,7 @@ def main() -> int:
     d = sd.load(a.design) if a.design else sd.solve(sd.preset(a.preset, c=a.c))
     try:
         x, meta = ordered_scores(read_records(a.paths, a.a_prefix, a.glob), a.stale, a.final, a.first_id,
-                                 a.shard_pairs)
+                                 a.shard_pairs, a.order)
     except (OSError, ValueError, KeyError) as e:
         print(f"bad input: {e}", file=sys.stderr)
         return 2
