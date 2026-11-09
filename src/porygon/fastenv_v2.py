@@ -97,19 +97,22 @@ def build_env(args, seed: int | None = None) -> FastWorkers:
 class FastCollector:
     def __init__(self, env: FastEnv, packer: Packer, act_fn: Callable, opp_fn: Callable | None = None, *,
                  id_dropout: bool = True, seed: int | None = None, pool_per_worker: int = 0,
-                 pool_dir=None, recent: int = 4, on_policy: bool = False, p_baseline: float = 0.0, **_ignored):
+                 pool_dir=None, recent: int = 4, on_policy: bool = False, p_baseline: float = 0.0,
+                 p_frozen: float = 0.0, **_ignored):
         """pool_per_worker: in every worker, battles bot_battles..bot_battles+k-1 are pool battles: side two is a
         frozen snapshot from pool_dir (`*.pt`, picked per battle like PoolOpponent: half the time one of the
-        `recent` newest, else uniform), played through opp_fn(name, batch). With env dyn_bots (FastEnv(dyn_bots=
-        'heuristic,max_power')) each pool battle is, as netv2's PoolOpponent, a baseline bot (uniform over
-        dyn_bots) with probability p_baseline or whenever no snapshot exists, else a snapshot; without dyn_bots a
-        pool battle with no snapshot yet is self-play."""
+        `recent` newest, else uniform), played through opp_fn(name, batch). Each new pool battle draws its opponent
+        exactly as netv2's PoolOpponent.new_battle (ws/netv2 0ac086c): a frozen net (uniform over
+        pool_dir/frozen/*.pt, name 'frozen/<file>') with p_frozen, a baseline bot (uniform over the env's dyn_bots,
+        FastEnv(dyn_bots='heuristic,max_power')) with p_baseline, else a snapshot; no snapshot yet -> a frozen net
+        if any, else a baseline. Without dyn_bots a baseline draw is self-play."""
         self.env, self.packer, self.act_fn, self.opp_fn = env, packer, act_fn, opp_fn
         self.pool_per_worker, self.pool_dir, self.recent = pool_per_worker, pool_dir, recent
         self.snapshot: dict[int, str | None] = {}  # battle id -> snapshot name of the current pool battle
         self.dynbot: dict[int, int] = {}  # battle id -> index into env.dyn_bots of the current pool battle's bot
-        self.p_baseline = p_baseline
-        self._snaps, self._snaps_t = [], -1e9  # cached pool listing (re-listed every 10 s)
+        self.p_baseline, self.p_frozen = p_baseline, p_frozen
+        self.label: dict[int, str] = {}  # battle id -> "snapshot" | "frozen" for snapshot-played pool battles
+        self._snaps, self._frozen, self._snaps_t = [], [], -1e9  # cached pool listings (re-listed every 10 s)
         self.opp_packer = Packer(packer.gen, aux=False)
         self.id_dropout = id_dropout
         self.rng = np.random.default_rng(seed)
@@ -150,6 +153,7 @@ class FastCollector:
             from pathlib import Path
             try:
                 self._snaps = sorted(Path(self.pool_dir).glob("*.pt"), key=lambda p: p.stat().st_mtime)
+                self._frozen = sorted((Path(self.pool_dir) / "frozen").glob("*.pt")) if self.p_frozen > 0 else []
             except OSError:  # a snapshot being replaced while listed: keep the previous listing
                 pass
             self._snaps_t = time.time()
@@ -163,14 +167,19 @@ class FastCollector:
         return pick[self.rng.integers(len(pick))].name
 
     def _new_pool_battle(self, battle: int) -> None:
-        """Opponent of a new pool battle (PoolOpponent.new_battle semantics when the env has dyn_bots)."""
-        if self.env.dyn_bots:
-            if self._list_snapshots() and self.rng.random() >= self.p_baseline:
-                self.snapshot[battle] = self._pick_snapshot()
-            else:
-                self.dynbot[battle] = int(self.rng.integers(len(self.env.dyn_bots)))
-        else:
+        """Opponent of a new pool battle: PoolOpponent.new_battle's draw (frozen / baseline / snapshot)."""
+        snaps = self._list_snapshots()
+        frozen = self._frozen
+        r = self.rng.random()
+        if frozen and (r < self.p_frozen or (not snaps and r >= self.p_frozen + self.p_baseline)):
+            self.snapshot[battle] = "frozen/" + frozen[self.rng.integers(len(frozen))].name
+            self.label[battle] = "frozen"
+        elif snaps and r >= self.p_frozen + self.p_baseline:
             self.snapshot[battle] = self._pick_snapshot()
+            self.label[battle] = "snapshot"
+        elif self.env.dyn_bots:
+            self.dynbot[battle] = int(self.rng.integers(len(self.env.dyn_bots)))
+        # else: a baseline draw without env bots -> this battle is self-play
 
     def _opponent(self, s: int) -> str | None:
         """Snapshot playing slot s (side two of a pool battle), else None (the learner plays it)."""
@@ -216,12 +225,13 @@ class FastCollector:
                 elif None not in r[:2]:
                     base = (s // 2) * 2
                     snap = self.snapshot.pop(s // 2, None)
+                    label = self.label.pop(s // 2, "snapshot")
                     dec = [self.decisions.pop(base, 0), self.decisions.pop(base + 1, 0)]
                     if snap is None:
                         self.episodes.append({"kind": "selfplay", "opp": "self", "turns": r[2], "decisions": dec,
                                               "result": r[:2]})
                     else:
-                        self.episodes.append({"kind": "pool", "opp": "snapshot", "snapshot": snap, "turns": r[2],
+                        self.episodes.append({"kind": "pool", "opp": label, "snapshot": snap, "turns": r[2],
                                               "decisions": dec[:1], "result": r[:1]})
             elif b.flags[i] & 4 and s % 2 == 0 and self._is_pool(s // 2):  # a new pool battle: pick its opponent
                 self._new_pool_battle(s // 2)
@@ -329,6 +339,7 @@ class FastCollector:
         for bt in range(lo // 2, hi // 2):
             self.snapshot.pop(bt, None)
             self.dynbot.pop(bt, None)
+            self.label.pop(bt, None)
         self.in_flight.discard(w)
         self.ready.pop(w, None)
         b = self.env.restart_worker(w)

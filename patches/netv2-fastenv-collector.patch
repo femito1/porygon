@@ -1,21 +1,22 @@
 --- a/scripts/slurm_train_v2.sbatch
 +++ b/scripts/slurm_train_v2.sbatch
-@@ -13,6 +13,9 @@
- #   POOL_SEED=<dir>  v2 snapshots hard-linked into the run's pool when it is empty
- #   CHAIN=<n>        follow-up jobs once this one ends short of TOTAL (counter kept per run in runs/RUN_NAME/chain_left)
- #   TRAIN_ARGS="..." extra porygon.v2.train args for every job of every run (positional args after RUN_NAME win)
-+#   COLLECTOR=fastenv  rollouts from fastenv (in-process Showdown, $ROOT/fastenv + porygon.fastenv*) instead of
-+#                    servers + poke-env workers: one server only (in-training evaluation), CORES - 2 fastenv workers;
-+#                    add --no-overlap (strictly on-policy) or keep overlap with --decoupled
- # netv2.env may branch on $RUN_NAME for per-run settings.
+@@ -16,6 +16,10 @@
+ #   PRE_CMD="..."    run once per run before the first training start (e.g. a supervised refit that picks the init);
+ #                    marker runs/RUN_NAME/pre_done; netv2.env is sourced again afterwards
+ #   MIN_CORES / N_SELFPLAY / N_POOL: smaller jobs (default: refuse < 24 CPUs; 2 self-play + 1 pool battle per CPU)
++#   COLLECTOR=fastenv  rollouts from fastenv (in-process Showdown: $ROOT/fastenv + porygon.fastenv*) instead of
++#                    servers + poke-env workers: one server (in-training evaluation only), FASTENV_WORKERS (default
++#                    CPUs - 2) x FASTENV_BATTLES (48) battles; pool share N_POOL / (N_SELFPLAY + N_POOL) as before;
++#                    add --no-overlap (strictly on-policy) or keep the overlap with --decoupled
+ # netv2.env may branch on $RUN_NAME for per-run settings (it is sourced under set -e: end it with a true command).
  #
  # Layout: runs/RUN_NAME/<date>-<job>/ (train.log, stdout.log, tb/, checkpoints/, final_model.pt, best_model.pt) and
-@@ -89,6 +92,12 @@
-   echo "ERROR: only $CORES CPUs on $(hostname -s) ($SLURM_JOB_PARTITION), need >= $MIN_CORES: not starting" >&2; exit 3
+@@ -100,6 +104,12 @@
+   echo "$(date -u +%T) PRE_CMD done; RESUME=${RESUME:-}"
  fi
  N_SERVERS=$(( CORES / 3 )); SELFPLAY=${N_SELFPLAY:-$(( CORES * 2 ))}; POOL_BATTLES=${N_POOL:-$CORES}  # netv2.env may cap them (memory)
 +COLLECT_ARGS=""
-+if [ "${COLLECTOR:-showdown}" = fastenv ]; then  # one server for the evaluator; the pool share stays SELFPLAY:POOL
++if [ "${COLLECTOR:-showdown}" = fastenv ]; then  # one server for the evaluator; fastenv workers on the other CPUs
 +  N_SERVERS=1
 +  COLLECT_ARGS="--collector fastenv --fastenv-workers ${FASTENV_WORKERS:-$(( CORES - 2 ))} --fastenv-battles ${FASTENV_BATTLES:-48}"
 +  export PORYGON_PS=${PORYGON_PS:-$ROOT/pokemon-showdown} PORYGON_NODE=${PORYGON_NODE:-$(command -v node)}
@@ -23,7 +24,7 @@
  BASE=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 )); LAST=$(( BASE + N_SERVERS - 1 ))
  # start_servers.sh writes the no-disk-writes training config only when there is none
  CFG=pokemon-showdown/config/config.js
-@@ -147,7 +156,7 @@
+@@ -158,7 +168,7 @@
    "$PY" -u -m porygon.v2.train --format "$FORMAT" --ports "$BASE-$LAST" --n-battles "$SELFPLAY" \
      --pool-battles "$POOL_BATTLES" --pool-dir "$LOCAL/pool" --run-dir "$LOCAL/run" \
      ${LATEST:+--resume "$LATEST"} ${ANCHOR:+--anchor "$ANCHOR"} --total-steps "$TOTAL" --max-hours 70.5 \
@@ -46,7 +47,7 @@
  Loss (per minibatch): clipped PPO surrogate (advantages normalised per minibatch) − ent_coef · entropy
  + zero_avoid_coef · (−mean log π over legal actions: Jaxcalibur's KL to uniform) + vf_coef · BCE(win prob,
  clip((λ-return + 1) / 2, 0, 1)) (no value clipping) + aux_coef · Σ aux heads (CE item / ability / tera, BCE per
-@@ -453,6 +458,8 @@
+@@ -515,6 +520,8 @@
      a("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
      a("--max-updates", type=int, help="stop after this many updates in this process (tests)")
      a("--no-overlap", action="store_true", help="pause battles during the PPO update")
@@ -55,27 +56,26 @@
      a("--grad-ratio-every", type=int, default=10,
        help="every N updates: trunk value/policy gradient ratio and the minibatch-to-minibatch gradient cosines")
      a("--stall-seconds", type=float, default=900.0, help="restart a battle worker silent this long")
-@@ -525,10 +532,15 @@
+@@ -587,10 +594,14 @@
  
          ports = parse_ports(args.ports)
          shaping = dict(zip(("fainted_value", "hp_value", "status_value"), args.shaping))
 -        specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping) for i in range(args.n_battles)]
 -                 + [WorkerSpec("pool", ports[::-1][i % len(ports)], args.format, shaping, str(self.pool_dir),
--                               args.p_baseline) for i in range(args.pool_battles)])
+-                               args.p_baseline, p_frozen=args.p_frozen) for i in range(args.pool_battles)])
 -        self.workers = BattleWorkers(specs)  # before CUDA init (forkserver anyway)
 +        if args.collector == "fastenv":
 +            from porygon.fastenv_v2 import build_env
 +            self.workers = build_env(args, args.seed)
 +        else:
-+            specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping)
-+                      for i in range(args.n_battles)]
++            specs = ([WorkerSpec("selfplay", ports[i % len(ports)], args.format, shaping) for i in range(args.n_battles)]
 +                     + [WorkerSpec("pool", ports[::-1][i % len(ports)], args.format, shaping, str(self.pool_dir),
-+                                   args.p_baseline) for i in range(args.pool_battles)])
++                                   args.p_baseline, p_frozen=args.p_frozen) for i in range(args.pool_battles)])
 +            self.workers = BattleWorkers(specs)  # before CUDA init (forkserver anyway)
  
          torch.set_num_threads(args.threads)
          torch.set_float32_matmul_precision("high")
-@@ -560,17 +572,24 @@
+@@ -637,16 +648,25 @@
              self.net.compile_damage()
              self.actor.compile_damage()
          self.snapshots: dict[str, Net] = {}  # pool snapshot opponents on the device (LRU)
@@ -87,7 +87,8 @@
 +            self.collector = FastCollector(self.workers.env, self.packer, self._act, self._opp_act,
 +                                           id_dropout=self.net.cfg["id_dropout"] > 0, seed=args.seed,
 +                                           pool_per_worker=self.workers.pool_per_worker, pool_dir=self.pool_dir,
-+                                           p_baseline=args.p_baseline, on_policy=args.no_overlap)
++                                           p_baseline=args.p_baseline, p_frozen=args.p_frozen,
++                                           on_policy=args.no_overlap)
 +        else:
 +            self.collector = Collector(self.workers, self.packer, self._act, self._opp_act,
 +                                       id_dropout=self.net.cfg["id_dropout"] > 0, stall_seconds=args.stall_seconds,
@@ -99,13 +100,12 @@
          self.writer = SummaryWriter(str(self.run_dir / "tb"))
          n_params = sum(p.numel() for p in self.net.parameters())
 -        self.log(f"v2 trainer: {args.format} gen{self.gen}, {args.n_battles} self-play + {args.pool_battles} pool "
--                 f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
 +        self.log(f"v2 trainer: {args.format} gen{self.gen}, collector {args.collector}, {args.n_battles} self-play + "
-+                 f"{args.pool_battles} pool battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
++                 f"{args.pool_battles} pool "
+                  f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
                   f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, steps={self.counters['steps']:,}")
  
-     def log(self, msg: str) -> None:
-@@ -734,6 +753,7 @@
+@@ -824,6 +844,7 @@
                  c["updates"] += 1
                  updates_here += 1
                  st.update(self._episode_stats(eps, wall))
@@ -113,13 +113,13 @@
                  st["diag/policy_lag_mean"], st["diag/policy_lag_max"] = lag_mean, float(lag_max)
                  st["perf/steps_per_s"] = n / max(wall, 1e-9)
                  st["perf/collect_steps_per_s"] = n / max(collect_s, 1e-9)  # while collecting (overlaps updates)
-@@ -794,7 +814,8 @@
+@@ -892,7 +913,8 @@
                  f"ratio {g('diag/trunk_grad_ratio')} cos_pg {g('diag/grad_cos_policy')} "
                  f"cos_vf {g('diag/grad_cos_value')} r0 {g('diag/first_ratio_mean')}±{g('diag/first_ratio_std')} "
                  f"clip0 {g('diag/first_clip')} beh_off {g('diag/behaviour_off_clip')} lag {g('diag/policy_lag_mean', '{:.2f}')}/{g('diag/policy_lag_max', '{:.0f}')} "
--                f"len {g('episode/decisions', '{:.1f}')} "
+-                f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
 +                + (f"stale {st['perf/fastenv_stale_frac']:.3f} " if "perf/fastenv_stale_frac" in st else "")
-+                + f"len {g('episode/decisions', '{:.1f}')} "
++                + f"len {g('episode/decisions', '{:.1f}')} kla {g('loss/kl_anchor', '{:.4f}')} "
+                 f"beta {g('perf/kl_anchor_coef', '{:.3f}')} warm {g('perf/heads_only', '{:.0f}')} "
+                 f"wr_frozen {g('pool/win_rate_frozen', '{:.2f}')} "
                  f"upd_s {st['perf/update_s']:.1f} | {aux}")
- 
- 

@@ -234,3 +234,36 @@ def test_worker_restart():
         assert len(data["action"]) > 0 and np.isfinite(data["adv"]).all()
     finally:
         workers.close()
+
+
+def test_frozen_pool_opponents(tmp_path):
+    """p_frozen: pool battles vs pool_dir/frozen/*.pt (name 'frozen/<file>', episodes labelled 'frozen'), also when
+    no snapshot exists yet; the rest baselines (as PoolOpponent at ws/netv2 0ac086c)."""
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    from porygon.v2.workers import Packer
+
+    (tmp_path / "frozen").mkdir()
+    (tmp_path / "frozen" / "p1.pt").write_bytes(b"")
+    rng = np.random.default_rng(8)
+    seen = set()
+
+    def opp(name, batch):
+        seen.add(name)
+        return (rng.random(batch["action_mask"].shape) * (batch["action_mask"] > 0)).argmax(1)
+
+    workers = FastWorkers(FastEnv("gen9randombattle", 1, 4, seed=14, encoder="v2", shaping=(0, 0, 0),
+                                  dyn_bots="heuristic,max_power"), pool_per_worker=3)
+    try:
+        col = FastCollector(workers.env, Packer(9), _versioned_act(rng, {"v": 0.0}), opp, seed=2,
+                            pool_per_worker=3, pool_dir=tmp_path, p_baseline=0.3, p_frozen=0.5)
+        while len(col.episodes) < 30:
+            col.step()
+        opps = [e["opp"] for e in col.episodes if e["kind"] == "pool"]
+        assert seen == {"frozen/p1.pt"}
+        assert "frozen" in opps and ({"heuristic", "max_power"} & set(opps)) and "snapshot" not in opps
+        # no snapshots: frozen whenever r < 0.5 or r >= 0.8 -> 70% frozen
+        share = opps.count("frozen") / len(opps)
+        assert 0.4 < share < 0.95, share
+    finally:
+        workers.close()
