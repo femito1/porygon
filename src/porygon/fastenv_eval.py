@@ -6,7 +6,9 @@ Side one (p1) is always A, side two B; each slot plays duplicate pairs (same bat
 pair's team luck cancels. Reports A's win rate (ties count half) with a 95% interval from pair means. A policy is
 an SB3 checkpoint (.zip) / pool snapshot (.pt) acting stochastically, `random` (uniform over legal actions), or
 (B only) `heuristic` / `max_power` (poke-env's SimpleHeuristicsPlayer / MaxBasePowerPlayer, ported to JS with
-0 mismatches on 22.8k decisions, played inside the env).
+0 mismatches on 22.8k decisions, played inside the env), or a netv2 model `v2:PATH[,temperature=T]` (spec-v2
+observations from the JS encoder; sampled from softmax(logits / T) over legal actions; needs netv2's porygon.v2).
+v1 (SB3) and v2 nets cannot meet in one run (one encoder per env).
 Fast and exact Showdown mechanics, but strength claims still go through real Showdown benchmarks (README).
 """
 
@@ -26,6 +28,8 @@ def make_actor(spec: str, device: str):
     if spec == "random":
         rng = np.random.default_rng(12345)
         return lambda obs, mask: random_actions(mask, rng)
+    if spec.startswith("v2:"):
+        return make_v2_actor(spec, device)
     from porygon.model import load_policy
     policy = load_policy(spec, device)
 
@@ -38,12 +42,40 @@ def make_actor(spec: str, device: str):
     return act
 
 
+def make_v2_actor(spec: str, device: str):
+    """`v2:PATH[,temperature=T]` -> act(obs fields dict, mask) sampling softmax(logits / T) over legal actions."""
+    from porygon.v2.model import batch_to_tensors, load, model_keys
+    path, *opts = spec[3:].split(",")
+    temp = 1.0
+    for o in opts:
+        k, _, v = o.partition("=")
+        assert k == "temperature", f"unknown v2 option {o!r}"
+        temp = float(v)
+    net = load(path, device)
+    keys = model_keys(net.gen)
+    gen = torch.Generator(device=device).manual_seed(4321)
+
+    def act(obs, mask):
+        t = batch_to_tensors({k: obs[k] for k in keys}, device)
+        with torch.no_grad():
+            logits = net(t, aux=False)["logits"].float()
+        m = torch.as_tensor(mask, device=device)
+        logits = torch.where(m, logits / temp, torch.finfo(torch.float32).min)
+        return torch.multinomial(torch.softmax(logits, -1), 1, generator=gen).squeeze(1).cpu().numpy()
+    act.encoder = "v2"
+    return act
+
+
 ENV_BOTS = ("heuristic", "max_power")  # played inside the env (porygon.fastenv bot=...)
 
 
 def evaluate(fmt: str, a: str, b: str, games: int, workers: int, battles: int, seed: int, device: str) -> dict:
     act = [make_actor(a, device), None if b in ENV_BOTS else make_actor(b, device)]
     bot = dict(bot=b, bot_battles=battles) if b in ENV_BOTS else {}
+    v2 = [x.startswith("v2:") for x in (a, b)]
+    v1 = [x not in ("random", *ENV_BOTS) and not x.startswith("v2:") for x in (a, b)]
+    assert not (any(v2) and any(v1)), "a v1 (SB3) and a v2 net cannot share an env (one encoder per env)"
+    bot["encoder"] = "v2" if any(v2) else "v1"
     pairs: dict[tuple[int, int], list[float]] = {}  # (slot, pair index) -> A's scores
     played = np.zeros(workers * battles, dtype=np.int64)  # games finished per battle position
     with FastEnv(fmt, workers, battles, seed=seed, duplicate=True, **bot) as env:
@@ -57,7 +89,9 @@ def evaluate(fmt: str, a: str, b: str, games: int, workers: int, battles: int, s
                 sel = (batch.slot[idx] % 2) == side
                 if sel.any():
                     rows = idx[sel]
-                    actions[sel] = act[side](batch.obs[rows], batch.mask[rows])
+                    obs = batch.obs
+                    obs = {k: v[rows] for k, v in obs.items()} if isinstance(obs, dict) else obs[rows]
+                    actions[sel] = act[side](obs, batch.mask[rows])
             done = np.flatnonzero(batch.done & (batch.slot % 2 == 0))
             for i in done:
                 pos = int(batch.slot[i]) // 2
