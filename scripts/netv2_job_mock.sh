@@ -127,7 +127,7 @@ expect "S2 resumes the newest mirrored G9s file (post-swap, not the pre-swap A30
 expect "S2 G9s lineage dirs" "run_dir=$T/ws-netv2-900002/run/G9s pool_dir=$T/ws-netv2-900002/run/G9s/pool" "$(sed -n 1p <<< "$c")"
 expect "S2 pool (3) + frozen (2) + best/ema re-seeded" "pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"
 expect "S2 restart in place relaunches from the lineage's own save" "^call resume=.*/run/G9s/final_model.pt \[trained-from:G9s-postswap-final\]" "$(sed -n 2p <<< "$c")"
-expect "S2 G9s recipe on the A16 (8 workers, cache 32, no KL anchor)" "guard-anchor-drop 0.10 .*fastenv-workers 8 .*--snapshot-cache 32 " "$(cat "$M/job-900002.out")"
+expect "S2 G9s recipe on the A16 (8 workers, cache 72, no KL anchor)" "guard-anchor-drop 0.10 .*fastenv-workers 8 .*--snapshot-cache 72 " "$(cat "$M/job-900002.out")"
 s=$(cat "$M/sbatch.log" 2>/dev/null); echo "  sbatch: ${s:-none}"
 if [ -z "$OLD" ]; then
   expect "S2 resubmission carries name / a16 / gres / 10 CPUs / 64G" "--job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 scripts/slurm_train_v2.sbatch g9" "$s"
