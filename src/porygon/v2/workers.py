@@ -270,7 +270,11 @@ class BattleWorkers:
     def __init__(self, specs: list[WorkerSpec]):
         self.specs = specs
         self.ctx = mp.get_context("forkserver")
-        self.ctx.set_forkserver_preload(["porygon.v2.workers"])
+        # No preload of this module: importing poke_env starts its POKE_LOOP thread, and a child forked from the
+        # forkserver would inherit the loop object but not the thread, so every poke-env Player built in a worker
+        # (PoolOpponent's SimpleHeuristicsPlayer / MaxBasePowerPlayer: create_in_poke_loop) blocks forever. That hung
+        # every pool worker of R1 (2026-11-08/09; fastenv scripts/fastenv/debug_pool_worker.py reproduces it). Each
+        # worker now imports poke_env itself (a few seconds per start). SinglesEnv runs its own loop + thread.
         self.conns: list[Connection | None] = [None] * len(specs)
         self.procs: list = [None] * len(specs)
         self.restarts = 0
