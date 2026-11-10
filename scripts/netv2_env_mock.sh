@@ -75,18 +75,21 @@ o=$(NV2_GPU_MIB=24576 src r1 A30); check 7c "--snapshot-cache 192 --stacked-opp 
 o=$(NV2_GPU_MIB=46068 src r1 A30); check 7d "--snapshot-cache 640 --stacked-opp --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"; checkno 7e "snapshot-cache 192" "$o"
 o=$(NV2_GPU_MIB=15356 src g9 A16); check 8c "--snapshot-cache 72 --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"; checkno 8d "stacked-opp" "$o"
 o=$(NV2_GPU_MIB=46068 src g9 A16); check 8e "--snapshot-cache 512 --stacked-opp --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"
-# 7f-8i (2026-11-09 19:30): successor jobs (an id other than 718701 / 741849 / 829660) train through the 9d0efe0
-# wrapper with --snapshot-cache-cpu; the running jobs' restart in place is unchanged; no wrapper file -> no switch
-mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-9d0efe0"; chmod +x "$N/bin/py-src-9d0efe0"
+# 7f-8i (2026-11-09 19:30; v5 2026-11-10): successor jobs (an id other than 718701 / 741849 / 829660) train through
+# the 24c633f wrapper with --snapshot-cache-cpu; job 718701 (G9p) trains through the same wrapper with unchanged args;
+# 741849 / 829660 unchanged; no wrapper file -> no switch
+mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
 pyof() { ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$ROOTM/local-$3; RUN_NAME=$2; SLURM_JOB_ID=$1; NV2_HOLD_ITERS=0; source "$ENVF"; echo "PY=${PY:-unset}|PAT=$NV2_DEADLINE_PAT" ) 2>&1; }
 o=$(SLURM_JOB_ID=810366 src r1 A30); check 7f "--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400 --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"
 o=$(SLURM_JOB_ID=718701 src r1 A30); check 7g "--snapshot-cache 192 --stacked-opp --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"; checkno 7h "cache-cpu" "$o"
-check 7i "^PY=$N/bin/py-src-9d0efe0\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 810366 r1 A30)"
-check 7j "^PY=unset\|" "$(pyof 718701 r1 A30)"
+check 7i "^PY=$N/bin/py-src-24c633f\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 810366 r1 A30)"
+check 7j "^PY=$N/bin/py-src-24c633f\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 718701 r1 A30)"
 o=$(SLURM_JOB_ID=810367 src g9 A16); check 8f "--snapshot-cache 72 --snapshot-cache-cpu 200 --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"
 o=$(SLURM_JOB_ID=741849 src g9 A16); check 8g "--snapshot-cache 72 --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"; check 8h "^PY=unset\|" "$(pyof 741849 g9 A16)"
+check 8j "^PY=$N/bin/py-src-24c633f\|" "$(pyof 810367 g9 A16)"
 o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=46068 src g9 A16); check 8i "--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume" "$o"
-rm -f "$N/bin/py-src-9d0efe0"; o=$(SLURM_JOB_ID=810366 src r1 A30); checkno 7k "cache-cpu" "$o"; check 7l "^PY=unset\|" "$(pyof 810366 r1 A30)"
+rm -f "$N/bin/py-src-24c633f"; o=$(SLURM_JOB_ID=810366 src r1 A30); checkno 7k "cache-cpu" "$o"; check 7l "^PY=unset\|" "$(pyof 810366 r1 A30)"
+check 7m "^PY=unset\|" "$(pyof 718701 r1 A30)"
 # 9-10: first guard trips after the swap use each lineage's own fallback
 echo "eval score 40.0% < best 60.0% - 15 points for 2 evals" > "$ROOTM/local-A30/run/G9p/GUARD_TRIPPED"; echo g9p-best2 > "$ROOTM/local-A30/run/G9p/best_model.pt"
 o=$(src r1 A30); check 9a "--lr 3.5e-5" "$o"; check 9b "--resume $N/runs/g9a30/fu-start-best.pt$" "$o"; check 9c "^2 " "$(cat $N/runs/g9a30/FU.started)"
@@ -130,6 +133,9 @@ checkno 15d "ent-coef|kl-anchor|frozen" "$o"
 o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$L; RUN_NAME=g4r1bf; SLURM_JOB_NAME=ws-netv2-g4; NV2_HOLD_ITERS=0; source "$ENVF"; echo "PS=$PORYGON_PS|CHAIN=$CHAIN|MIN=$MIN_CORES"; bash -c 'echo "child sees $PORYGON_PS"' ) 2>&1 )
 check 15f "PS=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11\|CHAIN=3\|MIN=10" "$o"; check 15g "child sees /vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11" "$o"
 o=$(src r1 A30); checkno 15h "porygon-ws-fastenv" "$o"  # the G9p branch never sees the gen4 settings (separate sourcing)
+mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+check 15i "^PY=unset\|" "$(pyof 829660 g4r1bf T4)"; check 15j "^PY=unset\|" "$(pyof 900099 g4r1bf T4)"  # R1b-F never switches
+rm -f "$N/bin/py-src-24c633f"
 echo r1bf-final > "$L/run/R1bF/final_model.pt"
 o=$(src g4r1bf T4); check 16a "--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"; checkno 16b "ent-coef" "$o"
 # 17: an anchor-drop trip -> follow-up #1 from the 7.5M checkpoint (not follow-up 2), trip file renamed, snapshots > 7.5M parked

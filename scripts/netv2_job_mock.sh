@@ -163,30 +163,41 @@ if [ -z "$OLD" ]; then  # R1b-F is submitted fresh with the current job script, 
 else
   echo "== S5 skipped: R1b-F (g4r1bf) is a fresh submission of the current job script"
 fi
+wrapper() {  # the v5 wrapper in the fake NV2: src-24c633f first on PYTHONPATH, then the mock python
+  mkdir -p "$M/nv2/bin"
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-24c633f${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-24c633f"
+  chmod +x "$M/nv2/bin/py-src-24c633f"
+}
 if [ -z "$OLD" ]; then  # the successors were spooled with the current job script (d913fdbc)
-  echo "== S6: successor src (19:30): a fresh r1 job trains through \$NV2/bin/py-src-9d0efe0 (src-9d0efe0 first, --snapshot-cache-cpu 400); job 718701 does not"
-  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
-  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  echo "== S6: successor src (v5, 2026-11-10): a fresh r1 job trains through \$NV2/bin/py-src-24c633f (src-24c633f first, --snapshot-cache-cpu 400)"
+  tree post; echo 24576 > "$M/gpu_mib"; wrapper
   job r1 900031 30 a30 ws-netv2-r1 restart; calls
-  expect "S6 the successor's trainer runs with src-9d0efe0 first" "^call resume=.*/G9p/final_model.pt .* pp=$M/nv2/src-9d0efe0:$M/nv2/src" "$(sed -n 1p <<< "$c")"
-  expect "S6 its restart in place too" "pp=$M/nv2/src-9d0efe0:" "$(sed -n 2p <<< "$c")"
+  expect "S6 the successor's trainer runs with src-24c633f first" "^call resume=.*/G9p/final_model.pt .* pp=$M/nv2/src-24c633f:$M/nv2/src" "$(sed -n 1p <<< "$c")"
+  expect "S6 its restart in place too" "pp=$M/nv2/src-24c633f:" "$(sed -n 2p <<< "$c")"
   expect "S6 successor args: cache 192 + stacked-opp + cpu tier 400" "--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400" "$(cat "$M/job-900031.out")"
-  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
-  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
-  job r1 718701 30 a30 ws-netv2-r1 restart; calls
-  expect "S6 job 718701 keeps \$ROOT/src only (restart included)" "pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")$(sed -n 2p <<< "$c" | grep -o "pp=.*")"
-  expect "S6 job 718701 args without the cpu tier" "--snapshot-cache 192 --stacked-opp --resume" "$(cat "$M/job-718701.out")"
-  tree post; echo 15356 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
-  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  tree post; echo 15356 > "$M/gpu_mib"; wrapper
   job g9 900032 10 a16 ws-netv2-g9 restart; calls
-  expect "S6 the G9s successor: src-9d0efe0 first, cache 72 + cpu tier 200" "pp=$M/nv2/src-9d0efe0:" "$(sed -n 1p <<< "$c")"
+  expect "S6 the G9s successor: src-24c633f first, cache 72 + cpu tier 200" "pp=$M/nv2/src-24c633f:" "$(sed -n 1p <<< "$c")"
   expect "S6 G9s successor args" "--snapshot-cache 72 --snapshot-cache-cpu 200 --resume" "$(cat "$M/job-900032.out")"
   echo "== S6b: deadline watch through the wrapper: the job ends in 15 min + 3 s; the trainer gets SIGINT"
-  tree post; echo 24576 > "$M/gpu_mib"; mkdir -p "$M/nv2/bin"
-  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-9d0efe0${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-9d0efe0"; chmod +x "$M/nv2/bin/py-src-9d0efe0"
+  tree post; echo 24576 > "$M/gpu_mib"; wrapper
   MOCK_END=$(( $(date +%s) + 903 )) MOCK_WAIT=1 job r1 900033 30 a30 ws-netv2-r1 restart; calls
   expect "S6b the wrapped trainer got SIGINT from the watcher" "^trainer: got SIGINT" "$(sed -n 2p <<< "$c")"
 fi
+# S7 (v5, both the current and the spooled scripts): job 718701 (G9p) trains through the wrapper (src-24c633f first)
+# with the args it had before (no CPU tier); job 741849 (G9s) keeps $ROOT/src only; restarts included
+echo "== S7: job 718701 runs src-24c633f first with unchanged args; job 741849 keeps \$ROOT/src (restarts included)"
+tree post; echo 24576 > "$M/gpu_mib"; wrapper
+job r1 718701 30 a30 ws-netv2-r1 restart; calls
+expect "S7 718701 first launch: src-24c633f first" "pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+expect "S7 718701 restart in place: src-24c633f first" "^call resume=.*/run/G9p/final_model.pt .* pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+expect "S7 718701 args: cache 192 + stacked-opp, no cpu tier" "--snapshot-cache 192 --stacked-opp --resume" "$(cat "$M/job-718701.out")"
+if grep -q "snapshot-cache-cpu" "$M/job-718701.out"; then bad "S7 718701 got the cpu tier"; else ok "S7 718701 without the cpu tier"; fi
+tree post; echo 15356 > "$M/gpu_mib"; wrapper
+job g9 741849 10 a16 ws-netv2-g9 restart; calls
+expect "S7 741849 first launch: \$ROOT/src only" " pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+expect "S7 741849 restart in place: \$ROOT/src only" "^call resume=.*/run/G9s/final_model.pt .* pp=$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+if grep -q -E "snapshot-cache-cpu|py-src" "$M/job-741849.out"; then bad "S7 741849 switched"; else ok "S7 741849 unchanged"; fi
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
 expect "S3 r1 resumes the newest G9s file" "^call resume=.*/20261108-220401-718701/G9s/final_model.pt \[G9s-preswap-final\] run_dir=$T/ws-netv2-900003/run/G9s .*pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"
