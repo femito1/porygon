@@ -52,6 +52,7 @@ if __name__ == "__main__":
         p = load_player(sys.argv[2], battle_format=fmt, start_listening=False)
         print(type(p).__name__, {k: getattr(p, k, None) for k in ("margin", "temperature", "deterministic", "c_puct",
                                                                    "net_prior_weight", "ms", "samples", "eval_config")})
-        print("net gen", getattr(getattr(p, "net", None), "gen", None), "pool workers", p.pool.n)
+        print("net gen", getattr(getattr(p, "net", None) or getattr(p, "model", None), "gen", None),
+              "pool workers", getattr(getattr(p, "pool", None), "n", None))  # (a raw-net player has no pool)
         sys.exit(0)
     E.main()
