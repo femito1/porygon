@@ -502,3 +502,115 @@ def test_cpu_tier_waits_for_the_step(tmp):
     assert "x0.pt" in t.snapshots_cpu and calls == []  # not moved while its step was assembled
     t._opp_act_many([("x1.pt", synth_obs(9, 4, 6, rng))])
     assert calls == ["cpu"]
+
+
+# ---------------------------------------------------------------- frozen nets stacked apart + fused slot fills (2026-11-10)
+
+def _capture_logits(monkeypatch) -> list:
+    """Record, per item and in order, the logits `_opp_act_many` samples from (None = uniform)."""
+    seen = []
+    orig = Trainer._opp_sample  # a staticmethod
+
+    def spy(lg, batch):
+        seen.append(None if lg is None else lg.clone())
+        return orig(lg, batch)
+
+    monkeypatch.setattr(Trainer, "_opp_sample", staticmethod(spy))
+    return seen
+
+
+def test_frozen_nets_stack_apart(tmp, monkeypatch):
+    """Frozen nets of the pool's own architecture get their own stack: two stacked forwards per step (frozen, pool),
+    each padded only to its own largest group; the logits are the per-net ones; the same step again copies nothing
+    into either stack, and a pool step cannot displace the frozen nets' slots."""
+    t = fake_trainer(tmp)
+    for i in range(4):
+        save(make_net(90 + i, 9, **SMALL), t.pool_dir / f"{100 * (i + 1):011d}.pt")
+    save(make_net(95, 9, **SMALL), t.pool_dir / "frozen" / "P1.pt")
+    save(make_net(96, 9, **SMALL), t.pool_dir / "frozen" / "best-00000000300.pt")
+    rng = np.random.default_rng(21)
+    names = ["frozen/P1.pt", "00000000100.pt", "frozen/best-00000000300.pt", "00000000200.pt", "00000000300.pt",
+             "00000000400.pt"]
+    items = [(n, synth_obs(9, r, 6, rng)) for n, r in zip(names, [60, 3, 55, 1, 7, 2])]
+    seen = _capture_logits(monkeypatch)
+    acts, st = t._opp_act_many(items)
+    assert st == {"opp_fwds": 2, "opp_stacked_fwds": 2, "opp_stacked_nets": 6, "opp_stack_refills": 6,
+                  "opp_uniform": 0}
+    assert sorted(k[1] for k in t.opp_stacks) == ["frozen", "pool"] and len({k[0] for k in t.opp_stacks}) == 1
+    sig = signature(t.snapshots["frozen/P1.pt"])
+    assert t.opp_stacks[(sig, "frozen")].capacity == 2 and t.opp_stacks[(sig, "pool")].capacity == 4
+    assert all(len(a) == len(ob["action_mask"]) for a, (_, ob) in zip(acts, items))
+    assert max(legal_diff(per_net(t.snapshots[n], ob), lg, ob) for (n, ob), lg in zip(items, seen)) <= TOL
+    first = [lg.clone() for lg in seen]
+    seen.clear()
+    _, st = t._opp_act_many(items)
+    assert st["opp_stack_refills"] == 0 and st["opp_stacked_fwds"] == 2
+    assert all(torch.equal(a, b) for a, b in zip(first, seen))
+    _, st = t._opp_act_many([items[i] for i in (3, 1)])  # pool nets only: the frozen stack is untouched
+    frozen = t.opp_stacks[(sig, "frozen")]
+    assert st["opp_stacked_fwds"] == 1 and {id(s) for s in frozen.slots} == {id(t.snapshots[n]) for n in names[::2][:2]}
+
+
+def test_fused_fill_equals_copy_loop(prod_nets, monkeypatch):
+    """OppStack slot fills: the fused multi-tensor copy writes exactly what the per-tensor copy_ loop writes."""
+    import porygon.v2.stacked as stacked_mod
+    fused = OppStack(prod_nets[0])
+    fused.bind(prod_nets[:3])
+    monkeypatch.setattr(stacked_mod, "_FOREACH_COPY", False)
+    loop = OppStack(prod_nets[0])
+    loop.bind(prod_nets[:3])
+    assert fused.buf.keys() == loop.buf.keys() and all(torch.equal(fused.buf[k], loop.buf[k]) for k in fused.buf)
+    for kind in ("species", "moves", "items", "abilities"):
+        key = f"ent_{kind}"
+        if key in fused.buf:
+            assert not fused.buf[key][:3, 0].any()  # PAD rows zero
+
+
+@needs_node
+def test_recorded_fastenv_batches_frozen_apart(tmp, monkeypatch):
+    """Real fastenv opponent batches (recorded from a collector with frozen nets of the snapshots' architecture, the
+    production mix: most pool battles vs the frozen nets) through `_opp_act_many`: two stacked forwards per step, and
+    every opponent's logits equal its own per-net forward on the recorded batch."""
+    from porygon.fastenv import FastEnv
+    from porygon.fastenv_v2 import FastCollector, FastWorkers
+    from porygon.v2.workers import Packer
+
+    t = fake_trainer(tmp)
+    for i in range(5):
+        save(make_net(110 + i, 9, **SMALL), t.pool_dir / f"{100 * (i + 1):011d}.pt")
+    save(make_net(116, 9, **SMALL), t.pool_dir / "frozen" / "P1.pt")
+    save(make_net(117, 9, **SMALL), t.pool_dir / "frozen" / "best-00000000500.pt")
+    recorded, seen = [], _capture_logits(monkeypatch)
+
+    def opp_many(items):
+        recorded.append(items)
+        return t._opp_act_many(items)
+
+    rng = np.random.default_rng(3)
+
+    def act(batch):
+        mask = batch["action_mask"] > 0
+        probs = mask / np.maximum(mask.sum(1, keepdims=True), 1)
+        acts = (rng.random(mask.shape) * mask).argmax(1)
+        n = len(acts)
+        return acts, np.zeros(n), np.zeros(n, np.float32), probs.astype(np.float32)
+
+    workers = FastWorkers(FastEnv("gen9randombattle", 1, 12, seed=7, encoder="v2", shaping=(0, 0, 0)))
+    try:
+        col = FastCollector(workers.env, Packer(9), act, t._opp_act, seed=2, pool_per_worker=10,
+                            pool_dir=tmp / "run" / "pool", p_frozen=0.67, opp_fn_many=opp_many)
+        while len([e for e in col.episodes if e["kind"] == "pool"]) < 8:
+            col.step()
+        st = col.rollout_stats()
+    finally:
+        workers.close()
+    names = {name for items in recorded for name, _ in items}
+    assert {"frozen/P1.pt", "frozen/best-00000000500.pt"} <= names and len(names - {"frozen/P1.pt",
+                                                                                  "frozen/best-00000000500.pt"}) >= 2
+    assert st["perf/col_opp_uniform"] == 0 and st["perf/col_opp_stacked_fwds"] > len(recorded)  # 2 stacks per step
+    flat = [(name, ob) for items in recorded for name, ob in items]
+    assert len(flat) == len(seen)
+    worst = max(legal_diff(per_net(t.snapshots[n], ob), lg, ob) for (n, ob), lg in zip(flat, seen))
+    print(f"recorded fastenv steps {len(recorded)}, opponent batches {len(flat)}: max |logit diff| vs per-net "
+          f"{worst:.2e}")
+    assert worst <= TOL

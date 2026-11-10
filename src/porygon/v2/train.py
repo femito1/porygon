@@ -1014,34 +1014,39 @@ class Trainer:
         """--stacked-opp (fastenv collector): `_opp_act` for all the pool opponents of one collector step, items =
         [(name, batch), ...] with distinct names. Nets are looked up / loaded / evicted / recorded exactly as by
         `_opp_act` called per item in order; the loaded nets with the same architecture (`porygon.v2.stacked.
-        signature`: gen, cfg, shapes) share one stacked forward (`OppStack`, cached per architecture: slots
-        refilled only for nets new to it, released when a net leaves the snapshot cache), the rest take
-        `_opp_logits`, a net that cannot be loaded plays uniformly. Then each item samples as `_opp_act` does, in
-        order (same distributions; the CPU generator's draws differ from per-item calls only around a cache miss,
-        since loads now precede all draws). Returns the actions per item and counters for the collector's
-        perf/col_*: opp_fwds (device forwards, a stacked one counts once), opp_stacked_fwds / opp_stacked_nets,
-        opp_stack_refills, opp_uniform. A stacked forward that raises (e.g. out of memory) is noted in the log once
-        and the run continues with per-net forwards (opp_stack_errors)."""
+        signature`: gen, cfg, shapes) and the same kind (frozen/* apart from pool snapshots) share one stacked
+        forward (`OppStack`, cached per architecture and kind: slots refilled only for nets new to it, released when a
+        net leaves the snapshot cache), the rest take `_opp_logits`, a net that cannot be loaded plays uniformly.
+        Then each item samples as `_opp_act` does, in order (same distributions; the CPU generator's draws differ
+        from per-item calls only around a cache miss, since loads now precede all draws). Returns the actions per
+        item and counters for the collector's perf/col_*: opp_fwds (device forwards, a stacked one counts once),
+        opp_stacked_fwds / opp_stacked_nets, opp_stack_refills, opp_uniform. A stacked forward that raises (e.g. out
+        of memory) is noted in the log once and the run continues with per-net forwards (opp_stack_errors)."""
         from porygon.v2.stacked import OppStack, signature
-        stacks = self.__dict__.setdefault("opp_stacks", {})  # signature -> OppStack
+        stacks = self.__dict__.setdefault("opp_stacks", {})  # (signature, kind) -> OppStack
         self._flush_cpu()
         nets = [self._opp_net(name) for name, _ in items]
+        # one stacked forward per architecture AND opponent kind: a stacked forward pads every net's rows to its
+        # largest group, and the frozen nets (--p-frozen of the pool battles shared by ~2 nets) have ~10-50x the rows
+        # of a pool snapshot, so stacked together most of the forward was padding, growing with the pool; apart, the
+        # frozen stack also keeps its slots (no refills from snapshots displacing them). Logits are per net either way.
         groups: dict[tuple, list[int]] = {}
         for i, net in enumerate(nets):
             if net is not None:
-                groups.setdefault(signature(net), []).append(i)
+                kind = "frozen" if items[i][0].startswith("frozen/") else "pool"
+                groups.setdefault((signature(net), kind), []).append(i)
         logits: list[torch.Tensor | None] = [None] * len(items)
         st = dict.fromkeys(("opp_fwds", "opp_stacked_fwds", "opp_stacked_nets", "opp_stack_refills"), 0)
         st["opp_uniform"] = sum(net is None for net in nets)
         cap = max(2, self.args.snapshot_cache)  # nets per stacked forward (bounds an OppStack's slots)
-        for sig, idx in groups.items():
+        for key, idx in groups.items():
             for c in range(0, len(idx), cap):
                 chunk = idx[c:c + cap]
                 if len(chunk) > 1 and not self.__dict__.get("opp_stack_off"):
                     try:
-                        stack = stacks.get(sig)
+                        stack = stacks.get(key)
                         if stack is None:
-                            stack = stacks[sig] = OppStack(nets[chunk[0]])
+                            stack = stacks[key] = OppStack(nets[chunk[0]])
                         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
                             out, refills = stack.logits([nets[i] for i in chunk], [items[i][1] for i in chunk])
                     except Exception as e:  # the speed-up must not stop training: per-net forwards from now on
@@ -1062,8 +1067,8 @@ class Trainer:
                     logits[i] = self._opp_logits(nets[i], items[i][1])
                     st["opp_fwds"] += 1
         live = {id(net) for net in self.snapshots.values()}
-        for sig in [s for s, stack in stacks.items() if not stack.release(live)]:
-            del stacks[sig]  # none of its nets is cached any more: free its weights
+        for key in [k for k, stack in stacks.items() if not stack.release(live)]:
+            del stacks[key]  # none of its nets is cached any more: free its weights
         return [self._opp_sample(lg, batch) for lg, (_, batch) in zip(logits, items)], st
 
     def _rotated(self, name: str) -> str:

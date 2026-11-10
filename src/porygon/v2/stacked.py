@@ -25,13 +25,14 @@ own trim would be smaller computes some extra empty slots, which are exact zeros
 its GEMMs. No op mixes rows (attention, norms and masks are per row), so padding rows never touch real ones. No id
 dropout (opponents pass drop_seed 0 = no dropout) and no value or aux heads (only the logits are used).
 
-What is stacked (`OppStack.shapes`): the policy-path parameters (Linear weights stored transposed, [in, out]), each
-entity's id embedding + static-feature MLP output as one table (`emb.weight + all_features()`, the PAD row zero: the
-same sum Net computes per lookup, then masks), the absent-mon vectors and the token-type embeddings; ~17 MB per net
-for the production gen9 config (d_model 256, 4 layers). Memory: one buffer of `capacity` slots per architecture; each
-slot remembers which net (by identity) it holds, so the same nets acted again copy nothing, and only the slots of
-nets new to the stack are refilled (~130 tensor copies each). `release` drops the slots of nets that left the trainer's
-snapshot cache.
+What is stacked (`OppStack.shapes`): the policy-path parameters (Linear weights in their own [out, in] layout, read
+transposed by the batched GEMM), each entity's id embedding + static-feature MLP output as one table (`emb.weight +
+all_features()`, the PAD row zero: the same sum Net computes per lookup, then masks), the absent-mon vectors and the
+token-type embeddings; ~17 MB per net for the production gen9 config (d_model 256, 4 layers). Memory: one buffer of
+`capacity` slots per stack (the trainer keeps one per architecture and opponent kind: frozen nets apart from pool
+snapshots); each slot remembers which net (by identity) it holds, so the same nets acted again copy nothing, and only
+the slots of nets new to the stack are refilled (~130 tensors in one fused multi-tensor copy each). `release` drops
+the slots of nets that left the trainer's snapshot cache.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ IGNORED_CFG = ("id_dropout", "value_trunk_grad", "value_hidden", "use_tables")
 PREFIXES = ("type_emb.", "move_mlp.", "mon_mlp.", "field_mlp.", "move_token.", "tera_token.", "blocks.", "norm.",
             "pair_mlp.", "policy_head.")
 TABLES = tuple(f"ent_{k}" for k in ENTITY_KINDS) + ("type_emb.weight",)  # looked up with per-group id offsets
+_FOREACH_COPY = hasattr(torch, "_foreach_copy_")  # fused slot fills (OppStack._fill); a copy_ loop otherwise
 
 
 def _policy_params(net: Net) -> dict[str, torch.Tensor]:
@@ -72,10 +74,11 @@ def signature(net: Net) -> tuple:
 
 # ---------------------------------------------------------------- grouped ops on the folded batch [n * bm, ...]
 
-def _lin(x: torch.Tensor, wt: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """nn.Linear per group: x [n * bm, ..., in], wt [n, in, out] (transposed weights), b [n, out]."""
-    y = torch.baddbmm(b.unsqueeze(1), x.reshape(wt.shape[0], -1, x.shape[-1]), wt)
-    return y.view(*x.shape[:-1], wt.shape[-1])
+def _lin(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """nn.Linear per group: x [n * bm, ..., in], w [n, out, in] (nn.Linear's own layout; the GEMM reads it
+    transposed, no copy), b [n, out]."""
+    y = torch.baddbmm(b.unsqueeze(1), x.reshape(w.shape[0], -1, x.shape[-1]), w.transpose(1, 2))
+    return y.view(*x.shape[:-1], w.shape[1])
 
 
 def _gmm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -118,8 +121,9 @@ class OppStack:
 
     @staticmethod
     def _sources(net: Net) -> dict[str, torch.Tensor]:
-        """One net's tensors in the stacked layout (Linear weights transposed; derived tables)."""
-        src = {n: (p.t() if p.dim() == 2 and n != "type_emb.weight" else p) for n, p in _policy_params(net).items()}
+        """One net's tensors in the stacked layout: its policy-path parameters as they are (contiguous, so a slot
+        fill is one fused copy) and the derived tables."""
+        src = dict(_policy_params(net))
         for kind in ENTITY_KINDS:
             ent = getattr(net, f"ent_{kind}")
             feats = ent.all_features()
@@ -139,9 +143,17 @@ class OppStack:
         self.off = {k: torch.arange(n, device=self.device) * self.shapes[k][0][0] for k in TABLES}
 
     def _fill(self, i: int, net: Net) -> None:
-        for k, v in self._sources(net).items():
-            self.buf[k][i].copy_(v)
-        for kind in ENTITY_KINDS:  # Net masks PAD lookups to zero
+        """Copy `net` into slot i: ~130 tensors in one fused multi-tensor copy (a per-tensor copy_ loop launched
+        ~130 kernels per refill, the main cost of a refill), then the PAD rows zeroed (Net masks PAD lookups)."""
+        src = self._sources(net)
+        dst = [self.buf[k][i] for k in src]
+        vals = list(src.values())
+        if _FOREACH_COPY and all(v.is_contiguous() and v.dtype == d.dtype for v, d in zip(vals, dst)):
+            torch._foreach_copy_(dst, vals)
+        else:
+            for d, v in zip(dst, vals):
+                d.copy_(v)
+        for kind in ENTITY_KINDS:
             self.buf[f"ent_{kind}"][i, PAD].zero_()
         self.slots[i] = net
 
