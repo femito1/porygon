@@ -29,7 +29,7 @@ if a[:3] != ["-u", "-m", "porygon.v2.train"]:
     sys.exit(f"mock python: unexpected {a}")
 v = {}
 for i, x in enumerate(a):
-    if x in ("--resume", "--run-dir", "--pool-dir") and i + 1 < len(a):
+    if x in ("--resume", "--run-dir", "--pool-dir", "--anchor") and i + 1 < len(a):
         v[x] = a[i + 1]  # argparse: last wins
 resume, rundir, pooldir = v.get("--resume", ""), v.get("--run-dir", ""), v.get("--pool-dir", "")
 time.sleep(1)  # a background pool copy lands meanwhile
@@ -41,7 +41,10 @@ yn = lambda f: "y" if os.path.isfile(f) else "n"
 log = open(f"{M}/calls.log", "a")
 log.write(f"call resume={resume} [{rd(resume)}] run_dir={rundir} pool_dir={pooldir} pool={n(pooldir)} "
           f"frozen={n(pooldir + '/frozen')} best={yn(rundir + '/best_model.pt')} ema={yn(rundir + '/ema_model.pt')} "
-          f"pp={os.environ.get('PYTHONPATH', '')}\n"); log.flush()
+          f"anchor={v.get('--anchor', '-')} ps={os.environ.get('PORYGON_PS', '-')} pp={os.environ.get('PYTHONPATH', '')}\n"); log.flush()
+pend = f"{M}/pending-inline"  # S8: an INLINE_CMD queued while this trainer runs (as the park driver does), moved into place now
+if os.path.exists(pend) and os.path.exists(pend + ".dest"):
+    os.replace(pend, open(pend + ".dest").read().strip()); os.remove(pend + ".dest")
 if os.environ.get("MOCK_WAIT") == "1":
     got = []
     signal.signal(signal.SIGINT, lambda *_: got.append(1))
@@ -198,6 +201,49 @@ job g9 741849 10 a16 ws-netv2-g9 restart; calls
 expect "S7 741849 first launch: \$ROOT/src only" " pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")"
 expect "S7 741849 restart in place: \$ROOT/src only" "^call resume=.*/run/G9s/final_model.pt .* pp=$M/nv2/src$" "$(sed -n 2p <<< "$c")"
 if grep -q -E "snapshot-cache-cpu|py-src" "$M/job-741849.out"; then bad "S7 741849 switched"; else ok "S7 741849 unchanged"; fi
+# S8 (2026-11-10, user decision G9q option A; both the current and the spooled scripts): in job 741849 the park
+# INLINE_CMD (as written for the cluster: G9s's state to runs/g9s-parked/, then MODE g9q) runs at a restart in place;
+# the relaunch is G9q's first start from P3 (G9q lineage dirs, November sets, $ROOT/src only, args with P3); its next
+# restart in place resumes G9q's own save
+echo "== S8: 741849 parks G9s through the INLINE_CMD and relaunches as G9q (first start from P3), then restarts G9q in place"
+tree post; echo 15356 > "$M/gpu_mib"; wrapper; echo P3 > "$M/nv2/runs/pretrain/P3-g9-s2.pt"
+G=$M/nv2/runs/g9
+echo "$G/INLINE_CMD" > "$M/pending-inline.dest"  # the stub trainer queues it during G9s's run (the driver's timing)
+cat > "$M/pending-inline" <<'INL'
+set -u
+C=$NV2; L=$LOCAL/run/G9s; P=$C/runs/g9s-parked
+[ -f "$L/final_model.pt" ] || { echo "no G9s final_model.pt: not parking"; exit 1; }
+rm -rf "$P.tmp"; mkdir -p "$P.tmp"; cp -p "$L/final_model.pt" "$P.tmp/"; cp -rp "$L/pool" "$P.tmp/pool"; mv "$P.tmp" "$P"
+cmp -s "$L/final_model.pt" "$P/final_model.pt" && echo g9q > "$C/runs/g9/MODE" && touch "$C/runs/g9/restart"
+INL
+job g9 741849 10 a16 ws-netv2-g9 restart; calls
+expect "S8 first launch: G9s (its newest mirrored file)" "^call resume=.*/G9s/final_model.pt \[G9s-postswap-final\] run_dir=$T/ws-netv2-741849/run/G9s .* ps=- pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+expect "S8 G9s parked with its last save" "^trained-from:G9s-postswap-final$" "$(cat "$M/nv2/runs/g9s-parked/final_model.pt" 2>/dev/null)"
+expect "S8 relaunch = G9q's first start: from P3, G9q dirs, November sets, \$ROOT/src only" "^call resume=$M/nv2/runs/pretrain/P3-g9-s2.pt \[P3\] run_dir=$T/ws-netv2-741849/run/G9q pool_dir=$T/ws-netv2-741849/run/G9q/pool .* ps=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11 pp=$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+expect "S8 G9q eval anchor P1 (the job script's --anchor)" " anchor=$M/nv2/runs/pretrain/P1-g9h-dmg-s2.pt ps=" "$(sed -n 2p <<< "$c")"
+expect "S8 G9q args: P3 anchor + frozen, 8 workers, cache 72" "--kl-anchor $M/nv2/runs/pretrain/P3-g9-s2.pt --kl-anchor-coef 0.1 .*--frozen $M/nv2/runs/pretrain/P3-g9-s2.pt .*--fastenv-workers 8 .*--snapshot-cache 72 --resume $M/nv2/runs/pretrain/P3-g9-s2.pt" "$(cat "$M/job-741849.out")"
+expect "S8 G9q restart in place: its own save" "^call resume=$T/ws-netv2-741849/run/G9q/final_model.pt \[trained-from:P3\] run_dir=$T/ws-netv2-741849/run/G9q .* ps=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11 pp=$M/nv2/src$" "$(sed -n 3p <<< "$c")"
+expect "S8 G9Q_STARTED + MODE g9q" "^g9q [0-9T:-]+$" "$(cat "$G/MODE") $(cat "$M/nv2/runs/g9q/G9Q_STARTED" 2>/dev/null)"
+if grep -q -E "snapshot-cache-cpu|py-src|stacked-opp" "$M/job-741849.out"; then bad "S8 741849 got successor / a40 settings"; else ok "S8 741849 keeps \$ROOT/src, no cpu tier, no stacked-opp"; fi
+if [ -z "$OLD" ]; then  # 810367 was spooled with the current job script
+  echo "== S9: the successor 810367 (fresh job) after G9q started: the newest MIRRORED G9q file, not G9s (A16, then an a40)"
+  for gpu in 15356 46068; do
+    tree post; echo $gpu > "$M/gpu_mib"; wrapper; echo P3 > "$M/nv2/runs/pretrain/P3-g9-s2.pt"; echo g9q > "$G/MODE"; mkdir -p "$M/nv2/runs/g9q"; date > "$M/nv2/runs/g9q/G9Q_STARTED"
+    K=$G/20261109-021316-741849; mkdir -p "$K/G9q/pool/frozen" "$K/G9q/checkpoints"
+    echo G9q-mirror-ckpt > "$K/G9q/checkpoints/ckpt_00005000000.pt"; at '12 01:00' "$K/G9q/checkpoints/ckpt_00005000000.pt"
+    echo G9q-mirror-final > "$K/G9q/final_model.pt"; at '12 01:44' "$K/G9q/final_model.pt"; at '12 01:46' "$K/G9s/final_model.pt"
+    echo b > "$K/G9q/best_model.pt"; echo e > "$K/G9q/ema_model.pt"; echo P3 > "$K/G9q/pool/frozen/P3-g9-s2.pt"; echo bb > "$K/G9q/pool/frozen/best-00002500000.pt"
+    echo s1 > "$K/G9q/pool/00002500000.pt"; echo s2 > "$K/G9q/pool/00005000000.pt"
+    job g9 810367 10 "$([ $gpu = 15356 ] && echo a16 || echo a40)" ws-netv2-g9 restart; calls
+    expect "S9 ($gpu MiB) resumes the mirrored G9q save with its pool / frozen / best / ema, wrapper, November sets" "^call resume=$K/G9q/final_model.pt \[G9q-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9q pool_dir=$T/ws-netv2-810367/run/G9q/pool pool=2 frozen=2 best=y ema=y anchor=$M/nv2/runs/pretrain/P1-g9h-dmg-s2.pt ps=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11 pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+    expect "S9 ($gpu MiB) its restart in place: its own save" "^call resume=$T/ws-netv2-810367/run/G9q/final_model.pt \[trained-from:G9q-mirror-final\]" "$(sed -n 2p <<< "$c")"
+    if [ $gpu = 15356 ]; then
+      expect "S9 A16 args: P3, 8 workers, cache 72 + cpu tier 200" "--kl-anchor $M/nv2/runs/pretrain/P3-g9-s2.pt .*--fastenv-workers 8 .*--snapshot-cache 72 --snapshot-cache-cpu 200 --resume" "$(cat "$M/job-810367.out")"
+    else
+      expect "S9 a40 args: cache 512 + stacked-opp + cpu tier 200" "--fastenv-workers 8 .*--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume" "$(cat "$M/job-810367.out")"
+    fi
+  done
+fi
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
 expect "S3 r1 resumes the newest G9s file" "^call resume=.*/20261108-220401-718701/G9s/final_model.pt \[G9s-preswap-final\] run_dir=$T/ws-netv2-900003/run/G9s .*pool=3 frozen=2 best=y ema=y" "$(sed -n 1p <<< "$c")"

@@ -155,5 +155,60 @@ g4tree; L=$ROOTM/local-T4; src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/
 echo "pool: snapshot 00020009055.pt failed to load" > "$L/run/R1bF/GUARD_TRIPPED"
 o=$(src g4r1bf T4); [ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$N/runs/r1/FOLLOWUP1" ] && [ ! -e "$N/runs/r1/FU.started" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 20a: pool trip handling"; }
 check 20b "--guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
+# 21-27 (2026-11-10, user decision: G9q = option A of runs/g9q/PROPOSAL-DRAFT.txt): g9 MODE g9q on the A16 (741849) =
+# G9p's recipe with P3 in the init, KL-anchor and frozen roles (eval anchor P1), lineage dir G9q, guard state runs/g9q,
+# November sets for the collector; the successor 810367 resumes the newest mirrored G9q file; G9s parked, never resumed
+g9qtree() {
+  fresh; echo g9q > "$N/runs/g9/MODE"; touch "$N/runs/g9/G9S_A16_STARTED"; echo p3 > "$N/runs/pretrain/P3-g9-s2.pt"
+  L=$ROOTM/local-A16; mkdir -p "$L/run/G9s/pool/frozen"; echo g9s-final > "$L/run/G9s/final_model.pt"; touch "$L/.toucher-G9q"
+}
+g9qtree; L=$ROOTM/local-A16; P3=$N/runs/pretrain/P3-g9-s2.pt; P1=$N/runs/pretrain/P1-g9h-dmg-s2.pt
+mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=15356 src g9 A16)
+check 21a "^FORMAT=gen9randombattle\|ANCHOR=$P1\|TRAIN_ARGS=--no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 --kl-anchor $P3 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P3 --p-frozen 0.67 --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $L/run/G9q --pool-dir $L/run/G9q/pool --snapshot-cache 72 --resume $P3$" "$o"
+checkno 21b "P1-g9h|stacked-opp|cache-cpu|G9s" "${o#*TRAIN_ARGS=}"
+[ -f "$N/runs/g9q/G9Q_STARTED" ] && [ -d "$L/run/G9q/pool" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 21c: G9Q_STARTED / G9q dirs"; }
+check 21d "G9q first start: from P3 $P3 \(steps 0\); November sets for the collector \(PORYGON_PS=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11\)" "$(cat "$L/run/train.log")"
+check 21e "^PY=unset\|" "$(pyof 741849 g9 A16)"
+o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$L; RUN_NAME=g9; SLURM_JOB_ID=741849; NV2_HOLD_ITERS=0; source "$ENVF"; bash -c 'echo "child sees ${PORYGON_PS:-nothing}"' ) 2>&1 )
+check 21f "child sees /vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11" "$o"
+# 22: restart in place of G9q: its own save (not P3 again, not G9s); 741849 has no P3 / G9q leftovers of G9s
+echo g9q-final > "$L/run/G9q/final_model.pt"
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=15356 src g9 A16); check 22a "--run-dir $L/run/G9q --pool-dir $L/run/G9q/pool --snapshot-cache 72 --resume $L/run/G9q/final_model.pt$" "$o"; check 22b "--kl-anchor $P3 .*--frozen $P3 " "$o"
+[ "$(grep -c 'G9q first start' "$L/run/train.log")" = 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 22c: first start logged twice"; }
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=46068 src g9 A16); check 22d "--snapshot-cache 512 --stacked-opp --resume $L/run/G9q/final_model.pt$" "$o"
+# 23: the successor 810367 (a fresh job: no local state) resumes the newest MIRRORED G9q file, not the newer G9s mirror
+K=$N/runs/g9/20261109-021316-741849; mkdir -p "$K/G9q/pool/frozen" "$K/G9q/checkpoints" "$K/G9s"
+echo g9q-mirror-ckpt > "$K/G9q/checkpoints/ckpt_00005000000.pt"; touch -d '2026-11-12 01:00' "$K/G9q/checkpoints/ckpt_00005000000.pt"
+echo g9q-mirror-final > "$K/G9q/final_model.pt"; touch -d '2026-11-12 01:45' "$K/G9q/final_model.pt"
+echo g9s-mirror-final > "$K/G9s/final_model.pt"; touch -d '2026-11-12 01:50' "$K/G9s/final_model.pt"
+echo b > "$K/G9q/best_model.pt"; echo e > "$K/G9q/ema_model.pt"; echo p3 > "$K/G9q/pool/frozen/P3-g9-s2.pt"; echo s > "$K/G9q/pool/00002500000.pt"
+S=$ROOTM/local-S; rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q"
+o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 S); check 23a "--run-dir $S/run/G9q --pool-dir $S/run/G9q/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $K/G9q/final_model.pt$" "$o"
+check 23b "--kl-anchor $P3 .*--frozen $P3 " "$o"; check 23c "^PY=$N/bin/py-src-24c633f\|" "$(pyof 810367 g9 S)"
+[ -f "$S/run/G9q/best_model.pt" ] && [ -f "$S/run/G9q/pool/frozen/P3-g9-s2.pt" ] && [ -L "$S/run/final_model.pt" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 23d: successor reseed"; }
+rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q"
+o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=46068 src g9 S); check 23e "--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $K/G9q/final_model.pt$" "$o"
+# 24: G9q's first trips follow G9p's fallback rules in runs/g9q (anchor drop -> best at lr 3.5e-5; collapse -> beta x3)
+echo "eval score 40.0% < best 60.0% - 15% for 2 evals" > "$L/run/G9q/GUARD_TRIPPED"; echo g9q-best > "$L/run/G9q/best_model.pt"
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=15356 src g9 A16); check 24a "--lr 3.5e-5 .*--resume $N/runs/g9q/fu-start-best.pt$" "$o"; check 24b "^2 " "$(cat "$N/runs/g9q/FU.started" 2>/dev/null)"
+[ "$(cat "$N/runs/g9q/fu-start-best.pt" 2>/dev/null)" = g9q-best ] && [ ! -e "$N/runs/g9s/FU.started" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 24c: G9q fallback state"; }
+g9qtree; L=$ROOTM/local-A16; SLURM_JOB_ID=741849 src g9 A16 > /dev/null; echo g9q-final > "$L/run/G9q/final_model.pt"
+echo "collapse: entropy < 0.5 for 5 updates" > "$L/run/G9q/GUARD_TRIPPED"
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=15356 src g9 A16); check 24d "--kl-anchor-coef 0.3 .*--resume $L/run/G9q/final_model.pt$" "$o"; checkno 24e "lr 3.5e-5" "$o"
+# 25: a second G9q trip after its fallback -> HOLD (allocation kept)
+echo "eval score 40.0% < best 60.0% - 15% for 2 evals" > "$L/run/G9q/GUARD_TRIPPED"
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=15356 src g9 A16); [ -f "$N/runs/g9/HOLD" ] && ls "$L"/run/G9q/GUARD_TRIPPED.second-* > /dev/null 2>&1 && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL 25: no HOLD on a second G9q trip"; }
+# 26: G9s resumed in the same job script later (MODE back to g9s after G9q): the November sets are dropped, G9s
+# continues from its own (= parked) lineage file with its fallback-2 args
+g9qtree; L=$ROOTM/local-A16; echo "2 2026-11-09T23:35:20" > "$N/runs/g9s/FU.started"; echo "eval score 66.5% < best 78.5% - 10% for 2 evals" > "$N/runs/g9s/FU.reason"
+o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$L; RUN_NAME=g9; SLURM_JOB_ID=741849; NV2_GPU_MIB=15356; NV2_HOLD_ITERS=0
+       source "$ENVF"; echo "first PS=${PORYGON_PS:-unset}"; echo g9s > "$NV2/runs/g9/MODE"; source "$ENVF"
+       echo "then PS=${PORYGON_PS:-unset}|$TRAIN_ARGS"; bash -c 'echo "child sees ${PORYGON_PS:-nothing}"' ) 2>&1 )
+check 26a "first PS=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11" "$o"; check 26b "then PS=unset\|.*--lr 3.5e-5 .*--run-dir $L/run/G9s --pool-dir $L/run/G9s/pool --snapshot-cache 72 --resume $L/run/G9s/final_model.pt$" "$o"
+check 26c "child sees nothing" "$o"
+# 27: the other runs never see G9q's settings
+o=$(SLURM_JOB_ID=718701 src r1 A30); checkno 27a "P3-g9|porygon-ws-fastenv|G9q" "$o"
+rm -f "$N/bin/py-src-24c633f"
 echo "passed $pass, failed $fail"
 for f in /proc/[0-9]*/fd/1; do if [ "$(readlink "$f" 2>/dev/null)" = "$ROOTM.out" ]; then q=${f#/proc/}; q=${q%%/*}; echo "killing my leftover $(cat /proc/$q/cmdline | tr '\0' ' ') ($q)"; kill "$q" 2>/dev/null; fi; done
