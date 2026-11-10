@@ -1,0 +1,112 @@
+G9q <-> G9p GPU SWAP (netv2.env v9): procedure and recovery            2026-11-10 (draft for review)
+=====================================================================================================
+Goal: G9q (P3-init, now on the A16 = job 741849, run g9) moves to the A30 (job 718701, run r1); G9p (P1-init, now on
+the A30) moves to the A16. ALL OR NOTHING: either both jobs switch lineage or neither does; no lineage is ever trained
+twice (fork) or dropped. State lives in files only; any agent can read it and recover.
+
+C=/vol/bitbucket/fr1226/porygon-ws-netv2      S=$C/runs/swap-50M
+Handover dirs:  runs/r1/handover-g9p-a16/  (G9p, written by 718701, read by the A16)
+                runs/g9q/handover-a30/     (G9q, written by 741849, read by the A30)
+Kit:            inline-718701-g9p.sh (-> runs/r1/INLINE_CMD), inline-741849-g9q.sh (-> runs/g9/INLINE_CMD)
+
+HOW IT WORKS
+  Phase 1 (each job's INLINE_CMD, run by nv2_pause at the restart in place, trainer stopped): copy the lineage's
+    just-saved local state (final_model.pt with optimizer + counters, best / ema, train.log, GUARD_TRIPPED if any,
+    pool incl. pool/frozen) to <handover>.tmp, cmp-check final_model.pt, compare the pool / frozen counts, write
+    HANDOVER.txt (counters + last 'upd' line) and DONE (summary + md5), then mv -T <handover>.tmp <handover> (only if
+    absent). Any failure: $S/FAIL-<run> and a STATE line; nothing else. Phase 1 NEVER touches MODE.
+  Phase 2 (nv2_swap in netv2.env, right after nv2_pause, at every (re)start of r1 / g9, also in a fresh job): if no
+    $S/DECISION exists and this side's handover is DONE (or any FAIL-* exists), wait <= 2 h (240 x 30 s; train.log
+    touched every poll, so the 45-min stall watchdog never fires) for the other side's DONE / a FAIL / a DECISION;
+    then propose COMMIT (both DONE, no FAIL) or ABORT (anything else) by hard-linking a temp file to $S/DECISION:
+    the FIRST writer wins and both sides act on the file's content, never on their own proposal.
+    COMMIT is applied once per run (runs/RUN/SWAP_APPLIED): r1 MODE g9p -> g9q, g9 MODE g9q -> g9p2; the handed-over
+    lineage's local GUARD_TRIPPED (if any) is renamed .handed-over-<time> (it travelled with the handover).
+    ABORT: nothing changes: each job resumes its own lineage from its own local save (MODE untouched).
+  New modes' first start (r1 g9q: marker runs/r1/G9Q_A30_STARTED; g9 g9p2: runs/g9/G9P_A16_STARTED) happens only if
+    DECISION = COMMIT and the handover it starts from has DONE + final_model.pt; otherwise the job's previous
+    lineage continues (G9p on the A30, G9q on the A16) and a line "MODE ... but no committed ... handover" is logged.
+  Fresh jobs (requeue / successor): a COMMIT the predecessor never applied is applied at the first source; a side
+    whose handover is DONE but has no decision yet waits / decides at its first source as above.
+
+PRECONDITIONS (check all; abort the plan if one fails)
+  [ ] netv2.env v9 on the cluster (md5 as reported by the laptop mocks) and uploaded while NEITHER job was inside
+      nv2_pause / nv2_swap (bash reads a sourced file as it runs).
+  [ ] cat runs/r1/MODE = g9p, runs/g9/MODE = g9q; runs/r1/G9P_A30_STARTED and runs/g9q/G9Q_STARTED exist;
+      runs/r1/G9Q_A30_STARTED, runs/g9/G9P_A16_STARTED, runs/r1/SWAP_APPLIED, runs/g9/SWAP_APPLIED absent.
+  [ ] $S, runs/g9q/handover-a30*, runs/r1/handover-g9p-a16* absent.
+  [ ] no runs/{r1,g9}/{INLINE_CMD,INLINE_CMD.running,HOLD,WAIT_FOR,restart}.
+  [ ] $C/bin/py-src-4f18108 and $C/bin/py-src-24c633f executable. Decide the A30 actor stream for G9q: default ON
+      (runs/g9q/NO_ACTOR_STREAM absent); create that file BEFORE arming to train G9q with --no-overlap (24c633f).
+  [ ] PORYGON_PS: v9 unsets it in every r1 mode except g9q (as the g9 branch already does). Check 718701's trainer
+      does not inherit one today:
+        srun --jobid=718701 --overlap --ntasks=1 bash -c 'for p in $(pgrep -f porygon.v2.train); do tr "\0" "\n" < /proc/$p/environ | grep PORYGON_PS; done'
+      (expected: nothing).
+  [ ] both trainers healthy (no GUARD_TRIPPED pending, not in a HOLD); >= 3 h before the earlier deadline stop
+      (718701 ~2026-11-11 21:31, 741849 ~2026-11-12 01:44 per netv2.env); ~3 GB free on /vol/bitbucket.
+
+ARM AND GO (one operator, a few minutes)
+  1. mkdir $S && echo "$(date -u +%FT%T) armed by <who>" > $S/STATE && cp PROCEDURE.txt $S/
+  2. cp inline-718701-g9p.sh $C/runs/r1/INLINE_CMD.tmp && mv $C/runs/r1/INLINE_CMD.tmp $C/runs/r1/INLINE_CMD
+     cp inline-741849-g9q.sh $C/runs/g9/INLINE_CMD.tmp && mv $C/runs/g9/INLINE_CMD.tmp $C/runs/g9/INLINE_CMD
+  3. touch $C/runs/r1/restart $C/runs/g9/restart
+  4. Within the same minute, SIGINT both trainers:
+       for j in 718701 741849; do srun --jobid=$j --overlap --ntasks=1 pkill -INT -f '^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train'; done
+  5. Watch: cat $S/STATE $S/DECISION; runs/{r1,g9}/inline-*.log; each job's train.log via
+       srun --jobid=J --overlap --ntasks=1 tail -n 20 ${TMPDIR:-/tmp}/ws-netv2-J/run/train.log
+     Expected: each trainer saves and exits (A30 < ~1 min, A16 < ~2 min: its step), "inline command", phase1 start /
+     DONE in STATE (G9p ~85 nets ~2 GB: minutes; G9q ~13 nets), "swap phase 2: waiting", one "proposed COMMIT; DECISION
+     = COMMIT by ...", two "applied COMMIT" lines, then "G9q first start on this A30 from runs/g9q/handover-a30" and
+     "G9p first start on this A16 from runs/r1/handover-g9p-a16" and the "restart in place ... TRAIN_ARGS=..." lines.
+  6. Verify: DECISION COMMIT; MODE r1 g9q, g9 g9p2; SWAP_APPLIED x2; G9Q_A30_STARTED, G9P_A16_STARTED; trainer
+     command lines: 718701 --run-dir .../run/G9q --kl-anchor .../P3-g9-s2.pt --actor-stream --decoupled
+     --snapshot-cache 192 --stacked-opp --resume .../runs/g9q/handover-a30/final_model.pt; 741849 --run-dir .../run/G9p
+     --kl-anchor .../P1-g9h-dmg-s2.pt --no-overlap --snapshot-cache 72 --snapshot-cache-cpu 200 --resume
+     .../runs/r1/handover-g9p-a16/final_model.pt (PY = $C/bin/py-src-24c633f: PYTHONPATH in /proc/PID/environ).
+     First logged 'upd' line of each continues the handover's step counter (HANDOVER.txt).
+
+STATE TABLE (read from files only; nothing to do unless marked ACTION)
+  no $S                                   not armed.
+  $S, INLINE_CMD in runs/RUN              armed, that job has not restarted yet (restart flag + SIGINT pending).
+  runs/RUN/INLINE_CMD.running             phase 1 running in that job (a <handover>.tmp may be growing).
+  <handover>/DONE, no DECISION            that side waits <= 2 h for the other (STATE "phase1 DONE" time + 2 h).
+  FAIL-<run>                              phase 1 failed there (see runs/RUN/inline-<time>.log): ABORT follows at once.
+  DECISION ABORT                          final for this attempt: both jobs train their own lineages; MODE unchanged.
+  DECISION COMMIT, SWAP_APPLIED in 0-2    each run applies it at its next (re)start or in its next fresh job.
+  COMMIT + 2 x SWAP_APPLIED + 2 x STARTED done.
+
+RECOVERY
+  * Agent / orchestrator died mid-swap: read the table above. The jobs resolve every state by themselves; never
+    delete DONE, a handover dir or DECISION while a job may still read them.
+  * A job died or was requeued after its phase 1 DONE but before a DECISION: the other side decides at its
+    timeout or at once (if both DONE: COMMIT); the dead side's requeue / successor applies the DECISION at its first
+    source (or waits / decides itself if there is none yet). No ACTION.
+  * The other side is known to be gone for good and one job is waiting idle (no DECISION): ACTION (stops the wait
+    early; only while DECISION is absent: ln fails otherwise, which is the point):
+      echo "ABORT by operator $(date -u +%FT%T)" > $S/.op && ln $S/.op $S/DECISION; rm -f $S/.op
+  * Both jobs died after COMMIT before applying it: their successors apply it at the first source (the MODE flip
+    and the "first start" line show in their train.log). No ACTION.
+  * Phase 1 FAIL / ABORT and you want to retry: once both jobs train again (their own lineages), archive the attempt:
+      t=$(date -u +%m%d-%H%M); mv $S $S.abort-$t
+      for h in runs/g9q/handover-a30 runs/r1/handover-g9p-a16; do for x in $C/$h $C/$h.tmp; do [ -e $x ] && mv $x $x.abort-$t; done; done
+    (an ABORT writes no SWAP_APPLIED / STARTED marker: check none exists), then ARM AND GO again.
+  * The trainer crashes in a new lineage's first start after COMMIT: a restart in place resumes the handover again
+    (STARTED exists, no own final_model.pt yet -> --resume <handover>/final_model.pt); a fresh job resumes that
+    lineage's newest mirrored file (the other side's pre-swap mirror = the handover state). No ACTION beyond the usual.
+  * Never "swap back" by editing MODE: the old lineage dirs are stale (the lineage would fork). A swap back is a new
+    swap with new handover dirs (a netv2.env change).
+
+DON'TS
+  * Do not edit netv2.env from the SIGINT until both relaunch lines appeared (both jobs inside nv2_pause / nv2_swap).
+  * Do not arm with netv2.env v8 (it has no phase 2: the copies would be made and nothing would ever decide; harmless
+    but a wasted restart).
+  * Do not re-use a handover dir or $S from an earlier attempt (phase 1 refuses an existing handover dir -> FAIL ->
+    ABORT; it refuses to start at all once a DECISION exists).
+
+RESIDUAL RISKS
+  * DECISION is a hard link on NFS (atomic on the server). If NFS refuses every write for a side (3 tries), that
+    side proceeds without a decision = no flip; if the other side then writes COMMIT, the first side follows it only
+    at its next restart, so both would train its old lineage meanwhile. Requires a broken /vol/bitbucket.
+  * The 2-h wait idles a GPU when the other side never answers (by design; operator ABORT above shortens it).
+  * A pool-trip HOLD on one side delays that side's phase 2 (<= 4 h): the other side ABORTs after 2 h and the held
+    side follows the ABORT afterwards (consistent; only time lost).

@@ -40,7 +40,7 @@ src() { _src "$@" > "$ROOTM.out" 2>&1; cat "$ROOTM.out"; }
 _src() {  # _src RUN_NAME JOB(A30|A16) -> prints FORMAT|ANCHOR|TRAIN_ARGS after a restart-in-place source
   ( set -euo pipefail
     NV2=$ROOTM/nv2; LOCAL=$ROOTM/local-$2; RUN_NAME=$1; SLURM_JOB_NAME=ws-netv2-x
-    NV2_HOLD_ITERS=${NV2_HOLD_ITERS:-0}; NV2_WAIT_ITERS=${NV2_WAIT_ITERS:-1}; NV2_WAIT_SLEEP=0
+    NV2_HOLD_ITERS=${NV2_HOLD_ITERS:-0}; NV2_WAIT_ITERS=${NV2_WAIT_ITERS:-1}; NV2_WAIT_SLEEP=0; NV2_SWAP_ITERS=${NV2_SWAP_ITERS:-1}; NV2_SWAP_SLEEP=${NV2_SWAP_SLEEP:-0}
     source "$ENVF"
     echo "FORMAT=$FORMAT|ANCHOR=$ANCHOR|TRAIN_ARGS=$TRAIN_ARGS" )
 }
@@ -233,5 +233,153 @@ check 26c "child sees nothing" "$o"
 # 27: the other runs never see G9q's settings
 o=$(SLURM_JOB_ID=718701 src r1 A30); checkno 27a "P3-g9|porygon-ws-fastenv|G9q" "$o"
 rm -f "$N/bin/py-src-24c633f"
+# 28-29 (v9, 2026-11-10): the G9q <-> G9p GPU swap, two-phase and all-or-nothing. Phase 1 = the kit's INLINE_CMDs
+# ($SWAP_KIT, default scripts/netv2_swap: inline-718701-g9p.sh in r1, inline-741849-g9q.sh in g9) copy each lineage into its
+# handover dir with DONE (or FAIL-<run>); phase 2 = nv2_swap: one atomic runs/swap-50M/DECISION, COMMIT iff both DONE.
+# COMMIT: r1 MODE g9q (the A30 trains G9q from runs/g9q/handover-a30, lineage dir G9q, guard state g9q, P3, November
+# sets, 28 workers, cache 192 / 640 + stacked-opp, actor stream unless runs/g9q/NO_ACTOR_STREAM) and g9 MODE g9p2 (the
+# A16 trains G9p from runs/r1/handover-g9p-a16, lineage dir G9p, guard state g9a30, P1, October sets, 8 workers,
+# --no-overlap, cache 72 / 512 + stacked-opp, wrapper + cpu tier 200). ABORT / no decision: each job resumes its own lineage.
+KIT=${SWAP_KIT:-$(dirname "$(readlink -f "$0")")/netv2_swap}
+swaptree() {  # the 2026-11-10 state: r1 MODE g9p (A30 = G9p, 718701), g9 MODE g9q (A16 = G9q, 741849), both wrappers
+  fresh; echo g9p > "$N/runs/r1/MODE"; echo g9q > "$N/runs/g9/MODE"; echo p3 > "$N/runs/pretrain/P3-g9-s2.pt"
+  mkdir -p "$N/runs/g9q" "$N/bin"; touch "$N/runs/r1/G9P_A30_STARTED" "$N/runs/g9q/G9Q_STARTED" "$N/runs/g9/G9S_A16_STARTED"
+  for w in py-src-24c633f py-src-4f18108; do printf '#!/bin/bash\nexit 0\n' > "$N/bin/$w"; chmod +x "$N/bin/$w"; done
+  A=$ROOTM/local-A30; mkdir -p "$A/run/G9p/pool/frozen"; echo g9p-local > "$A/run/G9p/final_model.pt"; echo g9p-best > "$A/run/G9p/best_model.pt"
+  echo g9p-ema > "$A/run/G9p/ema_model.pt"; for s in 00025000000 00050000000 00075000000; do echo "p$s" > "$A/run/G9p/pool/$s.pt"; done
+  echo P1 > "$A/run/G9p/pool/frozen/P1-g9h-dmg-s2.pt"; echo bp > "$A/run/G9p/pool/frozen/best-00050000000.pt"
+  echo "2026-11-10 15:00:00 upd 9 steps 80,000,000 (+43000) sps 2200" > "$A/run/G9p/train.log"
+  B=$ROOTM/local-A16; mkdir -p "$B/run/G9q/pool/frozen"; echo g9q-local > "$B/run/G9q/final_model.pt"; echo g9q-best > "$B/run/G9q/best_model.pt"
+  echo g9q-ema > "$B/run/G9q/ema_model.pt"; for s in 00002500000 00005000000; do echo "q$s" > "$B/run/G9q/pool/$s.pt"; done
+  echo P3 > "$B/run/G9q/pool/frozen/P3-g9-s2.pt"; echo bq > "$B/run/G9q/pool/frozen/best-00002500000.pt"
+  echo "2026-11-10 15:00:00 upd 9 steps 6,000,000 (+43000) sps 900" > "$B/run/G9q/train.log"
+  touch "$A/.toucher-G9q" "$B/.toucher-G9q" "$A/.toucher-G9p" "$B/.toucher-G9p"
+}
+kit() { cp "$KIT/inline-718701-g9p.sh" "$N/runs/r1/INLINE_CMD" 2>/dev/null; cp "$KIT/inline-741849-g9q.sh" "$N/runs/g9/INLINE_CMD" 2>/dev/null; true; }
+both() {  # both ITERS: r1 (A30, 718701) and g9 (A16, 741849) restart in place at the same time -> $ROOTM.r1 / $ROOTM.g9
+  ( SLURM_JOB_ID=718701 NV2_SWAP_ITERS=$1 NV2_SWAP_SLEEP=0.2 _src r1 A30 > "$ROOTM.r1" 2>&1 ) & local p=$!
+  /bin/sleep 0.5; ( SLURM_JOB_ID=741849 NV2_SWAP_ITERS=$1 NV2_SWAP_SLEEP=0.2 _src g9 A16 > "$ROOTM.g9" 2>&1 ); wait $p
+}
+psof() { ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$ROOTM/local-$3; RUN_NAME=$2; SLURM_JOB_ID=$1; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0; source "$ENVF" > /dev/null; bash -c 'echo "child sees ${PORYGON_PS:-nothing}"' ) 2>&1; }
+yes_() { if eval "$2"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL [$1]: $2"; fi; }
+P1=$N/runs/pretrain/P1-g9h-dmg-s2.pt; P3=$N/runs/pretrain/P3-g9-s2.pt; NOV=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11
+G9PARGS="--kl-anchor $P1 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P1 --p-frozen 0.67"
+G9QARGS="--kl-anchor $P3 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P3 --p-frozen 0.67"
+# 28a-28b: r1 MODE g9q without a committed swap (set by hand; or handover DONE but no DECISION) -> G9p continues here
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; echo g9q > "$N/runs/r1/MODE"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 28a "$G9PARGS .*--fastenv-workers 28 --fastenv-battles 48 --actor-stream --decoupled --n-battles 16 --pool-battles 16 --run-dir $A/run/G9p --pool-dir $A/run/G9p/pool --snapshot-cache 192 --stacked-opp --resume $A/run/G9p/final_model.pt$" "$o"
+check 28a2 "MODE g9q but no committed G9q handover .*: G9p continues" "$(cat "$A/run/train.log")"; yes_ 28a3 '[ ! -e "$N/runs/r1/G9Q_A30_STARTED" ] && [ "$(psof 718701 r1 A30)" = "child sees nothing" ]'
+mkdir -p "$N/runs/swap-50M" "$N/runs/g9q/handover-a30/pool"; echo h > "$N/runs/g9q/handover-a30/final_model.pt"; echo d > "$N/runs/g9q/handover-a30/DONE"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 28b "--run-dir $A/run/G9p .*--resume $A/run/G9p/final_model.pt$" "$o"; yes_ 28b2 '[ ! -e "$N/runs/r1/G9Q_A30_STARTED" ]'
+# 28c-28d: phase 1 on the A30 only, the A16 never answers: phase 2 times out -> ABORT; G9p resumes its own local save,
+# MODE unchanged; the late A16 side then refuses phase 1 (a decision exists) and G9q continues there
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit; rm -f "$N/runs/g9/INLINE_CMD"
+o=$(SLURM_JOB_ID=718701 NV2_SWAP_ITERS=2 src r1 A30); check 28c "$G9PARGS .*--run-dir $A/run/G9p --pool-dir $A/run/G9p/pool --snapshot-cache 192 --stacked-opp --resume $A/run/G9p/final_model.pt$" "$o"
+H=$N/runs/r1/handover-g9p-a16
+yes_ 28c2 'cmp -s "$H/final_model.pt" "$A/run/G9p/final_model.pt" && [ -f "$H/DONE" ] && [ -f "$H/pool/00075000000.pt" ] && [ -f "$H/pool/frozen/best-00050000000.pt" ] && [ -f "$H/best_model.pt" ] && [ -f "$H/ema_model.pt" ] && [ -f "$H/HANDOVER.txt" ] && [ ! -e "$H.tmp" ]'
+check 28c3 "upd 9 steps 80,000,000" "$(cat "$H/HANDOVER.txt" 2>/dev/null)"; check 28c4 "^ABORT by r1 718701 " "$(cat "$N/runs/swap-50M/DECISION" 2>/dev/null)"
+check 28c5 "r1 718701 phase1 DONE: .*r1 718701 phase2 proposed ABORT" "$(cat "$N/runs/swap-50M/STATE" 2>/dev/null | tr '\n' ' ')"; yes_ 28c6 '[ "$(cat "$N/runs/r1/MODE")" = g9p ] && [ ! -e "$N/runs/r1/SWAP_APPLIED" ]'
+cp "$KIT/inline-741849-g9q.sh" "$N/runs/g9/INLINE_CMD" 2>/dev/null
+o=$(SLURM_JOB_ID=741849 src g9 A16); check 28d "$G9QARGS .*--fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $B/run/G9q --pool-dir $B/run/G9q/pool --snapshot-cache 72 --resume $B/run/G9q/final_model.pt$" "$o"
+yes_ 28d2 '[ ! -e "$N/runs/g9q/handover-a30" ] && [ "$(cat "$N/runs/g9/MODE")" = g9q ]'; check 28d3 "g9 741849 phase1 REFUSED" "$(cat "$N/runs/swap-50M/STATE" 2>/dev/null)"
+# 28e-28h: the full swap: both jobs at a restart in place at about the same time -> COMMIT, MODEs flipped, each first start
+# from the other side's handover (A30: G9q, 718701 = actor stream through src-4f18108; A16: G9p, 741849 = 24c633f wrapper)
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit; both 50
+o=$(cat "$ROOTM.r1"); check 28e "^FORMAT=gen9randombattle\|ANCHOR=$P1\|TRAIN_ARGS=--no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 $G9QARGS --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 28 --fastenv-battles 48 --actor-stream --decoupled --n-battles 16 --pool-battles 16 --run-dir $A/run/G9q --pool-dir $A/run/G9q/pool --snapshot-cache 192 --stacked-opp --resume $N/runs/g9q/handover-a30/final_model.pt$" "$o"
+o=$(cat "$ROOTM.g9"); check 29e "^FORMAT=gen9randombattle\|ANCHOR=$P1\|TRAIN_ARGS=--no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 $G9PARGS --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $B/run/G9p --pool-dir $B/run/G9p/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $N/runs/r1/handover-g9p-a16/final_model.pt$" "$o"
+check 28e2 "^COMMIT by (r1 718701|g9 741849) " "$(cat "$N/runs/swap-50M/DECISION" 2>/dev/null)"
+yes_ 28e3 '[ "$(cat "$N/runs/r1/MODE") $(cat "$N/runs/g9/MODE")" = "g9q g9p2" ] && [ -f "$N/runs/r1/SWAP_APPLIED" ] && [ -f "$N/runs/g9/SWAP_APPLIED" ] && [ -f "$N/runs/r1/G9Q_A30_STARTED" ] && [ -f "$N/runs/g9/G9P_A16_STARTED" ]'
+yes_ 28e4 '[ "$(ls "$A/run/G9q/pool" | grep -c pt$) $(ls "$A/run/G9q/pool/frozen" | grep -c pt$) $(cat "$A/run/G9q/best_model.pt") $(cat "$A/run/G9q/ema_model.pt")" = "2 2 g9q-best g9q-ema" ]'
+yes_ 29e2 '[ "$(ls "$B/run/G9p/pool" | grep -c pt$) $(ls "$B/run/G9p/pool/frozen" | grep -c pt$) $(cat "$B/run/G9p/best_model.pt") $(cat "$B/run/G9p/ema_model.pt")" = "3 2 g9p-best g9p-ema" ]'
+yes_ 28e5 'cmp -s "$N/runs/g9q/handover-a30/final_model.pt" "$B/run/G9q/final_model.pt" && cmp -s "$N/runs/r1/handover-g9p-a16/final_model.pt" "$A/run/G9p/final_model.pt"'
+check 28e6 "G9q first start on this A30 from $N/runs/g9q/handover-a30 .*November sets \(PORYGON_PS=$NOV\)" "$(cat "$A/run/train.log")"; check 29e3 "G9p first start on this A16 from $N/runs/r1/handover-g9p-a16 .*October sets" "$(cat "$B/run/train.log")"
+check 28e7 "^PY=$N/bin/py-src-4f18108\|" "$(pyof 718701 r1 A30)"; check 29e4 "^PY=$N/bin/py-src-24c633f\|" "$(pyof 741849 g9 A16)"
+check 28e8 "child sees $NOV" "$(psof 718701 r1 A30)"; check 29e5 "child sees nothing" "$(psof 741849 g9 A16)"
+# 28f / 29f: restarts in place after the swap: each new lineage's own save (no second first start)
+echo g9q-a30-final > "$A/run/G9q/final_model.pt"; echo g9p-a16-final > "$B/run/G9p/final_model.pt"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 28f "--run-dir $A/run/G9q --pool-dir $A/run/G9q/pool --snapshot-cache 192 --stacked-opp --resume $A/run/G9q/final_model.pt$" "$o"
+o=$(SLURM_JOB_ID=741849 src g9 A16); check 29f "--run-dir $B/run/G9p --pool-dir $B/run/G9p/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $B/run/G9p/final_model.pt$" "$o"
+yes_ 28f2 '[ "$(grep -c "G9q first start" "$A/run/train.log") $(grep -c "G9p first start" "$B/run/train.log") $(grep -c "phase2 applied COMMIT" "$N/runs/swap-50M/STATE")" = "1 1 2" ]'
+o=$(SLURM_JOB_ID=741849 NV2_GPU_MIB=46068 src g9 A16); check 29f2 "--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $B/run/G9p/final_model.pt$" "$o"
+o=$(SLURM_JOB_ID=718701 NV2_GPU_MIB=46068 src r1 A30); check 28f3 "--snapshot-cache 640 --stacked-opp --resume $A/run/G9q/final_model.pt$" "$o"
+# 28g: runs/g9q/NO_ACTOR_STREAM -> the 24c633f wrapper and --no-overlap; 29g: no 24c633f wrapper -> $C/src, no cpu tier
+touch "$N/runs/g9q/NO_ACTOR_STREAM"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 28g "--fastenv-battles 48 --no-overlap --n-battles 16 .*--snapshot-cache 192 --stacked-opp --resume $A/run/G9q/final_model.pt$" "$o"; checkno 28g2 "actor-stream|decoupled|cache-cpu" "$o"
+check 28g3 "^PY=$N/bin/py-src-24c633f\|" "$(pyof 718701 r1 A30)"; rm -f "$N/runs/g9q/NO_ACTOR_STREAM"
+mv "$N/bin/py-src-24c633f" "$N/bin/off"; o=$(SLURM_JOB_ID=741849 src g9 A16); check 29g "--snapshot-cache 72 --resume $B/run/G9p/final_model.pt$" "$o"; check 29g2 "^PY=unset\|" "$(pyof 741849 g9 A16)"; mv "$N/bin/off" "$N/bin/py-src-24c633f"
+# 28h / 29h: successors after the swap (fresh jobs): the swapped lineages' newest MIRRORED files (810366: the A30's
+# post-swap G9q, not the A16's pre-swap one; 810367: the A16's post-swap G9p, not the A30's pre-swap one)
+J=$N/runs/r1/20261108-220401-718701; K=$N/runs/g9/20261109-021316-741849
+for d in "$J/G9p" "$K/G9q" "$J/G9q" "$K/G9p"; do mkdir -p "$d/pool/frozen" "$d/checkpoints"; echo "${d##*/}-$(basename "$(dirname "$d")")" > "$d/final_model.pt"; echo b > "$d/best_model.pt"; echo s > "$d/pool/00001000000.pt"; done
+touch -d '2026-11-10 16:00' "$J/G9p/final_model.pt" "$K/G9q/final_model.pt"; touch -d '2026-11-11 21:20' "$J/G9q/final_model.pt"; touch -d '2026-11-12 01:40' "$K/G9p/final_model.pt"
+S=$ROOTM/local-S; rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q" "$S/.toucher-G9p"
+o=$(SLURM_JOB_ID=810366 NV2_GPU_MIB=24576 src r1 S); check 28h "$G9QARGS .*--fastenv-workers 28 --fastenv-battles 48 --actor-stream --decoupled --n-battles 16 --pool-battles 16 --run-dir $S/run/G9q --pool-dir $S/run/G9q/pool --snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400 --resume $J/G9q/final_model.pt$" "$o"
+check 28h2 "^PY=$N/bin/py-src-4f18108\|" "$(pyof 810366 r1 S)"; yes_ 28h3 '[ -f "$S/run/G9q/best_model.pt" ] && [ -L "$S/run/final_model.pt" ]'
+rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q" "$S/.toucher-G9p"
+o=$(SLURM_JOB_ID=810366 NV2_GPU_MIB=46068 src r1 S); check 28h4 "--snapshot-cache 640 --stacked-opp --snapshot-cache-cpu 400 --resume $J/G9q/final_model.pt$" "$o"
+for g in 15356 46068; do
+  rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q" "$S/.toucher-G9p"
+  o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=$g src g9 S); x="--snapshot-cache 72 --snapshot-cache-cpu 200"; [ $g = 46068 ] && x="--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200"
+  check "29h-$g" "$G9PARGS .*--fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $S/run/G9p --pool-dir $S/run/G9p/pool $x --resume $K/G9p/final_model.pt$" "$o"
+done
+check 29h2 "^PY=$N/bin/py-src-24c633f\|" "$(pyof 810367 g9 S)"; check 29h3 "child sees nothing" "$(psof 810367 g9 S)"
+# 28i / 29i: the swapped lineages' guard trips: first trip -> their own fallback state (G9q: runs/g9q, G9p: runs/g9a30);
+# a trip after it -> HOLD in the job's run (r1 / g9)
+echo "eval score 40.0% < best 60.0% - 15% for 2 evals" > "$A/run/G9q/GUARD_TRIPPED"; echo g9q-best2 > "$A/run/G9q/best_model.pt"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 28i "--lr 3.5e-5 .*--resume $N/runs/g9q/fu-start-best.pt$" "$o"; check 28i2 "^2 " "$(cat "$N/runs/g9q/FU.started" 2>/dev/null)"
+echo "collapse: entropy" > "$A/run/G9q/GUARD_TRIPPED"; o=$(SLURM_JOB_ID=718701 src r1 A30); yes_ 28i3 '[ -f "$N/runs/r1/HOLD" ] && ls "$A"/run/G9q/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+echo "collapse: P(top >= 0.9) > 0.6 for 5 updates" > "$B/run/G9p/GUARD_TRIPPED"
+o=$(SLURM_JOB_ID=741849 src g9 A16); check 29i "--kl-anchor-coef 0.3 .*--resume $B/run/G9p/final_model.pt$" "$o"; check 29i2 "^2 .*collapse: P\(top" "$(cat "$N/runs/g9a30/FU.started" "$N/runs/g9a30/FU.reason" 2>/dev/null | tr "\n" " ")"
+echo "eval score" > "$B/run/G9p/GUARD_TRIPPED"; o=$(SLURM_JOB_ID=741849 src g9 A16); yes_ 29i3 '[ -f "$N/runs/g9/HOLD" ] && ls "$B"/run/G9p/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+# 28j: PORYGON_PS follows the r1 mode in one job script process (G9q -> back to G9p: the November sets are dropped)
+o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$A; RUN_NAME=r1; SLURM_JOB_ID=718701; NV2_HOLD_ITERS=0; rm -f "$N/runs/r1/HOLD"
+       source "$ENVF"; echo "first PS=${PORYGON_PS:-unset}"; echo g9p > "$NV2/runs/r1/MODE"; source "$ENVF"; echo "then PS=${PORYGON_PS:-unset}|$TRAIN_ARGS" ) 2>&1 )
+check 28j "first PS=$NOV" "$o"; check 28j2 "then PS=unset\|.*--kl-anchor $P1 .*--run-dir $A/run/G9p .*--resume $A/run/G9p/final_model.pt$" "$o"
+# 29a: g9 MODE g9p2 without a committed swap -> G9q continues here (its own save, November sets)
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; echo g9p2 > "$N/runs/g9/MODE"
+o=$(SLURM_JOB_ID=741849 src g9 A16); check 29a "$G9QARGS .*--run-dir $B/run/G9q --pool-dir $B/run/G9q/pool --snapshot-cache 72 --resume $B/run/G9q/final_model.pt$" "$o"
+check 29a2 "MODE g9p2 but no committed G9p handover .*: G9q continues" "$(cat "$B/run/train.log")"; yes_ 29a3 '[ ! -e "$N/runs/g9/G9P_A16_STARTED" ] && [ "$(psof 741849 g9 A16)" = "child sees $NOV" ]'
+# 29b (a): one side fails mid-copy (an unreadable G9q pool net on the A16): FAIL-g9, both ABORT at once, no handover
+# published by the A16, both MODEs unchanged, each job resumes its own lineage's local save
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit; chmod 000 "$B/run/G9q/pool/00005000000.pt"
+both 50; chmod 644 "$B/run/G9q/pool/00005000000.pt"
+check 29b "--run-dir $A/run/G9p --pool-dir $A/run/G9p/pool --snapshot-cache 192 --stacked-opp --resume $A/run/G9p/final_model.pt$" "$(cat "$ROOTM.r1")"
+check 29b2 "--run-dir $B/run/G9q --pool-dir $B/run/G9q/pool --snapshot-cache 72 --resume $B/run/G9q/final_model.pt$" "$(cat "$ROOTM.g9")"
+check 29b3 "^ABORT by " "$(cat "$N/runs/swap-50M/DECISION" 2>/dev/null)"; yes_ 29b4 '[ -f "$N/runs/swap-50M/FAIL-g9" ] && [ ! -e "$N/runs/g9q/handover-a30" ] && [ "$(cat "$N/runs/r1/MODE") $(cat "$N/runs/g9/MODE")" = "g9p g9q" ] && [ ! -e "$N/runs/r1/SWAP_APPLIED" ] && [ ! -e "$N/runs/g9/SWAP_APPLIED" ]'
+# 29c (b): one side "times out" after the other has decided. (1) The A30's phase 1 is DONE but its job stalls; the A16
+# completes phase 1, COMMITs and flips; the A30 then gets no wait (iters 0) -> it still follows COMMIT (no fork).
+# (2) The A30 timed out first (ABORT); the A16's phase 1 lands afterwards: it follows ABORT, G9q continues there.
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit
+( cd "$N" && LOCAL=$A bash runs/r1/INLINE_CMD > /dev/null 2>&1 ); mv "$N/runs/r1/INLINE_CMD" "$N/runs/r1/INLINE_CMD.done-mock"
+o=$(SLURM_JOB_ID=741849 NV2_SWAP_ITERS=2 src g9 A16); check 29c "--run-dir $B/run/G9p .*--resume $N/runs/r1/handover-g9p-a16/final_model.pt$" "$o"
+o=$(SLURM_JOB_ID=718701 NV2_SWAP_ITERS=0 src r1 A30); check 29c2 "--run-dir $A/run/G9q .*--resume $N/runs/g9q/handover-a30/final_model.pt$" "$o"
+check 29c3 "^COMMIT by g9 741849 " "$(cat "$N/runs/swap-50M/DECISION")"
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit
+o=$(SLURM_JOB_ID=718701 NV2_SWAP_ITERS=1 src r1 A30); ( cd "$N" && LOCAL=$B bash runs/g9/INLINE_CMD > /dev/null 2>&1 )  # (its phase 1 refuses: a decision exists)
+rm -rf "$N/runs/g9q/handover-a30"; mkdir -p "$N/runs/g9q/handover-a30"; cp -p "$B/run/G9q/final_model.pt" "$N/runs/g9q/handover-a30/"; echo d > "$N/runs/g9q/handover-a30/DONE"  # as if it landed just before
+mv "$N/runs/g9/INLINE_CMD" "$N/runs/g9/INLINE_CMD.done-mock"; o=$(SLURM_JOB_ID=741849 src g9 A16); check 29c4 "--run-dir $B/run/G9q .*--resume $B/run/G9q/final_model.pt$" "$o"
+yes_ 29c5 '[ "$(cat "$N/runs/r1/MODE") $(cat "$N/runs/g9/MODE")" = "g9p g9q" ] && grep -q "^ABORT by r1" "$N/runs/swap-50M/DECISION"'
+# 29d (c): restart after an interrupted swap, state on disk only. (1) Both phase 1 DONE, both jobs died before any
+# decision: the fresh successor 810366 decides COMMIT and first-starts G9q from the handover (successor args); the
+# fresh 810367 applies that COMMIT (its MODE was never flipped) and first-starts G9p from its handover. (2) Only the
+# A30's phase 1 is DONE: 810366 times out -> ABORT and resumes the newest mirrored G9p (MODE g9p unchanged).
+swaptree; A=$ROOTM/local-A30; B=$ROOTM/local-A16; mkdir -p "$N/runs/swap-50M"; kit
+( cd "$N" && LOCAL=$A bash runs/r1/INLINE_CMD > /dev/null 2>&1; LOCAL=$B bash runs/g9/INLINE_CMD > /dev/null 2>&1 ); rm -f "$N/runs/r1/INLINE_CMD" "$N/runs/g9/INLINE_CMD"
+J=$N/runs/r1/20261108-220401-718701; K=$N/runs/g9/20261109-021316-741849; mkdir -p "$J/G9p" "$K/G9q"; echo jp > "$J/G9p/final_model.pt"; echo kq > "$K/G9q/final_model.pt"
+S=$ROOTM/local-S; rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q" "$S/.toucher-G9p"
+o=$(SLURM_JOB_ID=810366 NV2_GPU_MIB=24576 NV2_SWAP_ITERS=1 src r1 S); check 29d "--actor-stream --decoupled .*--run-dir $S/run/G9q --pool-dir $S/run/G9q/pool --snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400 --resume $N/runs/g9q/handover-a30/final_model.pt$" "$o"
+yes_ 29d2 '[ "$(ls "$S/run/G9q/pool" | grep -c pt$)" = 2 ] && grep -q "^COMMIT by r1 810366" "$N/runs/swap-50M/DECISION" && [ "$(cat "$N/runs/g9/MODE")" = g9q ]'
+T=$ROOTM/local-T; rm -rf "$T"; mkdir -p "$T/run"; touch "$T/run/train.log" "$T/.toucher-G9q" "$T/.toucher-G9p"
+o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 T); check 29d3 "$G9PARGS .*--run-dir $T/run/G9p --pool-dir $T/run/G9p/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $N/runs/r1/handover-g9p-a16/final_model.pt$" "$o"
+yes_ 29d4 '[ "$(cat "$N/runs/g9/MODE")" = g9p2 ] && [ -f "$N/runs/g9/G9P_A16_STARTED" ] && [ "$(ls "$T/run/G9p/pool" | grep -c pt$)" = 3 ]'
+swaptree; A=$ROOTM/local-A30; mkdir -p "$N/runs/swap-50M"; kit; ( cd "$N" && LOCAL=$A bash runs/r1/INLINE_CMD > /dev/null 2>&1 ); rm -f "$N/runs/r1/INLINE_CMD" "$N/runs/g9/INLINE_CMD"
+J=$N/runs/r1/20261108-220401-718701; mkdir -p "$J/G9p"; echo jp > "$J/G9p/final_model.pt"
+S=$ROOTM/local-S; rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9q" "$S/.toucher-G9p"
+o=$(SLURM_JOB_ID=810366 NV2_SWAP_ITERS=1 src r1 S); check 29d5 "$G9PARGS .*--run-dir $S/run/G9p .*--snapshot-cache-cpu 400 --resume $J/G9p/final_model.pt$" "$o"
+yes_ 29d6 'grep -q "^ABORT by r1 810366" "$N/runs/swap-50M/DECISION" && [ "$(cat "$N/runs/r1/MODE")" = g9p ]'
+# 29j: the other runs never see the swap: R1b-F (g4r1bf) unchanged with swap state on disk
+g4tree; L=$ROOTM/local-T4; mkdir -p "$N/runs/swap-50M" "$N/bin"; echo "COMMIT by x" > "$N/runs/swap-50M/DECISION"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 29j "--snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $N/runs/r1b-parked/final_model.pt$" "$o"
+rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
 echo "passed $pass, failed $fail"
 for f in /proc/[0-9]*/fd/1; do if [ "$(readlink "$f" 2>/dev/null)" = "$ROOTM.out" ]; then q=${f#/proc/}; q=${q%%/*}; echo "killing my leftover $(cat /proc/$q/cmdline | tr '\0' ' ') ($q)"; kill "$q" 2>/dev/null; fi; done
