@@ -15,6 +15,10 @@
 # A block plays in a node-local directory (NS_LOCAL, default ${TMPDIR:-/tmp}/ws-fastenv-ns-<job>), copied to OUT at its
 # end: appends to the shared disk can stall an event loop for seconds (wsp measured ≈ 2 s per game for the server's
 # duplicate log), and the hybrid logs every searched decision. A block cut by a crash is lost (and voids the run).
+# OPP=foulplay[:ms=MS][,parallelism=P] (Stage 3b): the arms play Foul Play instead, CONC instances per block (one battle
+# each, scripts/fastenv/foulplay_instances.sh; FP_DIR default /vol/bitbucket/fr1226/foul-play, its gen9 venv with
+# PYTHONPATH=$G/.engine-gen9:$G/src as the gen9 Foul Play benchmark), through scripts/vs_foulplay.py --player spec (one
+# player per instance on ONE engine pool). Defaults ms=1000, parallelism=1 (= the benchmark's Foul Play).
 # Control: touch OUT/STOP = stop after the current block; OUT/STOP_NOW = kill the current block and stop.
 # Output: OUT/manifest.txt, OUT/looks.jsonl, OUT/result.txt + result.json (netsearch_slot.py report), arm-K/block-J/.
 set -uo pipefail
@@ -54,13 +58,28 @@ export PATH=$G/.node/bin:$PATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PORYGON_GEN=$
 export PYTHONPATH=$CODE/src
 [ "$GEN" != 9 ] || export PYTHONPATH=$G/.engine-gen9:$CODE/src
 SLOT="$PY $CODE/scripts/fastenv/netsearch_slot.py"
+FP_MODE=0
+case "$OPP" in
+  foulplay|foulplay:*)
+    FP_MODE=1
+    FP_DIR=${NS_FOULPLAY:-/vol/bitbucket/fr1226/foul-play}
+    FP_OPTS=${OPP#foulplay}; FP_OPTS=${FP_OPTS#:}
+    FP_MS=1000 FP_PAR=1
+    for kv in ${FP_OPTS//,/ }; do
+      case "$kv" in ms=*) FP_MS=${kv#ms=} ;; parallelism=*) FP_PAR=${kv#parallelism=} ;; *) echo "unknown foulplay option $kv" >&2; exit 1 ;; esac
+    done
+    FP_VENV=$FP_DIR/.venv FP_PYTHONPATH=
+    [ "$GEN" != 9 ] || { FP_VENV=$FP_DIR/.venv-gen9; FP_PYTHONPATH=$G/.engine-gen9:$G/src; }
+    ;;
+esac
 NARMS=${#ARMS[@]}
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$OUT/run.log"; }
 
-SERVER_W= SERVER_G= EVAL_W= EVAL_G=  # waiter pids (exit code = the command's) and session ids (to kill)
+SERVER_W= SERVER_G= EVAL_W= EVAL_G= FP_W= FP_G=  # waiter pids (exit code = the command's) and session ids (to kill)
 LOCAL=${NS_LOCAL:-${TMPDIR:-/tmp}/ws-fastenv-ns-$JOB}
 cleanup() {
   [ -z "$EVAL_G" ] || kill -- -"$EVAL_G" 2>/dev/null
+  [ -z "$FP_G" ] || kill -9 -- -"$FP_G" 2>/dev/null
   [ -z "$SERVER_G" ] || kill -- -"$SERVER_G" 2>/dev/null
   [ -z "$LOCAL" ] || rm -rf "$LOCAL"
 }
@@ -95,13 +114,18 @@ fi
     echo "  code sha256 now: $(cd "$PS" && find dist config data sim lib server -type f ! -path config/chat-plugins/seasons.json | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16)"
     echo "engine: $(ls "$G"/.engine-gen9/poke_engine/*.so 2>/dev/null | head -1) sha256 $(sha256sum "$G"/.engine-gen9/poke_engine/*.so 2>/dev/null | head -1 | cut -c1-16)"
     echo "python: $PY ($("$PY" -c 'import sys, torch; print(sys.version.split()[0], "torch", torch.__version__)' 2>&1))"
+    if [ "$FP_MODE" = 1 ]; then
+      echo "foulplay: $FP_DIR commit $(git -C "$FP_DIR" rev-parse HEAD 2>/dev/null || echo unknown) (dirty: $(git -C "$FP_DIR" status --porcelain 2>/dev/null | wc -l) files); venv $FP_VENV ($("$FP_VENV/bin/python" --version 2>&1)); PYTHONPATH=$FP_PYTHONPATH"
+      echo "  search-time-ms $FP_MS, search-parallelism $FP_PAR, $CONC instances per block; login patch: $(grep -o 'patched for the Porygon benchmark[^)]*' "$FP_DIR/fp/websocket_client.py" | head -1)"
+      echo "  poke_engine for Foul Play: $(cd "$FP_DIR" && PYTHONPATH=$FP_PYTHONPATH "$FP_VENV/bin/python" -c 'import poke_engine; print(poke_engine.__file__)' 2>&1 | tail -1)"
+    fi
   fi
   echo "format: $FORMAT  seed tag: $TAG (block j: server seed ${TAG}b<j>)  block: $BLOCK_PAIRS pairs x $BLOCKS blocks, $CONC concurrent  futility: ${FUTILITY:-none (fixed n)}"
   for spec in "$OPP" "${ARMS[@]}"; do
     echo "spec: $spec"
     base=${spec%%,*}; base=${base#netsearch:}; base=${base#search:}
     [ ! -f "$base" ] || echo "  file: $(readlink -f "$base") $(stat -L -c '%s bytes, mtime %y' "$base") sha256 $(sha256sum "$base" | cut -c1-64)"
-    [ "$DRY" = 1 ] || echo "  check: $("$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" --check "$spec" 2>&1 | tail -2 | tr '\n' ' ')"
+    [ "$DRY" = 1 ] || [ "$spec$FP_MODE" = "${OPP}1" ] || echo "  check: $("$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" --check "$spec" 2>&1 | tail -2 | tr '\n' ' ')"
   done
 } > "$OUT/manifest.txt" 2>&1
 cat "$OUT/manifest.txt"
@@ -112,6 +136,12 @@ if [ "$DRY" != 1 ]; then
   SITE=$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
   timeout 1800 find "$SITE"/{torch,poke_env,websockets,numpy} "$G/.engine-gen9" -type f \( -name '*.py' -o -name '*.so*' \) \
     -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null 2>&1 || true
+  if [ "$FP_MODE" = 1 ]; then
+    [ -x "$FP_VENV/bin/python" ] || { log "no Foul Play venv $FP_VENV"; exit 1; }
+    grep -q "patched for the Porygon benchmark" "$FP_DIR/fp/websocket_client.py" || { log "Foul Play's local login is not patched"; exit 1; }
+    timeout 1800 find "$FP_VENV" "$FP_DIR/fp" -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null |
+      xargs -0 -P4 -n64 cat > /dev/null 2>&1 || true
+  fi
   PORT=
   for ((p = 52008 + (${SLURM_JOB_ID:-$$} % 800) * 16, i = 0; i < 8; i++, p++)); do
     if python3 -c "import socket, sys; s = socket.socket(); s.bind(('', $p)); s.close()" 2>/dev/null; then PORT=$p; break; fi
@@ -175,13 +205,48 @@ play_block() {  # K J: arm K's block J (node-local, then copied to OUT/arm-K/blo
   return $rc
 }
 
+start_fp() {  # DIR TAG: CONC Foul Play instances fp<TAG>x<i> on $PORT, waits until all are up; names in FP_NAMES
+  local dir=$1 tag=$2 i t
+  FP_NAMES=()
+  for ((i = 0; i < CONC; i++)); do FP_NAMES+=("fp${tag}x$i"); done
+  mkdir -p "$dir/fp"
+  spawn "$dir/fp.pgid" bash "$CODE/scripts/fastenv/foulplay_instances.sh" "$FP_DIR" "$FP_VENV" "$FP_PYTHONPATH" "$PORT" \
+    "$FORMAT" "$FP_MS" "$FP_PAR" "$dir/fp" "${FP_NAMES[@]}"
+  FP_W=$!
+  FP_G=$(pgid_of "$dir/fp.pgid" "$FP_W")
+  for ((i = 0; i < CONC; i++)); do  # importing on a slow shared disk can take minutes
+    for ((t = 0; t < 1800; t++)); do grep -qs "Waiting for a" "$dir/fp/${FP_NAMES[$i]}.log" && continue 2; sleep 1; done
+    log "Foul Play instance ${FP_NAMES[$i]} did not start: $(tail -3 "$dir/fp/${FP_NAMES[$i]}.log" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  done
+}
+
+stop_fp() {  # kill the instances' session; compress their logs (chatty) before the block is copied
+  [ -n "$FP_W" ] || return 0
+  [ -z "$FP_G" ] || kill -- -"$FP_G" 2>/dev/null
+  sleep 2
+  [ -z "$FP_G" ] || kill -9 -- -"$FP_G" 2>/dev/null
+  wait "$FP_W" 2>/dev/null
+  FP_W= FP_G=
+  local f
+  for f in "$1"/fp/*.log; do [ -f "$f" ] || continue; grep -c "restarting" "$f" | sed "s|^|$(basename "$f"): restarts |"; gzip -f "$f"; done \
+    > "$1/fp/restarts.txt" 2>&1
+}
+
 run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
   local dir=$1 seed=$2 spec=$3 n=$4 tag=$5 rc waited=0
   start_server "$dir" "$seed" || return 1
-  spawn "$dir/client.pgid" env PORYGON_DUPLICATE="$seed" PORYGON_DUPLICATE_LOG="$dir/battles.jsonl" \
-    PORYGON_DUPLICATE_GROUP='^pa' "$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" "$spec" "$OPP" --n-battles "$n" \
-    --port "$PORT" --format "$FORMAT" --out "$dir" --concurrency "$CONC" --name-tag "$tag" --print-every 10 \
-    > "$dir/evaluate.log" 2>&1
+  if [ "$FP_MODE" = 1 ]; then
+    start_fp "$dir" "$tag" || { stop_fp "$dir"; stop_server; return 1; }
+    spawn "$dir/client.pgid" "$PY" "$CODE/scripts/vs_foulplay.py" "$spec" --player spec --port "$PORT" \
+      --opponents "${FP_NAMES[@]}" --total "$n" --name-prefix "pa$tag" --results "$dir/results.jsonl" \
+      --summary "$dir/summary.json" --format "$FORMAT" > "$dir/evaluate.log" 2>&1
+  else
+    spawn "$dir/client.pgid" env PORYGON_DUPLICATE="$seed" PORYGON_DUPLICATE_LOG="$dir/battles.jsonl" \
+      PORYGON_DUPLICATE_GROUP='^pa' "$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" "$spec" "$OPP" --n-battles "$n" \
+      --port "$PORT" --format "$FORMAT" --out "$dir" --concurrency "$CONC" --name-tag "$tag" --print-every 10 \
+      > "$dir/evaluate.log" 2>&1
+  fi
   EVAL_W=$!
   EVAL_G=$(pgid_of "$dir/client.pgid" "$EVAL_W")
   while kill -0 "$EVAL_W" 2>/dev/null; do
@@ -194,6 +259,7 @@ run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
   done
   wait "$EVAL_W"; rc=$?
   EVAL_W= EVAL_G=
+  [ "$FP_MODE" != 1 ] || stop_fp "$dir"
   stop_server
   return $rc
 }
@@ -206,7 +272,7 @@ for ((j = 1; j <= BLOCKS; j++)); do
     [ ! -e "$OUT/STOP" ] && [ ! -e "$OUT/STOP_NOW" ] || { log "stop file: ending the run"; break 2; }
     log "arm $k block $j: start (seed ${TAG}b$j)"
     play_block "$k" "$j"; rc=$?
-    games=$(cat "$OUT/arm-$k/block-$j/results.jsonl" 2>/dev/null | wc -l)
+    games=$(grep -vc '"status": "no_accept"' "$OUT/arm-$k/block-$j/results.jsonl" 2>/dev/null); games=${games:-0}
     log "arm $k block $j: client exit $rc, $games games: $(tail -1 "$OUT/arm-$k/block-$j/evaluate.log" 2>/dev/null)"
     if [ "$rc" != 0 ] && [ "$games" -lt $((2 * BLOCK_PAIRS * 9 / 10)) ]; then
       [ -e "$OUT/STOP_NOW" ] || { touch "$OUT/HARNESS_FAIL"; log "HARNESS FAILURE in arm $k block $j: the run stops (void; replay after the fix)"; }
