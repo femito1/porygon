@@ -88,6 +88,17 @@ o=$(SLURM_JOB_ID=810367 src g9 A16); check 8f "--snapshot-cache 72 --snapshot-ca
 o=$(SLURM_JOB_ID=741849 src g9 A16); check 8g "--snapshot-cache 72 --resume $ROOTM/local-A16/run/G9s/final_model.pt$" "$o"; check 8h "^PY=unset\|" "$(pyof 741849 g9 A16)"
 check 8j "^PY=$N/bin/py-src-24c633f\|" "$(pyof 810367 g9 A16)"
 o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=46068 src g9 A16); check 8i "--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume" "$o"
+# 7k-8o (v8, 2026-11-10; actor-stream (b) passed, orchestrator GO): with $NV2/bin/py-src-4f18108 present, the G9p
+# lineage (718701 and the r1 successors) trains through it with --actor-stream --decoupled in place of --no-overlap
+# (position kept, nothing else changes); the g9 lineage (741849, successor 810367) and R1b-F (15o) are unchanged
+printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-4f18108"; chmod +x "$N/bin/py-src-4f18108"
+o=$(SLURM_JOB_ID=718701 src r1 A30); check 7k "--fastenv-workers 28 --fastenv-battles 48 --actor-stream --decoupled --n-battles 16 --pool-battles 16 .*--snapshot-cache 192 --stacked-opp --resume $ROOTM/local-A30/run/G9p/final_model.pt$" "$o"; checkno 7l "no-overlap|cache-cpu" "$o"
+check 7m "^PY=$N/bin/py-src-4f18108\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 718701 r1 A30)"
+o=$(SLURM_JOB_ID=810366 src r1 A30); check 7n "--fastenv-battles 48 --actor-stream --decoupled .*--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400 --resume" "$o"; checkno 7o "no-overlap" "$o"
+check 7p "^PY=$N/bin/py-src-4f18108\|" "$(pyof 810366 r1 A30)"
+o=$(SLURM_JOB_ID=741849 src g9 A16); check 8k "--fastenv-battles 48 --no-overlap " "$o"; checkno 8l "actor-stream|decoupled" "$o"; check 8m "^PY=unset\|" "$(pyof 741849 g9 A16)"
+o=$(SLURM_JOB_ID=810367 src g9 A16); check 8n "--fastenv-battles 48 --no-overlap " "$o"; checkno 8o "actor-stream|decoupled" "$o"; check 8p "^PY=$N/bin/py-src-24c633f\|" "$(pyof 810367 g9 A16)"
+rm -f "$N/bin/py-src-4f18108"
 rm -f "$N/bin/py-src-24c633f"; o=$(SLURM_JOB_ID=810366 src r1 A30); checkno 7k "cache-cpu" "$o"; check 7l "^PY=unset\|" "$(pyof 810366 r1 A30)"
 check 7m "^PY=unset\|" "$(pyof 718701 r1 A30)"
 # 9-10: first guard trips after the swap use each lineage's own fallback
@@ -141,6 +152,10 @@ check 15j "^PY=$N/bin/py-src-24c633f\|" "$(pyof 900099 g4r1bf T4)"
 echo r1bf-final > "$L/run/R1bF/final_model.pt"
 o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15k "--no-overlap --n-battles 60 --pool-battles 30 --run-dir $L/run/R1bF --pool-dir $L/run/R1bF/pool --snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
 checkno 15l "snapshot-cache-cpu|ent-coef|kl-anchor|frozen" "$o"
+printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-4f18108"; chmod +x "$N/bin/py-src-4f18108"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15o "--no-overlap --n-battles 60 .*--snapshot-cache 40 --stacked-opp --guard-pg-mean 20" "$o"; checkno 15p "actor-stream" "$o"
+check 15q "^PY=$N/bin/py-src-24c633f\|" "$(pyof 829660 g4r1bf T4)"
+rm -f "$N/bin/py-src-4f18108"
 o=$(SLURM_JOB_ID=741849 src g9 A16); checkno 15m "stacked-opp" "$o"  # the A16 run is untouched by the g4r1bf change
 rm -f "$N/bin/py-src-24c633f"
 o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15n "--snapshot-cache 40 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"  # no wrapper: as before

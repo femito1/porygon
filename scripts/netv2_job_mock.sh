@@ -212,6 +212,28 @@ job g9 741849 10 a16 ws-netv2-g9 restart; calls
 expect "S7 741849 first launch: \$ROOT/src only" " pp=$M/nv2/src$" "$(sed -n 1p <<< "$c")"
 expect "S7 741849 restart in place: \$ROOT/src only" "^call resume=.*/run/G9s/final_model.pt .* pp=$M/nv2/src$" "$(sed -n 2p <<< "$c")"
 if grep -q -E "snapshot-cache-cpu|py-src" "$M/job-741849.out"; then bad "S7 741849 switched"; else ok "S7 741849 unchanged"; fi
+# S7b (v8, 2026-11-10; both the current and the spooled scripts): with $NV2/bin/py-src-4f18108 present, job 718701
+# (G9p) and an r1 successor train through it (src-4f18108 first) with --actor-stream --decoupled in place of
+# --no-overlap; job 741849 (G9q / G9s) keeps $ROOT/src and --no-overlap
+echo "== S7b: G9p (718701, r1 successor) through \$NV2/bin/py-src-4f18108 with --actor-stream --decoupled; 741849 unchanged"
+aswrapper() {
+  printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/src-4f18108${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-src-4f18108"
+  chmod +x "$M/nv2/bin/py-src-4f18108"
+}
+tree post; echo 24576 > "$M/gpu_mib"; wrapper; aswrapper
+job r1 718701 30 a30 ws-netv2-r1 restart; calls
+expect "S7b 718701 first launch: src-4f18108 first" "pp=$M/nv2/src-4f18108:$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+expect "S7b 718701 restart in place: its own save, src-4f18108 first" "^call resume=.*/run/G9p/final_model.pt .* pp=$M/nv2/src-4f18108:$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+expect "S7b 718701 args: actor-stream + decoupled, cache 192 + stacked-opp" "--fastenv-battles 48 --actor-stream --decoupled .*--snapshot-cache 192 --stacked-opp --resume" "$(cat "$M/job-718701.out")"
+if grep -q -E "no-overlap|snapshot-cache-cpu" "$M/job-718701.out"; then bad "S7b 718701 kept --no-overlap or got the cpu tier"; else ok "S7b 718701 without --no-overlap / cpu tier"; fi
+tree post; echo 24576 > "$M/gpu_mib"; wrapper; aswrapper
+job r1 900041 30 a30 ws-netv2-r1 restart; calls
+expect "S7b r1 successor: src-4f18108 first, actor-stream + cpu tier 400" "pp=$M/nv2/src-4f18108:$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+expect "S7b r1 successor args" "--actor-stream --decoupled .*--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400" "$(cat "$M/job-900041.out")"
+tree post; echo 15356 > "$M/gpu_mib"; wrapper; aswrapper
+job g9 741849 10 a16 ws-netv2-g9 restart; calls
+expect "S7b 741849: \$ROOT/src only, --no-overlap" "pp=$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+if grep -q -E "actor-stream|py-src" "$M/job-741849.out"; then bad "S7b 741849 switched"; else ok "S7b 741849 unchanged"; fi
 # S8 (2026-11-10, user decision G9q option A; both the current and the spooled scripts): in job 741849 the park
 # INLINE_CMD (as written for the cluster: G9s's state to runs/g9s-parked/, then MODE g9q) runs at a restart in place;
 # the relaunch is G9q's first start from P3 (G9q lineage dirs, November sets, $ROOT/src only, args with P3); its next
