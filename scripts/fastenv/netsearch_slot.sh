@@ -9,6 +9,7 @@
 # The first call copies this tree's src + scripts and netv2's src/porygon into OUT/code and re-runs itself from that
 # copy, so syncs during the run cannot change it. OUT default: $C/runs/netsearch-NAME-<date>-<job>.
 # PLAN.env (bash, sourced): NAME GEN TAG OPP ARMS=(spec ...) BLOCK_PAIRS BLOCKS CONC FUTILITY MIN_CPUS
+#   [NETV2_DIR (a frozen copy of netv2's tree to take src/porygon from; default its live cluster dir)]
 #   [BLOCK_TIMEOUT_MIN (default 240)] [DRY_P=(p ...): NS_DRY=1 writes synthetic games with these win rates instead
 #   of playing (laptop dry runs of the control flow)].
 # A block plays in a node-local directory (NS_LOCAL, default ${TMPDIR:-/tmp}/ws-fastenv-ns-<job>), copied to OUT at its
@@ -26,6 +27,7 @@ DRY=${NS_DRY:-0}
 
 if [ -z "${NS_SNAPSHOT:-}" ]; then
   source "$PLAN"
+  NV_LIVE=${NETV2_DIR:-$NV_LIVE}  # a plan may name a frozen copy of netv2's tree (src/porygon + COMMIT)
   OUT=${2:-$C/runs/netsearch-$NAME-$(date -u +%Y%m%d-%H%M%S)-$JOB}
   [ ! -e "$OUT/manifest.txt" ] || { echo "$OUT already holds a run" >&2; exit 1; }
   mkdir -p "$OUT/code/netv2src" || exit 1

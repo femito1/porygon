@@ -258,14 +258,16 @@ async def rescore(a, NS, S, R, gen: int) -> int:
     torch.set_num_threads(1)
     net = load_net(a.net, a.device)
     rows = [json.loads(line) for line in open(a.rows) if line.strip()]
-    want: dict[str, dict[int, dict]] = {}
+    # a record is one side of a battle: human records of both sides share the battle id, so key by (id, side)
+    want: dict[tuple, dict[int, dict]] = {}
     for r in rows:
-        want.setdefault(r["rec"], {})[r["idx"]] = r
-    recs = [r for r in records(a.records, a.source, a.seed) if r["id"] in want]
+        want.setdefault((r["rec"], r.get("side")), {})[r["idx"]] = r
+    recs = [r for r in records(a.records, a.source, a.seed) if (r["id"], r.get("side")) in want]
     out, n = open(a.out, "w"), 0
     for rec in recs:
-        async for d, battle, first, logged in replay_targets(rec, R, NS, gen, set(want[rec["id"]])):
-            row = dict(want[rec["id"]][d.msg])
+        key = (rec["id"], rec.get("side"))
+        async for d, battle, first, logged in replay_targets(rec, R, NS, gen, set(want[key])):
+            row = dict(want[key][d.msg])
             probs, mask, win = NS.net_forward(net, battle)
             assert (np.array(row["mask"]) > 0).tolist() == (mask > 0).tolist(), f"mask changed at {rec['id']}@{d.msg}"
             row["probs"] = [round(float(x), 6) for x in probs]
