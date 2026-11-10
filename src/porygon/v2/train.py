@@ -8,6 +8,9 @@ Data: battle worker processes (`porygon.v2.workers`): self-play battles (both si
 (the learner vs a frozen v2 snapshot from --pool-dir or a baseline bot). Collection runs in a background thread with
 a copy of the network refreshed before every rollout; by default it keeps running during the PPO update (data at most
 one update old; the stored log-probs keep the importance ratio exact), `--no-overlap` pauses it instead.
+`--actor-stream` (off by default): the collector thread runs on a high-priority CUDA stream and acts from two
+alternating weight copies (`porygon.v2.actor_buffers`; refreshed while it acts), so under overlap its forwards do not
+queue behind the update's kernels on the default stream; on CPU only the double buffer.
 
 `--collector fastenv` collects from fastenv instead (`porygon.fastenv_v2`: Showdown's simulator in-process in Node
 workers, the v2 encoder in JS at parity with `porygon.v2.encoder`; no servers or poke-env workers; `--ports` is then
@@ -674,6 +677,10 @@ def parse_args(argv=None):
     a("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
     a("--max-updates", type=int, help="stop after this many updates in this process (tests)")
     a("--no-overlap", action="store_true", help="pause battles during the PPO update")
+    a("--actor-stream", action="store_true",
+      help="the collector thread on a high-priority CUDA stream, acting from double-buffered weights refreshed while "
+           "it acts (porygon.v2.actor_buffers), so overlapped forwards do not queue behind the update; CPU: the "
+           "double buffer only (default off: one actor copy, every kernel on the default stream)")
     a("--pool-alarm-updates", type=int, default=5,
       help="pool battles configured but no pool episode finished for this many updates in a row: log, write "
            "POOL_ALARM and stop with a 'pool:' guard (0 = off); a silently missing opponent mix (R1's hung pool "
@@ -841,8 +848,15 @@ class Trainer:
                                      eps=1e-5, fused=self.device.type == "cuda")
         if ck is not None and "optimizer" in ck and not args.reset_optimizer:
             self.opt.load_state_dict(ck["optimizer"])
-        self.actor = copy.deepcopy(self.net).eval()
-        self.actor_lock = threading.Lock()
+        self.actor_buffers = None
+        if getattr(args, "actor_stream", False):
+            from porygon.v2.actor_buffers import ActorBuffers
+            self.actor_buffers = ActorBuffers(self.net, self.device)  # two acting copies (+ the actor stream on CUDA)
+            self.actor = self.actor_buffers.nets[0]  # holds the compiled damage layer both copies and _opp_net share
+            self.actor_lock = self.actor_buffers.lock  # _act's version counts and _take_versions under the flip's lock
+        else:
+            self.actor = copy.deepcopy(self.net).eval()
+            self.actor_lock = threading.Lock()
         if args.frozen:  # fixed opponents for the whole run (anti-cycling); the trainer loads them by relative name
             fdir = self.pool_dir / "frozen"
             fdir.mkdir(parents=True, exist_ok=True)
@@ -869,6 +883,10 @@ class Trainer:
         if self.compile:
             self.net.compile_damage()
             self.actor.compile_damage()
+            if self.actor_buffers is not None:  # the other copy shares the compiled parameter-free layer (no recompile)
+                for k in ("_damage_layer_untrimmed", "_damage_compiled"):
+                    if k in self.actor.__dict__:
+                        object.__setattr__(self.actor_buffers.nets[1], k, self.actor.__dict__[k])
         self.snapshots: dict[str, Net] = {}  # pool snapshot opponents on the device (LRU)
         self.pool_loads = PoolLoads()  # their loads (attempts / failures), checked after every update
         self.opp_stacks: dict = {}  # --stacked-opp: architecture signature -> porygon.v2.stacked.OppStack
@@ -903,6 +921,11 @@ class Trainer:
         if args.stacked_opp and args.collector == "fastenv":
             self.log("stacked-opp: same-architecture pool opponents share one forward per collector step "
                      "(perf/col_opp_fwds = forwards, perf/col_opp_fwd_nets = opponents served)")
+        if self.actor_buffers is not None:
+            self.log(self.actor_buffers.describe())
+            if not args.no_overlap and not args.decoupled:
+                self.log("warning: --actor-stream overlaps collection with the update without --decoupled: the actor "
+                         "acts with weights up to one update old (use --decoupled with overlap)")
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
@@ -912,12 +935,21 @@ class Trainer:
     @torch.no_grad()
     def _act(self, batch: dict):
         t = batch_to_tensors(batch, self.device, keys=model_keys(self.gen) + ["drop_seed"])
-        with self.actor_lock, torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
-            out = self.actor(t, aux=False)
-            v = getattr(self, "actor_version", 0)
-            if not hasattr(self, "version_counts"):
-                self.version_counts = {}
-            self.version_counts[v] = self.version_counts.get(v, 0) + len(batch["action_mask"])
+        buffers = getattr(self, "actor_buffers", None)
+        if buffers is None:
+            with self.actor_lock, torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
+                out = self.actor(t, aux=False)
+                v = getattr(self, "actor_version", 0)
+                if not hasattr(self, "version_counts"):
+                    self.version_counts = {}
+                self.version_counts[v] = self.version_counts.get(v, 0) + len(batch["action_mask"])
+        else:  # --actor-stream: the front copy and its version, under the buffers' lock (= self.actor_lock)
+            with buffers.acquire() as (net, v), torch.autocast(self.device.type, dtype=torch.bfloat16,
+                                                               enabled=self.amp):
+                out = net(t, aux=False)
+                if not hasattr(self, "version_counts"):
+                    self.version_counts = {}
+                self.version_counts[v] = self.version_counts.get(v, 0) + len(batch["action_mask"])
         logp_all = torch.log_softmax(out["logits"].float(), -1)
         probs = logp_all.exp()
         a = torch.multinomial(probs, 1).squeeze(1)
@@ -1085,9 +1117,23 @@ class Trainer:
         return new
 
     def _refresh_actor(self) -> None:
+        buffers = getattr(self, "actor_buffers", None)
+        if buffers is not None:  # --actor-stream: into the back copy while the actor acts on the front one, then flip
+            buffers.refresh(self.net, self.counters["updates"])
+            with self.actor_lock:
+                self.actor_version = self.counters["updates"]  # (_act counts the version of the copy it acted with)
+            return
         with self.actor_lock:
             self.actor.load_state_dict(self.net.state_dict())
             self.actor_version = self.counters["updates"]  # the acting weights = the learner after this many updates
+
+    def _collect_on_actor_stream(self, *run_args) -> None:
+        """--actor-stream: the collector thread's target. The current CUDA stream is per thread, so every GPU op of
+        this thread (actor and pool-opponent forwards, pool-net loads and device moves, host-to-device copies) runs on
+        the high-priority actor stream while the update stays on the default stream. CPU: the plain collector loop."""
+        if self.actor_buffers.stream is not None:
+            torch.cuda.set_stream(self.actor_buffers.stream)
+        self.collector.run(*run_args)
 
     def _take_versions(self) -> dict[int, int]:
         """Decisions acted per actor version since the last call (≈ the rollout just taken)."""
@@ -1299,7 +1345,8 @@ class Trainer:
     def run(self) -> None:
         a, c = self.args, self.counters
         overlap = not a.no_overlap
-        thread = threading.Thread(target=self.collector.run, args=(a.rollout, self.requests, self.rollouts, self.stop),
+        target = self.collector.run if getattr(self, "actor_buffers", None) is None else self._collect_on_actor_stream
+        thread = threading.Thread(target=target, args=(a.rollout, self.requests, self.rollouts, self.stop),
                                   daemon=True)
         thread.start()
         deadline = time.time() + a.max_hours * 3600 if a.max_hours else None
