@@ -52,6 +52,13 @@ only if 3a succeeds (Q1) and the orchestrator approves the submission.
 - Scoring: pair means from the server's duplicate log (`battles.jsonl`), as in Stages 2 and 3.
   - Timeouts and Foul Play crashes count as the games the server records.
 
+**Duration.**
+- The smoke measured ≈ 110 s per game, about 3.6 s per turn (8 CPUs, 3 engines). The gen9 Foul Play benchmark ran
+  ≈ 126 s per game per slot.
+- So 3b's 2000 games on 3 slots take ≈ 15–19 h.
+- Submitted with `--time=30:00:00` on the sbatch command line (training allows 3 days; the script's 14 h is too short).
+- BLOCK_TIMEOUT_MIN stays 240 (a block ≈ 1.5–2 h).
+
 **Void** (as Stage 2/3; Foul Play has no fallback counter):
 - The run stops itself on a harness failure (HARNESS_FAIL: a block whose client fails with < 90% of its games), or
   is void if > 2% of our decisions fall back.
@@ -64,7 +71,11 @@ only if 3a succeeds (Q1) and the orchestrator approves the submission.
 - Restarts, timeouts and no-accepts.
 - For context only (not a test): H vs Foul Play next to H vs pure search (3a).
 
-**Checked before 3b's first game:** a harness smoke (`plans/fpsmoke.env`: an old net g9p-67.5M, tag
+**Checked before 3b's first game: DONE 2026-11-10, 986503, ws/fastenv b9f3d66, PASSED.**
+- 4 games per arm, 0 fallbacks, 0 Foul Play restarts; the report and `paired` work.
+- Pair (i, game) had the same teams in both arms; the manifest records Foul Play's commit, venv and engine.
+
+The smoke was (`plans/fpsmoke.env`: an old net g9p-67.5M, tag
 `fpsmoke20261110`, 2 instances, 2 pairs per arm; a helper job). It checks:
 - the instances start;
 - the shared pool (one 3-process engine pool per block, not one per player);
