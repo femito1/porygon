@@ -134,8 +134,16 @@ o=$( ( set -euo pipefail; NV2=$ROOTM/nv2; LOCAL=$L; RUN_NAME=g4r1bf; SLURM_JOB_N
 check 15f "PS=/vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11\|CHAIN=3\|MIN=10" "$o"; check 15g "child sees /vol/bitbucket/fr1226/porygon-ws-fastenv/ps-2026-11" "$o"
 o=$(src r1 A30); checkno 15h "porygon-ws-fastenv" "$o"  # the G9p branch never sees the gen4 settings (separate sourcing)
 mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
-check 15i "^PY=unset\|" "$(pyof 829660 g4r1bf T4)"; check 15j "^PY=unset\|" "$(pyof 900099 g4r1bf T4)"  # R1b-F never switches
+# v7 (2026-11-10): R1b-F (829660 and its chained jobs) runs through the 24c633f wrapper with --stacked-opp when the
+# wrapper exists; otherwise (15c above) $C/src and no --stacked-opp
+check 15i "^PY=$N/bin/py-src-24c633f\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 829660 g4r1bf T4)"
+check 15j "^PY=$N/bin/py-src-24c633f\|" "$(pyof 900099 g4r1bf T4)"
+echo r1bf-final > "$L/run/R1bF/final_model.pt"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15k "--no-overlap --n-battles 60 --pool-battles 30 --run-dir $L/run/R1bF --pool-dir $L/run/R1bF/pool --snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
+checkno 15l "snapshot-cache-cpu|ent-coef|kl-anchor|frozen" "$o"
+o=$(SLURM_JOB_ID=741849 src g9 A16); checkno 15m "stacked-opp" "$o"  # the A16 run is untouched by the g4r1bf change
 rm -f "$N/bin/py-src-24c633f"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15n "--snapshot-cache 40 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"  # no wrapper: as before
 echo r1bf-final > "$L/run/R1bF/final_model.pt"
 o=$(src g4r1bf T4); check 16a "--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"; checkno 16b "ent-coef" "$o"
 # 17: an anchor-drop trip -> follow-up #1 from the 7.5M checkpoint (not follow-up 2), trip file renamed, snapshots > 7.5M parked

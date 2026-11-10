@@ -186,6 +186,17 @@ if [ -z "$OLD" ]; then  # the successors were spooled with the current job scrip
   tree post; echo 24576 > "$M/gpu_mib"; wrapper
   MOCK_END=$(( $(date +%s) + 903 )) MOCK_WAIT=1 job r1 900033 30 a30 ws-netv2-r1 restart; calls
   expect "S6b the wrapped trainer got SIGINT from the watcher" "^trainer: got SIGINT" "$(sed -n 2p <<< "$c")"
+  # S5c (v7, 2026-11-10): R1b-F with the wrapper present: job 829660 (spooled = the current script) and its chained
+  # jobs train through src-24c633f with --stacked-opp, otherwise the S5 recipe (no cpu tier)
+  echo "== S5c: R1b-F (job 829660 and a chained job) through \$NV2/bin/py-src-24c633f with --stacked-opp"
+  tree post; mkdir -p "$M/nv2/runs/g4r1bf"; echo 15360 > "$M/gpu_mib"; wrapper
+  job g4r1bf 829660 10 training ws-netv2-g4 restart; calls
+  expect "S5c 829660 first launch: src-24c633f first" "pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 1p <<< "$c")"
+  expect "S5c 829660 restart in place: its own save, src-24c633f first" "^call resume=$T/ws-netv2-829660/run/R1bF/final_model.pt .* pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 2p <<< "$c")"
+  expect "S5c args: cache 40 + stacked-opp, then the strength watch" "fastenv-workers 8 .*--snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999" "$(cat "$M/job-829660.out")"
+  if grep -q "snapshot-cache-cpu" "$M/job-829660.out"; then bad "S5c R1b-F got the cpu tier"; else ok "S5c R1b-F without the cpu tier"; fi
+  job g4r1bf 900023 10 training ws-netv2-g4; calls
+  expect "S5c the chained job: mirrored R1bF save, src-24c633f first" "^call resume=$M/nv2/runs/g4r1bf/[0-9-]+-829660/R1bF/final_model.pt .* pp=$M/nv2/src-24c633f:$M/nv2/src$" "$(sed -n 3p <<< "$c")"
 fi
 # S7 (v5, both the current and the spooled scripts): job 718701 (G9p) trains through the wrapper (src-24c633f first)
 # with the args it had before (no CPU tier); job 741849 (G9s) keeps $ROOT/src only; restarts included
