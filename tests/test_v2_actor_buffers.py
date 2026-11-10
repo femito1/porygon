@@ -504,3 +504,53 @@ def test_trainer_runs_on_fastenv(tmp, device, extra, torch_globals):
         assert ("actor-stream: CPU" if device == "cpu" else "actor-stream: collector thread on a CUDA stream") in log
     else:
         assert tr.actor_buffers is None and "actor-stream" not in log
+
+
+@needs_fastenv
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+def test_trainer_runs_on_fastenv_stacked_opp(tmp, device, torch_globals):
+    """netv2 (2026-11-10): `--actor-stream --decoupled` with `--stacked-opp`, G9p's production opponent path (ws/netv2
+    24c633f: frozen nets stacked apart from pool snapshots), which the patch's runs above do not use: 3 updates with
+    three same-architecture pool snapshots (stacked forwards on the collector thread, i.e. on the actor stream on
+    CUDA) and a frozen net (its own stack), lag <= 1, stacked forwards actually taken, no stack error, every forward
+    on the actor stream's thread."""
+    run = tmp / "run"
+    for i, seed in enumerate((3, 4, 5)):
+        save(small_net(seed), run / "pool" / f"{100 * (i + 1):011d}.pt")
+    save(small_net(6), tmp / "frozen-net.pt")
+    args = parse_args(["--format", "gen9randombattle", "--collector", "fastenv", "--fastenv-workers", "1",
+                       "--fastenv-battles", "12", "--n-battles", "4", "--pool-battles", "8", "--p-baseline", "0",
+                       "--frozen", str(tmp / "frozen-net.pt"), "--p-frozen", "0.3", "--stacked-opp",
+                       "--snapshot-cache", "8", "--rollout", "160", "--batch-size", "64", "--n-epochs", "1",
+                       "--eval-battles", "0", "--snapshot-every", "100000", "--checkpoint-every", "100000",
+                       "--max-updates", "3", "--device", device, "--seed", "0", "--run-dir", str(run),
+                       "--pool-dir", str(run / "pool"), *SMALL_ARGS, "--actor-stream", "--decoupled"])
+    tr = Trainer(args)
+    counts, threads = [], set()
+    many = tr.collector.opp_fn_many
+
+    def spy(items):
+        threads.add(threading.get_ident())
+        acts, st = many(items)
+        counts.append(st)
+        return acts, st
+
+    tr.collector.opp_fn_many = spy
+    fired = threading.Event()
+    watchdog = threading.Timer(600, lambda: (fired.set(), tr.stop.set()))
+    watchdog.start()
+    try:
+        tr.run()
+    finally:
+        watchdog.cancel()
+        tr.log_file.close()
+    assert not fired.is_set(), "watchdog: the run hung"
+    log = (run / "train.log").read_text()
+    upd = [line for line in log.splitlines() if " upd " in line]
+    assert len(upd) == 3, log[-3000:]
+    assert all(float(line.split(" lag ")[1].split()[0].split("/")[1]) <= 1 for line in upd)
+    assert counts and sum(st.get("opp_stacked_fwds", 0) for st in counts) > 0, counts[:5]
+    assert not any(st.get("opp_stack_errors") for st in counts) and "stacked forward failed" not in log
+    assert threads and threading.get_ident() not in threads  # opponents act on the collector thread only
+    assert tr.collector.opp_decisions > 0 and (run / "final_model.pt").exists()
+    assert tr.actor_buffers.versions[tr.actor_buffers.front] == 2
