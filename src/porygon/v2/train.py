@@ -45,6 +45,9 @@ training. `--distill-reload-every U`: every U updates re-glob and reload if a sh
 
 lr: warmup–stable–decay on absolute env steps: linear warmup over --warmup-steps, constant --lr, and (only with
 --cooldown-start) cosine down to --final-lr-frac · lr at --total-steps. Resuming keeps the schedule.
+`--lr-schedule power --lr-horizon H` (Wang's anneal; default `wsd` = the above, unchanged): after the warm-up the lr
+is multiplied by (8x + 1)^(-1.5), x = (steps - warmup) / (H - warmup) clamped to [0, 1] (lr / 27 from H on, flat);
+H is independent of --total-steps. The optional cosine cooldown multiplies on top (a cooled branch of a power run).
 
 Outputs in --run-dir: train.log (one line per update), tb/ (TensorBoard), checkpoints/ckpt_<steps>.pt every
 --checkpoint-every steps, final_model.pt (on exit, SIGINT / SIGTERM included), best_model.pt (best eval score:
@@ -99,8 +102,21 @@ def parse_ports(spec: str) -> list[int]:
     return [int(p) for p in spec.split(",")]
 
 
-def wsd_lr(step: int, lr: float, warmup: int, cooldown_start: int | None, total: int, final_frac: float) -> float:
+POWER_K, POWER_P = 8.0, 1.5  # --lr-schedule power: (K x + 1)^(-P) (Wang 2024: peak / 27 at x = 1)
+
+
+def power_decay(step: int, warmup: int, horizon: int) -> float:
+    """--lr-schedule power's factor: 1 until the end of the warm-up, (8x + 1)^(-1.5) with x = (step - warmup) /
+    (horizon - warmup) clamped to [0, 1], so flat at 1/27 from `horizon` on."""
+    x = min(1.0, max(0.0, (step - warmup) / max(1, horizon - warmup)))
+    return (POWER_K * x + 1.0) ** -POWER_P
+
+
+def wsd_lr(step: int, lr: float, warmup: int, cooldown_start: int | None, total: int, final_frac: float,
+           schedule: str = "wsd", horizon: int | None = None) -> float:
     f = min(1.0, (step + 1) / warmup) if warmup > 0 else 1.0
+    if schedule == "power":  # multiplies the warm-up and (below) the cosine cooldown; "wsd" skips it (unchanged)
+        f *= power_decay(step, warmup, horizon)
     if cooldown_start is not None and step > cooldown_start:
         x = min(1.0, (step - cooldown_start) / max(1, total - cooldown_start))
         f *= final_frac + (1.0 - final_frac) * 0.5 * (1.0 + math.cos(math.pi * x))
@@ -657,6 +673,11 @@ def parse_args(argv=None):
     a("--warmup-steps", type=int, default=1_000_000)
     a("--cooldown-start", type=int, default=None, help="start of the cosine cooldown (env steps); none by default")
     a("--final-lr-frac", type=float, default=0.1)
+    a("--lr-schedule", choices=("wsd", "power"), default="wsd",
+      help="wsd: warm-up, constant, optional cosine cooldown (default); power: x (8x+1)^-1.5 after the warm-up "
+           "over --lr-horizon steps (flat at lr/27 after it), times the optional cooldown")
+    a("--lr-horizon", type=int, default=None,
+      help="--lr-schedule power: the planned horizon in absolute env steps (independent of --total-steps)")
     a("--weight-decay", type=float, default=0.01)
     a("--adv-clip", type=float, default=0.0, help="clip per-sample normalised advantages to ±C (0 = off)")
     a("--ema-decay", type=float, default=0.999,
@@ -715,7 +736,27 @@ def parse_args(argv=None):
     a("--no-damage", action="store_true", help="model without the damage layer (porygon.v2.damage)")
     a("--no-tables", action="store_true", help="id embeddings only (no static-feature MLPs)")
     a("--model-json", default=None, help='other Net cfg keys as JSON, e.g. \'{"d_species": 64}\'')
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.lr_schedule == "power" and (args.lr_horizon is None or args.lr_horizon <= args.warmup_steps):
+        p.error("--lr-schedule power needs --lr-horizon > --warmup-steps")
+    return args
+
+
+def lr_schedule_desc(args) -> str:
+    """The lr schedule for the startup log line."""
+    s = f"lr schedule: {args.lr_schedule}"
+    if args.lr_schedule == "power":
+        s += f" H={args.lr_horizon}"
+    s += f", lr {args.lr:g}, warm-up {args.warmup_steps}"
+    if args.cooldown_start is not None:
+        s += f", cosine cooldown {args.cooldown_start} -> {args.total_steps} to x{args.final_lr_frac:g}"
+    return s
+
+
+def lr_at(args, step: int) -> float:
+    """The lr at absolute env step `step` for these args (what the trainer sets before each update)."""
+    return wsd_lr(step, args.lr, args.warmup_steps, args.cooldown_start, args.total_steps, args.final_lr_frac,
+                  args.lr_schedule, args.lr_horizon)
 
 
 def model_cfg(args) -> dict:
@@ -914,7 +955,8 @@ class Trainer:
         self.log(f"v2 trainer: {args.format} gen{self.gen}, collector {args.collector}, {args.n_battles} self-play + "
                  f"{args.pool_battles} pool "
                  f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
-                 f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, steps={self.counters['steps']:,}")
+                 f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, "
+                 f"steps={self.counters['steps']:,}, {lr_schedule_desc(args)}")
         if self.distill is not None:
             self.log(f"distill: {self.distill.summary()}; coef {args.distill_coef}, batch {args.distill_batch}, "
                      f"reload every {args.distill_reload_every} updates (0 = never)")
@@ -1383,7 +1425,7 @@ class Trainer:
                 n = len(data["action"])
                 c["steps"] += n
                 c["games"] += len(eps)
-                lr = wsd_lr(c["steps"], a.lr, a.warmup_steps, a.cooldown_start, a.total_steps, a.final_lr_frac)
+                lr = lr_at(a, c["steps"])
                 for g in self.opt.param_groups:
                     g["lr"] = lr
                 measure = a.grad_ratio_every > 0 and c["updates"] % a.grad_ratio_every == 0
