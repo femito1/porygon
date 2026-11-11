@@ -1,0 +1,6 @@
+#!/bin/bash
+# Trainer python for G9r (netv2.env v10, 2026-11-11, g9 MODE g9r in 741849 and its successors): ws/netv2 ff32b71's src
+# (24c633f + the opt-in actor stream, off for G9r, + --lr-schedule power / --lr-horizon) first on PYTHONPATH (read-only
+# copy $NV2/src-ff32b71), then exec gloria's python: same PID, parent and command line as a direct launch.
+export PYTHONPATH=/vol/bitbucket/fr1226/porygon-ws-netv2/src-ff32b71${PYTHONPATH:+:$PYTHONPATH}
+exec /vol/bitbucket/fr1226/gloria/.venv/bin/python "$@"

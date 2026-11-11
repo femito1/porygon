@@ -4,12 +4,15 @@
 # for 718701 r1, 810366 r1 (a30, a40), 741849 g9, 810367 g9 (a16, a40) and 829660 g4r1bf, then diff the two.
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW            current MODE files (r1 g9p, g9 g9q): must print "identical"
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW swapped    after a committed swap (r1 g9q, g9 g9p2): first starts + successors
+# The tree has the 24c633f, 4f18108 and (v10) ff32b71 wrappers; ARGSDIFF_NO_AS=1 drops 4f18108 (the cluster since 11-10).
 set -u
 OLD=$(readlink -f "$1"); NEW=$(readlink -f "$2"); WHAT=${3:-current}
 R=${ARGSDIFF_ROOT:-/tmp/nv2s/.argsdiff-tree}
 tree() {  # tree JOB: a fresh fake tree for one job
   rm -rf "$R"; N=$R/nv2; mkdir -p "$N/bin" "$N/runs/r1" "$N/runs/g9" "$N/runs/g9q" "$N/runs/g9a30" "$N/runs/g4r1bf" "$N/runs/pretrain" "$N/runs/r1b-parked/pool"
-  for w in py-src-24c633f py-src-4f18108; do printf '#!/bin/bash\nexit 0\n' > "$N/bin/$w"; chmod +x "$N/bin/$w"; done
+  for w in py-src-24c633f py-src-4f18108 py-src-ff32b71; do printf '#!/bin/bash\nexit 0\n' > "$N/bin/$w"; chmod +x "$N/bin/$w"; done
+  # ARGSDIFF_NO_AS=1: the cluster since 2026-11-10 15:06 (py-src-4f18108 disabled after its drift check)
+  if [ -n "${ARGSDIFF_NO_AS:-}" ]; then rm -f "$N/bin/py-src-4f18108"; fi
   echo p1 > "$N/runs/pretrain/P1-g9h-dmg-s2.pt"; echo p3 > "$N/runs/pretrain/P3-g9-s2.pt"
   echo g9p > "$N/runs/r1/MODE"; echo g9q > "$N/runs/g9/MODE"
   touch "$N/runs/r1/G9P_A30_STARTED" "$N/runs/g9q/G9Q_STARTED" "$N/runs/g9/G9S_A16_STARTED" "$N/runs/g4r1bf/R1BF_STARTED" "$N/runs/r1/G9_STARTED" "$N/runs/r1/LINEAGE_DIRS" "$N/runs/g9/LINEAGE_DIRS"
