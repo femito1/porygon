@@ -66,12 +66,15 @@ ensure_successor() {  # exactly one pending ws-data-host job waiting on this one
     [ "$n" -gt 1 ] && err "chain: $n pending successors wait on $J (expected 1): $(tr '\n' ' ' <<< "$q")"
     return 0
   fi
+  # stdout only: the submit plugin prints a banner on stderr, which made a successful submission look failed (11-11)
+  local errf="$HOST/sbatch-$J.err"
   out=$(cd "$D/code" && sbatch --parsable --job-name=ws-data-host --partition="$SLURM_JOB_PARTITION" \
-        ${SLURM_JOB_QOS:+--qos="$SLURM_JOB_QOS"} --dependency="afterany:$J" "$SELF" 2>&1); rc=$?
-  if [ "$rc" -eq 0 ] && [[ $out =~ ^[0-9]+ ]]; then
+        ${SLURM_JOB_QOS:+--qos="$SLURM_JOB_QOS"} --dependency="afterany:$J" "$SELF" 2>"$errf"); rc=$?
+  out=$(tr -d '[:space:]' <<< "$out")
+  if [ "$rc" -eq 0 ] && [[ $out =~ ^[0-9]+(\;.*)?$ ]]; then
     log "chain: queued successor ${out%%;*} (afterany:$J, partition $SLURM_JOB_PARTITION, qos ${SLURM_JOB_QOS:-default})"
   else
-    err "chain: self-submission failed (rc $rc), retrying at the next check: $(tr '\n' ' ' <<< "$out")"
+    err "chain: self-submission failed (rc $rc), retrying at the next check: stdout '$out' stderr $(tail -c 400 "$errf" | tr '\n' ' ')"
     return 1
   fi
 }
