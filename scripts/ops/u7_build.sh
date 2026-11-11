@@ -114,8 +114,8 @@ print(json.dumps({"ok": bool(ver["ok"] and c["ok"]), "checks": c, "summary": sum
 sys.exit(0 if (ver["ok"] and c["ok"]) else 5)
 PY
   mv "$S" "$T/v2pre-human-shuf" || exit 6
-  (cd "$T" && find v2pre-human-shuf select summary.json SOURCES.txt -type f | sort | xargs md5sum > MD5SUMS) || exit 7
-  chmod -R a-w "$T/v2pre-human-shuf" "$T/select" "$T/summary.json" "$T/SOURCES.txt" "$T/MD5SUMS"
+  (cd "$T" && find v2pre-human-shuf select summary.json SOURCES.txt README.txt -type f | sort | xargs md5sum > MD5SUMS) || exit 7
+  chmod -R a-w "$T/v2pre-human-shuf" "$T/select" "$T/summary.json" "$T/SOURCES.txt" "$T/README.txt" "$T/MD5SUMS"
   say "published $T/v2pre-human-shuf ($(ls "$T/v2pre-human-shuf" | grep -c '^shard-') shards); MD5SUMS written" ;;
 *) echo "usage: u7_build.sh select|build T"; exit 1 ;;
 esac
