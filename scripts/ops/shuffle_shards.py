@@ -7,6 +7,10 @@ whole shards (each shard decompressed once per epoch). The source set is only re
   python -I scripts/ops/shuffle_shards.py build  SRC_DIR OUT_DIR [--seed 20261109] [--rows 24000] [--group 10]
   python -I scripts/ops/shuffle_shards.py verify SRC_DIR OUT_DIR [--spot 200]
 
+--keep ROWS.npy (optional): only these global source rows (int64, sorted; global row = position in the
+concatenation of the sorted source shards) go into OUT_DIR; the others are ignored by build and verify alike
+(recorded in meta.json `keep`). Used for row subsets such as the U7 rating-range sample.
+
 build writes OUT_DIR.tmp-<pid>/, runs verify on it and renames it to OUT_DIR only if every check passes (OUT_DIR
 must not exist). Memory ~ group x rows x row bytes (10 x 24k x 13.5 KB = 3.2 GB) + one decoded source shard.
 OUT_DIR/rowmap.npz: per output shard `<name>/src_shard` (index into meta.json `source_shards`) and `<name>/src_row`.
@@ -65,6 +69,19 @@ def row_hashes(d: dict[str, np.ndarray]) -> np.ndarray:
     return out
 
 
+def load_keep(path, n: int):
+    """--keep: boolean mask over the n global source rows, and its meta.json record (None = every row)."""
+    if not path:
+        return np.ones(n, bool), None
+    k = np.load(path)
+    assert k.ndim == 1 and np.issubdtype(k.dtype, np.integer), "keep: 1-d integer row ids"
+    assert len(k) == 0 or (k.min() >= 0 and k.max() < n), "keep: row id out of range"
+    assert (np.diff(k) > 0).all(), "keep: row ids must be sorted and unique"
+    sel = np.zeros(n, bool); sel[k] = True
+    md5 = hashlib.md5(Path(path).read_bytes()).hexdigest()
+    return sel, {"file": str(Path(path).resolve()), "md5": md5, "rows": int(len(k)), "source_rows": n}
+
+
 def build(a) -> int:
     src, out = Path(a.src), Path(a.out)
     assert not out.exists(), f"{out} exists"
@@ -78,14 +95,16 @@ def build(a) -> int:
     srow = np.concatenate([np.arange(n, dtype=np.int32) for n in n_of])
     game = np.concatenate(games)
     val = is_val(game, a.val_frac)
-    n_total, n_val = len(game), int(val.sum())
-    train_idx = np.flatnonzero(~val)
-    val_idx = np.flatnonzero(val)  # source order
+    sel, keep_meta = load_keep(a.keep, len(game))
+    n_total, n_val = int(sel.sum()), int((val & sel).sum())
+    train_idx = np.flatnonzero(~val & sel)
+    val_idx = np.flatnonzero(val & sel)  # source order
     perm = np.random.default_rng(a.seed).permutation(train_idx)
     k_train = -(-len(perm) // a.rows)
     k_val = -(-len(val_idx) // a.rows)
     plan = [(f"shard-{i:05d}.npz", c) for i, c in enumerate(np.array_split(perm, k_train))]
-    plan += [(f"shard-val-{i:04d}.npz", c) for i, c in enumerate(np.array_split(val_idx, k_val))]
+    if k_val:
+        plan += [(f"shard-val-{i:04d}.npz", c) for i, c in enumerate(np.array_split(val_idx, k_val))]
     say(f"{len(paths)} source shards, {n_total} rows ({n_val} held out at {a.val_frac}); "
         f"{k_train} training + {k_val} held-out output shards, groups of {a.group}")
     first = decode(paths[0])
@@ -123,7 +142,7 @@ def build(a) -> int:
         say(f"group {g0 // a.group + 1}/{-(-len(plan) // a.group)}: wrote {', '.join(n for n, _ in grp[:2])}"
             f"{' ...' if len(grp) > 2 else ''}")
     np.savez_compressed(tmp / "rowmap.npz", **rowmap)
-    for extra in ("heldout-games-0.06.txt",):
+    for extra in (() if a.keep else ("heldout-games-0.06.txt",)):
         if (src / extra).exists():
             shutil.copy2(src / extra, tmp / extra)
     commit = a.commit
@@ -142,6 +161,7 @@ def build(a) -> int:
             "rows": n_total, "train_rows": int(len(perm)), "val_rows": n_val, "rows_per_shard_target": a.rows,
             "train_shards": [n for n, _ in plan[:k_train]], "val_shards": [n for n, _ in plan[k_train:]],
             "source": str(src.resolve()), "source_shards": [p.name for p in paths], "source_meta": src_meta,
+            "keep": keep_meta,
             "members": {k: [str(dt), list(shp)] for k, (dt, shp) in spec.items()},
             "note": "rows bit-identical to the source; training shards are uniform random samples of the training "
                     "rows (whole-shard streaming parts are unbiased); rowmap.npz maps every row to its source row",
@@ -180,27 +200,44 @@ def verify_dirs(src: Path, out: Path, spot: int, val_frac: float) -> int:
         i = int(rng.integers(len(rm[f"{n}/src_row"])))
         key = (int(rm[f"{n}/src_shard"][i]), int(rm[f"{n}/src_row"][i]))
         picks.append((n, i, key)); spot_rows[key] = None
-    spec, src_hash, src_games, n_src, n_src_val = None, [], [], 0, 0
+    keep = meta.get("keep")
+    if keep:
+        k = np.load(keep["file"])
+        check(hashlib.md5(Path(keep["file"]).read_bytes()).hexdigest() == keep["md5"], "keep file md5 differs")
+    spec, src_hash, src_games, n_src, n_src_val, n_all, sel_of = None, [], [], 0, 0, 0, []
     for s, p in enumerate(paths):
         d = decode(p)
-        sp = {k: (str(v.dtype), v.shape[1:]) for k, v in d.items()}
+        n = len(d["game"])
+        m = np.ones(n, bool)
+        if keep:  # kept rows of this source shard
+            lo, hi = np.searchsorted(k, [n_all, n_all + n])
+            m = np.zeros(n, bool); m[k[lo:hi] - n_all] = True
+        n_all += n; sel_of.append(m)
+        sp = {kk: (str(v.dtype), v.shape[1:]) for kk, v in d.items()}
         spec = spec or sp
         check(sp == spec, f"source member spec differs in {p.name}")
-        src_hash.append(row_hashes(d)); src_games.append(d["game"])
-        n_src += len(d["game"]); n_src_val += int(is_val(d["game"], val_frac).sum())
+        h = np.zeros(n, np.uint64)
+        if m.any():
+            h[m] = row_hashes({kk: v[m] for kk, v in d.items()})
+        src_hash.append(h); src_games.append(d["game"][m])
+        n_src += int(m.sum()); n_src_val += int(is_val(d["game"][m], val_frac).sum())
         for (ss, rr) in spot_rows:
             if ss == s:
                 spot_rows[(ss, rr)] = {k: v[rr].copy() for k, v in d.items()}
         del d
     say(f"source pass: {n_src} rows, {n_src_val} held out, {len(spec)} members")
-    # bijection
+    # bijection onto the (kept) source rows
     offsets = np.cumsum([0] + [len(h) for h in src_hash])
-    seen = np.zeros(n_src, np.int8)
+    selall = np.concatenate(sel_of)
+    if keep:
+        check(n_all == keep["source_rows"], f"source rows {n_all} vs keep's {keep['source_rows']}")
+    seen = np.zeros(int(offsets[-1]), np.int8)
     for n in names:
         gi = offsets[rm[f"{n}/src_shard"].astype(np.int64)] + rm[f"{n}/src_row"]
         np.add.at(seen, gi, 1)
-    check(bool((seen == 1).all()), f"rowmap is not a bijection: {int((seen == 0).sum())} unmapped, "
-                                   f"{int((seen > 1).sum())} mapped more than once")
+    check(bool((seen[selall] == 1).all()) and not seen[~selall].any(),
+          f"rowmap is not a bijection onto the kept rows: {int((seen[selall] == 0).sum())} unmapped, "
+          f"{int((seen > 1).sum())} mapped more than once, {int((seen[~selall] > 0).sum())} unkept rows mapped")
     # output pass
     all_hash = np.concatenate(src_hash)
     n_out, n_out_val, out_games, bad_hash = 0, 0, [], 0
@@ -235,7 +272,7 @@ def verify_dirs(src: Path, out: Path, spot: int, val_frac: float) -> int:
         listed = {int(x) for x in held.read_text().splitlines() if x.strip() and not x.startswith("#")}
         got = {int(g) for gg in out_games for g in np.unique(gg[is_val(gg, val_frac)])}
         check(listed == got, f"held-out game list differs: {len(listed)} listed vs {len(got)} in shards")
-    summary = {"rows": n_out, "val_rows": n_out_val, "members": len(spec), "shards": len(names),
+    summary = {"rows": n_out, "val_rows": n_out_val, "keep": bool(keep), "members": len(spec), "shards": len(names),
                "hash_mismatches": bad_hash, "spot_rows": len(picks), "failures": fails}
     say("VERIFY", "OK" if not fails else "FAILED", json.dumps(summary))
     (out / "verify.json").write_text(json.dumps({**summary, "ok": not fails,
@@ -252,6 +289,7 @@ def main() -> int:
     p.add_argument("--group", type=int, default=10)
     p.add_argument("--spot", type=int, default=200)
     p.add_argument("--val-frac", type=float, default=0.06)
+    p.add_argument("--keep", default=None, help="npy of sorted global source row ids to include (default: all)")
     p.add_argument("--commit", default=None, help="code commit recorded in meta.json (default: git, if a checkout)")
     a = p.parse_args()
     if a.cmd == "build":
