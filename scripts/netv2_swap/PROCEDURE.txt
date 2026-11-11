@@ -36,6 +36,9 @@ PRECONDITIONS (check all; abort the plan if one fails)
       runs/r1/G9Q_A30_STARTED, runs/g9/G9P_A16_STARTED, runs/r1/SWAP_APPLIED, runs/g9/SWAP_APPLIED absent.
   [ ] $S, runs/g9q/handover-a30*, runs/r1/handover-g9p-a16* absent.
   [ ] no runs/{r1,g9}/{INLINE_CMD,INLINE_CMD.running,HOLD,WAIT_FOR,restart}.
+      NOTE 2026-11-11 (orchestrator-accepted): "restart" here means no restart IN PROGRESS (no trainer currently
+      stopped / relaunching), not "no flag file": runs/{r1,g9}/restart is the normal armed restart-in-place flag
+      (slurm_train_v2.sbatch consumes it when the trainer exits) and step 3 below touches it anyway.
   [ ] $C/bin/py-src-24c633f executable. NOTE 2026-11-10 15:06: the actor stream FAILED its drift check (G9p rolled
       back); $C/bin/py-src-4f18108 is renamed .disabled-drift-20261110, so G9q on the A30 runs 24c633f + --no-overlap
       (the NO_ACTOR_STREAM flag below is then moot). Former text:
