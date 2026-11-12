@@ -124,3 +124,37 @@ concurrent processes.
   once with the same seeds after the fix.
 - After P1 and P2: report to main and STOP. No tree tuning, no games, no Rust, without a new decision.
 - Code commit, net sha256, node, GPU and the CPU count go into the run manifest.
+
+## Results (added 2026-11-12 ~11:50 UTC, after the run; the text above is unchanged, pre-results md5 3407619d5ae99628a932d24fbec1428d)
+Job 1127567 (training, dove02, -c 12, 1 T4; code 889d626, net G9p-cd@104.71M sha256 35cd1007…ad1c, engine 7965d8b3).
+Run dir `$C/runs/v3gates-20261112-014733-1127567/`. P1 02:24:59Z, P2 03:06:23Z, both rc 0. Neither is void: P1 300/300
+pairs (0 failed records), P2 90/90 decisions at every B, 0 errors. Numbers read from p1/p1.json and p2/p2.json.
+- **P1: PASS.**
+  - Test A: element agreement 1.000 (71,824 elements); mean |ΔP| 1.9·10⁻⁴ (q50 8·10⁻⁵, q90 4.4·10⁻⁴, q99 1.3·10⁻³).
+  - Test B: mean |ΔP| 0.0209 (q50 0.0012, q90 0.057, q99 0.286).
+  - Also reported:
+    - B's element agreement is 0.9877.
+    - Split by reveal: revealed (n = 270) agree 0.975, |ΔP| 0.043; not revealed agree 0.998, |ΔP| 0.003.
+    - B's disagreements by field: pp_frac 625, hp 174, weather_elapsed 34, first_turn 22, status_counter 10, others ≤ 6.
+- **P2: PASS.** Best B = 64: median 2,048 leaves per decision (q10 1,920, q90 2,112), mean depth 2.20.
+  - B 32: 1,440 (depth 2.04). B 16: 912 (depth 1.87).
+  - Time split at B 64 (µs per leaf / share of wall):
+
+    | engine | encode | tree | collate | forward |
+    |---|---|---|---|---|
+    | 369 / 18% | 440 / 21% | 385 / 19% | 136 / 7% | 980 / 47% |
+
+  - GPU-only leaves/s:
+
+    | | B 64 | B 256 | B 1024 |
+    |---|---|---|---|
+    | 1 process | 3,090 | 9,399 | 14,501 |
+    | 12 processes | 7,928 | 12,292 | 13,600 |
+
+  - Largest share: **forward.** The pre-registered reading is "network-FLOP bound: batching, a shared inference server
+    or a smaller net help, Rust alone does not".
+    - Projected with one shared server at the measured GPU-only rate: 4,097 per decision.
+    - With encode 20× faster: 2,500.
+  - Disclosure: the 4,097 projection ignores Python's 1,330 µs of CPU per leaf, which caps a Python V3 at ≈ 3.0k.
+- **Next (user decision, relayed 2026-11-12 ~11:30):** V3 goes to a Rust port. The design is in
+  `.orchestra/fastenv/V3-RUST-DESIGN.md`. No build until main's GO.
