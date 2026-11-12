@@ -99,15 +99,20 @@ class FastCollector:
     def __init__(self, env: FastEnv, packer: Packer, act_fn: Callable, opp_fn: Callable | None = None, *,
                  id_dropout: bool = True, seed: int | None = None, pool_per_worker: int = 0,
                  pool_dir=None, recent: int = 4, on_policy: bool = False, p_baseline: float = 0.0,
-                 p_frozen: float = 0.0, **_ignored):
+                 p_frozen: float = 0.0, opp_fn_many: Callable | None = None, **_ignored):
         """pool_per_worker: in every worker, battles bot_battles..bot_battles+k-1 are pool battles: side two is a
         frozen snapshot from pool_dir (`*.pt`, picked per battle like PoolOpponent: half the time one of the
         `recent` newest, else uniform), played through opp_fn(name, batch). Each new pool battle draws its opponent
         exactly as netv2's PoolOpponent.new_battle (ws/netv2 0ac086c): a frozen net (uniform over
         pool_dir/frozen/*.pt, name 'frozen/<file>') with p_frozen, a baseline bot (uniform over the env's dyn_bots,
         FastEnv(dyn_bots='heuristic,max_power')) with p_baseline, else a snapshot; no snapshot yet -> a frozen net
-        if any, else a baseline. Without dyn_bots a baseline draw is self-play."""
+        if any, else a baseline. Without dyn_bots a baseline draw is self-play.
+        opp_fn_many (optional, the trainer's --stacked-opp): opp_fn_many([(name, batch), ...]) -> (actions per item,
+        counters) acts all the snapshot opponents of one `_act` in one call (the same batches opp_fn gets, one per
+        name) instead of opp_fn per name; its counters are added to the timing (perf/col_*), opp_fwds = the device
+        forwards it ran (1 if not given), opp_fwd_nets = the names it served."""
         self.env, self.packer, self.act_fn, self.opp_fn = env, packer, act_fn, opp_fn
+        self.opp_fn_many = opp_fn_many
         self.pool_per_worker, self.pool_dir, self.recent = pool_per_worker, pool_dir, recent
         self.snapshot: dict[int, str | None] = {}  # battle id -> snapshot name of the current pool battle
         self.dynbot: dict[int, int] = {}  # battle id -> index into env.dyn_bots of the current pool battle's bot
@@ -133,6 +138,7 @@ class FastCollector:
         self.stale = 0  # closed transitions acted in an earlier rollout (carry-over)
         self.drained = 0  # transitions closed by the end-of-rollout bootstrap
         self.drain_s = 0.0
+        self.timing: dict[str, float] = defaultdict(float)  # collector-thread seconds / counts per rollout (perf/col_*)
         b0 = next(iter(self.ready.values()))
         self.col = {k: (f"obs/{k}" if f"obs/{k}" in b0.cols else f"aux/{k}") for k in packer.layout}
         missing = [k for k, c in self.col.items() if c not in b0.cols]
@@ -148,7 +154,7 @@ class FastCollector:
         return 0 <= k < self.pool_per_worker
 
     def _list_snapshots(self) -> list:
-        if self.pool_dir is None or self.opp_fn is None:
+        if self.pool_dir is None or (self.opp_fn is None and self.opp_fn_many is None):
             return []
         if time.time() - self._snaps_t > 10.0:
             from pathlib import Path
@@ -197,6 +203,29 @@ class FastCollector:
             raw[:, off:off + nb] = a.reshape(len(rows), -1).view(np.uint8)
         return raw
 
+    def _pack_runs(self, pairs) -> np.ndarray:
+        """Packed rows for (batch, row index) pairs, in order: one `_pack` per run of consecutive pairs from the same
+        batch instead of one per row (the same bytes; ~20 array ops per call made per-row packing ~45 µs a row)."""
+        parts, cur, rows = [], None, []
+        for b, i in pairs:
+            if b is not cur and rows:
+                parts.append(self._pack(cur, np.asarray(rows, np.int64)))
+                rows = []
+            cur = b
+            rows.append(i)
+        if rows:
+            parts.append(self._pack(cur, np.asarray(rows, np.int64)))
+        return np.concatenate(parts)
+
+    def _opp_obs(self, batches: list, all_rows: list, items: list) -> dict[str, np.ndarray]:
+        """One snapshot opponent's decision batch for opp_fn: its (batch index, row index) items packed in order,
+        observation fields only, drop_seed 0 (no id dropout)."""
+        raw = self._pack_runs((batches[bi], all_rows[bi][k]) for bi, k in items)
+        ob = {k: raw[:, off:off + nb].copy().view(dtype).reshape(len(items), *shape)
+              for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.opp_packer.layout}
+        ob["drop_seed"] = np.zeros(len(items), np.int64)
+        return ob
+
     def _close(self, key: int, tr: list, next_value: float, done: bool) -> None:
         tr[NEXT_V], tr[DONE] = next_value, done
         self.segments[key].append(tr)
@@ -241,6 +270,8 @@ class FastCollector:
                 self._new_pool_battle(s // 2)
 
     def _act(self) -> None:
+        t_start = time.perf_counter()
+        tm = self.timing
         ws = list(self.ready)
         batches = [self.ready.pop(w) for w in ws]
         all_rows = [np.flatnonzero(b.needs_action) for b in batches]
@@ -261,15 +292,32 @@ class FastCollector:
                 else:
                     by_name[name].append((bi, k))
             rows.append(np.asarray(mine, np.int64))
-        for name, items in by_name.items():
-            raw = np.concatenate([self._pack(batches[bi], all_rows[bi][[k]]) for bi, k in items])
-            ob = {k: raw[:, off:off + nb].copy().view(dtype).reshape(len(items), *shape)
-                  for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.opp_packer.layout}
-            ob["drop_seed"] = np.zeros(len(items), np.int64)
-            acts = self.opp_fn(name, ob)
-            self.opp_decisions += len(items)
-            for (bi, k), a in zip(items, acts):
-                acts_out[bi][k] = int(a)
+        t0 = time.perf_counter()
+        if self.opp_fn_many is not None and by_name:  # all snapshot opponents in one call (--stacked-opp)
+            obs = [self._opp_obs(batches, all_rows, items) for items in by_name.values()]
+            t1 = time.perf_counter()
+            acts_all, counts = self.opp_fn_many(list(zip(by_name, obs)))
+            tm["opp_fwd_s"] += time.perf_counter() - t1
+            tm["opp_fwds"] += counts.get("opp_fwds", 1)
+            tm["opp_fwd_nets"] += len(by_name)
+            for key, v in counts.items():
+                if key != "opp_fwds":
+                    tm[key] += v
+            for items, acts in zip(by_name.values(), acts_all):
+                self.opp_decisions += len(items)
+                for (bi, k), a in zip(items, acts):
+                    acts_out[bi][k] = int(a)
+        else:
+            for name, items in by_name.items():
+                ob = self._opp_obs(batches, all_rows, items)
+                t1 = time.perf_counter()
+                acts = self.opp_fn(name, ob)
+                tm["opp_fwd_s"] += time.perf_counter() - t1
+                tm["opp_fwds"] += 1
+                self.opp_decisions += len(items)
+                for (bi, k), a in zip(items, acts):
+                    acts_out[bi][k] = int(a)
+        tm["opp_s"] += time.perf_counter() - t0
         n = sum(map(len, rows))
         if n:
             rows_k = rows
@@ -281,7 +329,10 @@ class FastCollector:
             seeds = (self.rng.integers(1, 2 ** 62, n, dtype=np.int64) if self.id_dropout
                      else np.zeros(n, np.int64))
             batch["drop_seed"] = seeds
+            t1 = time.perf_counter()
             actions, logps, values, probs = self.act_fn(batch)
+            tm["fwd_s"] += time.perf_counter() - t1
+            tm["fwd_rows"] += n
             self.forward_batches += 1
             slots = np.concatenate([b.slot[r] for b, r in zip(batches, rows)])
             pos = {}
@@ -323,9 +374,14 @@ class FastCollector:
                 self.env.dead.append((w, repr(e)))
                 continue
             self.in_flight.add(w)
+        tm["act_s"] += time.perf_counter() - t_start
+        tm["acts"] += 1
 
     def _poll(self, timeout: float) -> None:
-        for w, b in self.env.poll(timeout):
+        t0 = time.perf_counter()
+        polled = self.env.poll(timeout)
+        self.timing["poll_s"] += time.perf_counter() - t0  # select wait + reading the batches
+        for w, b in polled:
             self.in_flight.discard(w)
             self._receive(b)
             self.ready[w] = b
@@ -372,7 +428,7 @@ class FastCollector:
                 if s in self.open and self._opponent(s) is None:
                     picks.append((b, i, s))
         if picks:
-            raw = np.concatenate([self._pack(b, np.array([i])) for b, i, _ in picks])
+            raw = self._pack_runs((b, i) for b, i, _ in picks)
             n = len(picks)
             batch = {k: raw[:, off:off + nb].copy().view(dtype).reshape(n, *shape)
                      for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.model_keys}
@@ -389,7 +445,7 @@ class FastCollector:
         share closed by the end-of-rollout bootstrap, seconds spent draining."""
         n = max(self.n_closed, 1)
         return {"perf/fastenv_stale_frac": self.stale / n, "perf/fastenv_drained_frac": self.drained / n,
-                "perf/fastenv_drain_s": self.drain_s}
+                "perf/fastenv_drain_s": self.drain_s, **{f"perf/col_{k}": v for k, v in self.timing.items()}}
 
     def take(self) -> tuple[dict, list[dict]]:
         self.last_stats = self.rollout_stats()
@@ -397,6 +453,7 @@ class FastCollector:
         self.segments, self.episodes, self.n_closed = defaultdict(list), [], 0
         self.stale = self.drained = 0
         self.drain_s = 0.0
+        self.timing = defaultdict(float)
         self.rollout_index += 1
         return segs, eps
 

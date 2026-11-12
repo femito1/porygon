@@ -6,10 +6,12 @@ Reinforcement Learning" (MIT MEng thesis, 2024), Table 3.1.
 """
 
 import argparse
+import math
 import time
 from functools import partial
 from pathlib import Path
 
+import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
@@ -18,7 +20,7 @@ from stable_baselines3.common.vec_env import VecMonitor
 from porygon.async_env import AsyncBattles, AsyncPPO, pool_battle, selfplay_battle
 from porygon.env import SHAPING, ConcatVecEnv, make_selfplay_vec_env
 from porygon.evaluate import Evaluator
-from porygon.model import MaskedPolicy, load_policy
+from porygon.model import MaskedPolicy, load_policy, set_value_trunk_grad
 from porygon.pool import make_pool_vec_env, save_snapshot
 
 
@@ -56,6 +58,81 @@ def thesis_lr(progress_remaining: float) -> float:
     single largest win-rate factor in the thesis (55% -> 80% vs SimpleHeuristicsPlayer)."""
     x = 1.0 - progress_remaining
     return 10**-4.23 / (8 * x + 1) ** 1.5
+
+
+class WarmupConstantLR:
+    """Warmup-stable(-decay) learning rate on absolute env steps: linear warmup from `start` over `warmup` steps
+    to `peak`, constant after that, and (optional) cosine decay to `floor` x peak from `decay_start` to `total`.
+    The thesis schedule spends most of a run far below its peak (its mean is 1/6 of the peak and it ends at
+    1/27); here the rate stays at the peak until a deliberate cooldown. Reads `model.num_timesteps`, so set
+    `.model` once the PPO object exists (before that it returns the peak, which SB3 only uses to build Adam)."""
+
+    def __init__(self, peak: float, warmup: int, start: int = 0, decay_start: int | None = None,
+                 total: int | None = None, floor: float = 0.1):
+        self.peak, self.warmup, self.start = peak, warmup, start
+        self.decay_start, self.total, self.floor = decay_start, total, floor
+        self.model = None
+
+    def __getstate__(self) -> dict:  # SB3 pickles the schedule into checkpoints: never the model with it
+        return {k: v for k, v in self.__dict__.items() if k != "model"} | {"model": None}
+
+    def __call__(self, progress_remaining: float) -> float:
+        if self.model is None:
+            return self.peak
+        t = self.model.num_timesteps
+        lr = self.peak * min(1.0, max(t - self.start, 0) / max(self.warmup, 1))
+        if self.decay_start is not None and self.total and t > self.decay_start:
+            x = min(1.0, (t - self.decay_start) / max(self.total - self.decay_start, 1))
+            lr *= self.floor + (1 - self.floor) * 0.5 * (1 + math.cos(math.pi * x))
+        return lr
+
+
+class GradientDiagnostics(BaseCallback):
+    """After each rollout, on `n` random transitions of it: norms of the policy-loss, value-loss (as weighted
+    in the PPO loss, with the value-to-trunk gradient scale applied) and entropy-loss gradients w.r.t. the shared
+    trunk (the transformer features extractor), and their ratio, logged as diag/* (MissingNo.Zero's alarm:
+    a value/policy ratio of ~50 meant the trunk learned to predict the winner instead of how to play)."""
+
+    def __init__(self, n: int = 2048):
+        super().__init__()
+        self.n = n
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        model, buf = self.model, self.model.rollout_buffer
+        if not buf.full:
+            return
+        policy = model.policy
+        size = buf.buffer_size * buf.n_envs
+        idx = np.random.default_rng().choice(size, min(self.n, size), replace=False)
+        flat = lambda a: a.reshape(size, *a.shape[2:])[idx]  # noqa: E731
+        obs = {k: torch.as_tensor(flat(v), device=policy.device) for k, v in buf.observations.items()}
+        actions = torch.as_tensor(flat(buf.actions), device=policy.device).long().flatten()
+        adv = torch.as_tensor(flat(buf.advantages), device=policy.device).flatten()
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        returns = torch.as_tensor(flat(buf.returns), device=policy.device).flatten()
+        policy.set_training_mode(True)
+        values, log_prob, entropy = policy.evaluate_actions(obs, actions)
+        policy.set_training_mode(False)
+        losses = {
+            "policy": -(adv * log_prob).mean(),  # the clipped PPO loss's gradient at ratio 1
+            "value": model.vf_coef * torch.nn.functional.mse_loss(returns, values.flatten()),
+            "entropy": -model.ent_coef * entropy.mean(),
+        }
+        trunk = [p for p in policy.features_extractor.parameters() if p.requires_grad]
+        norms = {}
+        for i, (name, loss) in enumerate(losses.items()):
+            grads = torch.autograd.grad(loss, trunk, retain_graph=i < len(losses) - 1, allow_unused=True)
+            norms[name] = torch.sqrt(sum((g.float() ** 2).sum() for g in grads if g is not None)).item()
+        ratio = norms["value"] / max(norms["policy"], 1e-12)
+        for name, v in norms.items():
+            self.logger.record(f"diag/trunk_grad_{name}", v)
+        self.logger.record("diag/trunk_grad_value_over_policy", ratio)
+        print(f"[diag @ {self.num_timesteps:,}] trunk grad norms policy={norms['policy']:.3g} "
+              f"value={norms['value']:.3g} entropy={norms['entropy']:.3g} value/policy={ratio:.3g} "
+              f"(value-to-trunk scale {getattr(policy, 'value_trunk_grad', 1.0)})", flush=True)
 
 
 class WallClockLimit(BaseCallback):
@@ -188,6 +265,17 @@ def main():
     p.add_argument("--max-hours", type=float, help="stop (and save) after this much wall-clock time")
     p.add_argument("--embedding-lr-mult", type=float, default=1.0,
                    help="multiply the token embeddings' Adam updates (they barely train at 1: boost_embedding_steps)")
+    p.add_argument("--lr-schedule", choices=["thesis", "wsd"], default="thesis",
+                   help="thesis: 10^-4.23/(8x+1)^1.5 over --total-steps; wsd: warmup to --lr, constant, optional cooldown")
+    p.add_argument("--lr", type=float, default=10**-4.23, help="wsd: peak learning rate")
+    p.add_argument("--lr-warmup", type=int, default=1_000_000, help="wsd: warmup steps (from the start/resume step)")
+    p.add_argument("--lr-decay-start", type=int, help="wsd: cosine cooldown from this step to --total-steps")
+    p.add_argument("--value-trunk-grad", type=float, default=1.0,
+                   help="share of the value loss's gradient that reaches the shared trunk (MissingNo.Zero: << 1)")
+    p.add_argument("--no-vf-clip", action="store_true",
+                   help="no value clipping (also on --resume); SB3's clip zeroes the value gradient beyond the band")
+    p.add_argument("--grad-diagnostics", action="store_true",
+                   help="log trunk gradient norms of the policy / value / entropy losses after every rollout")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 
@@ -230,9 +318,12 @@ def main():
         env = VecMonitor(env)
         algo = PPO
 
+    schedule = thesis_lr
+    if args.lr_schedule == "wsd":
+        schedule = WarmupConstantLR(args.lr, args.lr_warmup, decay_start=args.lr_decay_start, total=args.total_steps)
     if args.resume:
         model = algo.load(args.resume, env=env, device=args.device)
-        model.learning_rate, model.lr_schedule = thesis_lr, thesis_lr  # schedules aren't pickled reliably
+        model.learning_rate, model.lr_schedule = schedule, schedule  # schedules aren't pickled reliably
         model.tensorboard_log = str(args.run_dir / "tb")  # not the folder of the run the checkpoint came from
         n_steps = max(1, args.rollout // env.num_envs)  # keep ~args.rollout transitions per update
         if n_steps != model.n_steps:
@@ -243,7 +334,7 @@ def main():
     else:
         model = algo(
             MaskedPolicy, env,
-            learning_rate=thesis_lr,
+            learning_rate=schedule,
             n_steps=max(1, args.rollout // env.num_envs),
             batch_size=args.batch_size,
             n_epochs=args.n_epochs,
@@ -259,6 +350,11 @@ def main():
             device=args.device,
             verbose=1,
         )
+    if isinstance(schedule, WarmupConstantLR):
+        schedule.model, schedule.start = model, model.num_timesteps
+    if args.no_vf_clip:
+        model.clip_range_vf = None
+    set_value_trunk_grad(model.policy, args.value_trunk_grad)
     boost_embedding_steps(model.policy, args.embedding_lr_mult)
     if args.autocast:
         assert args.async_envs, "--autocast needs --async-envs or --fastenv"
@@ -276,6 +372,7 @@ def main():
     ] + ([EvalCallback(args.format, ports[0], args.eval_every, args.eval_battles, ("heuristic", "max_power"),
                        args.run_dir, args.anchor)] if args.eval_every > 0 else [])
       + ([WallClockLimit(args.max_hours)] if args.max_hours else [])
+      + ([GradientDiagnostics()] if args.grad_diagnostics else [])
       + ([SnapshotCallback(pool_dir, args.snapshot_every)] if args.pool_battles else []))
     try:
         model.learn(

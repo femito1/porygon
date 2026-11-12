@@ -133,6 +133,37 @@ class MaskedPolicy(ActorCriticPolicy):
         return self.action_dist.proba_distribution(action_logits=logits)
 
 
+class _ScaleGrad(torch.autograd.Function):
+    """Identity forward; multiplies the gradient by `scale` on the way back."""
+
+    @staticmethod
+    def forward(ctx, x, scale: float):
+        ctx.scale = scale
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad * ctx.scale, None
+
+
+def scale_grad(x: torch.Tensor, scale: float) -> torch.Tensor:
+    return x if scale == 1.0 else _ScaleGrad.apply(x, scale)
+
+
+def set_value_trunk_grad(policy: "MaskedPolicy", scale: float) -> None:
+    """Let only `scale` of the value loss's gradient reach the shared transformer trunk (the critic MLP itself
+    still gets all of it). MissingNo.Zero found the value gradient into a shared trunk ~50x the policy's: the net
+    learns to predict who wins rather than to play. A forward pre-hook on the critic MLP, so checkpoints keep
+    their state-dict layout; call again after loading."""
+    critic = policy.mlp_extractor.value_net
+    old = getattr(policy, "_value_trunk_hook", None)
+    if old is not None:
+        old.remove()
+    policy.value_trunk_grad = scale
+    policy._value_trunk_hook = None if scale == 1.0 else critic.register_forward_pre_hook(
+        lambda module, args: (scale_grad(args[0], scale),))
+
+
 def load_policy(path: str | Path, device: str = "cpu") -> MaskedPolicy:
     """Eval-mode policy from a PPO checkpoint (.zip) or an opponent-pool snapshot (.pt)."""
     if Path(path).suffix == ".pt":

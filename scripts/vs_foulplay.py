@@ -20,6 +20,8 @@ Start one Foul Play instance per opponent name (each plays one battle at a time)
     default parallelism 1 = one core. It turns the battle timer on, so a stalled player loses on inactivity.)
 Then:
     python scripts/vs_foulplay.py MODEL --player policy --opponents fp0 fp1 ... --n 10
+    (--player policy: the raw network, sampling its policy unless --deterministic; MODEL is a v1 checkpoint
+    (PolicyPlayer) or a v2 net .pt (porygon.v2.player.NetPlayer, any generation matching --format))
     python scripts/vs_foulplay.py MODEL --player search --opponents fp0 fp1 --n 50 --workers 8
     NETV2_SRC=... python scripts/vs_foulplay.py SPEC --player spec --opponents fp0 fp1 fp2 --total 200 \
         --name-prefix paTAG --summary OUT/summary.json --results OUT/results.jsonl
@@ -48,6 +50,12 @@ from porygon.env import PolicyPlayer, local_server
 from porygon import inference
 from porygon.decisions import LoggedSearchPlayer
 from porygon.search import CONFIG, SearchPlayer, add_oracle_args, add_value_args, load_model
+from porygon.v2.evaluate import check_net_gen, is_v2_net
+
+
+def NetPlayer(*args, **kwargs):  # noqa: N802 (lazy: porygon.v2.player only when a v2 net plays)
+    from porygon.v2.player import NetPlayer as cls
+    return cls(*args, **kwargs)
 
 log = logging.getLogger("vs_foulplay")
 TIMINGS: list[dict] = []  # per battle: pre-game wait, challenge / start / end times, retries
@@ -288,6 +296,8 @@ async def main():
     p.add_argument("model")
     p.add_argument("--player", choices=["policy", "search", "spec"], default="policy",
                    help="spec: MODEL is a scripts/fastenv/netsearch_h2h.py player spec (module docstring)")
+    p.add_argument("--deterministic", action="store_true", help="policy: play the network's argmax (default: sample)")
+    p.add_argument("--temperature", type=float, default=1.0, help="policy: sample from softmax(logits / T)")
     p.add_argument("--total", type=int, default=None, help="battles over all opponents (shared budget; overrides --n)")
     p.add_argument("--name-prefix", default=None, help="our usernames: PREFIX x<i> (default: the player kind + random)")
     p.add_argument("--summary", default=None, help="spec: write a JSON summary (counts, seconds, player stats) here")
@@ -328,26 +338,33 @@ async def main():
     prefix = a.name_prefix or f"{a.player[:3]}{tag}"
     common = dict(battle_format=a.format, server_configuration=local_server(a.port),
                   max_concurrent_battles=1, log_level=40)
+    v2 = False
     if a.player == "spec":
         players = spec_players(a.model, [f"{prefix}x{i}" for i in range(len(a.opponents))], common, a.search_timeout)
         policy, cfg = None, {}
     else:
-        policy = load_model(a.model, a.device)  # "none": pure engine search (gen9)
+        policy = load_model(a.model, a.device)  # "none": pure engine search (gen9); a v1 policy or a v2 net
+        v2 = is_v2_net(policy)
+        if a.player == "policy":
+            assert policy is not None, "--player policy needs a network"
+            check_net_gen(policy, a.format, a.model)
         if a.prior_weight is None:
             a.prior_weight = 0.0 if policy is None else 0.25
         cfg = {k: getattr(a, k) for k in CONFIG}
         players = []
+    raw = partial(NetPlayer if v2 else PolicyPlayer, deterministic=a.deterministic, temperature=a.temperature)
     for i, _ in enumerate(a.opponents if a.player != "spec" else []):
         acc = AccountConfiguration(f"{prefix}x{i}", None)
         search = (partial(LoggedSearchPlayer, out=a.log_dir) if a.log_dir else SearchPlayer)
         players.append(search(policy, **cfg, workers=a.workers, oracle=a.oracle, oracle_dir=a.oracle_dir,
                               account_configuration=acc, **common)
-                       if a.player == "search" else PolicyPlayer(policy, account_configuration=acc, **common))
+                       if a.player == "search" else raw(policy, account_configuration=acc, **common))
     for pl in players:
         if a.player == "search":
             guard_pool(pl.pool, a.search_timeout)
     desc = (f"SearchPlayer({', '.join(f'{k}={v}' for k, v in cfg.items())}, oracle={a.oracle})"
-            if a.player == "search" else a.model if a.player == "spec" else "PolicyPlayer")
+            if a.player == "search" else a.model if a.player == "spec" else
+            f"{'NetPlayer' if v2 else 'PolicyPlayer'}({'deterministic' if a.deterministic else f'sampling T={a.temperature}'})")
     start = time.time()
     with open(a.results, "a") as out:
         try:
