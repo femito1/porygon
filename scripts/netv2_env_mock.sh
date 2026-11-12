@@ -150,10 +150,10 @@ mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chm
 check 15i "^PY=$N/bin/py-src-24c633f\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 829660 g4r1bf T4)"
 check 15j "^PY=$N/bin/py-src-24c633f\|" "$(pyof 900099 g4r1bf T4)"
 echo r1bf-final > "$L/run/R1bF/final_model.pt"
-o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15k "--no-overlap --n-battles 60 --pool-battles 30 --run-dir $L/run/R1bF --pool-dir $L/run/R1bF/pool --snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
-checkno 15l "snapshot-cache-cpu|ent-coef|kl-anchor|frozen" "$o"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15k "--no-overlap --n-battles 60 --pool-battles 30 --run-dir $L/run/R1bF --pool-dir $L/run/R1bF/pool --snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$o"
+checkno 15l "ent-coef|kl-anchor|frozen" "$o"  # v11: R1b-F has the cpu tier (--snapshot-cache-cpu 200, 15k)
 printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-4f18108"; chmod +x "$N/bin/py-src-4f18108"
-o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15o "--no-overlap --n-battles 60 .*--snapshot-cache 40 --stacked-opp --guard-pg-mean 20" "$o"; checkno 15p "actor-stream" "$o"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 15o "--no-overlap --n-battles 60 .*--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20" "$o"; checkno 15p "actor-stream" "$o"
 check 15q "^PY=$N/bin/py-src-24c633f\|" "$(pyof 829660 g4r1bf T4)"
 rm -f "$N/bin/py-src-4f18108"
 o=$(SLURM_JOB_ID=741849 src g9 A16); checkno 15m "stacked-opp" "$o"  # the A16 run is untouched by the g4r1bf change
@@ -379,7 +379,7 @@ o=$(SLURM_JOB_ID=810366 NV2_SWAP_ITERS=1 src r1 S); check 29d5 "$G9PARGS .*--run
 yes_ 29d6 'grep -q "^ABORT by r1 810366" "$N/runs/swap-50M/DECISION" && [ "$(cat "$N/runs/r1/MODE")" = g9p ]'
 # 29j: the other runs never see the swap: R1b-F (g4r1bf) unchanged with swap state on disk
 g4tree; L=$ROOTM/local-T4; mkdir -p "$N/runs/swap-50M" "$N/bin"; echo "COMMIT by x" > "$N/runs/swap-50M/DECISION"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
-o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 29j "--snapshot-cache 40 --stacked-opp --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $N/runs/r1b-parked/final_model.pt$" "$o"
+o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 29j "--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $N/runs/r1b-parked/final_model.pt$" "$o"
 # 30-33 (v10, 2026-11-11; G9r, approved .orchestra/netv2/G9R-PROPOSAL.md): g9 MODE g9r = G9q's recipe + --lr-schedule power
 # --lr-horizon 300000000, entropy floor 0.35 (replaced), lineage dir G9r, guard state runs/g9r, P3 init / anchor / frozen,
 # P1 eval anchor, November sets, PY = $NV2/bin/py-src-ff32b71 everywhere, cache 72 / 512 + stacked-opp, cpu tier 200.
