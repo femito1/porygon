@@ -110,3 +110,40 @@ graph capture fails) fails that configuration; that does not void the run.
 - The manifest holds: code commit, net sha256, node, GPU (`nvidia-smi -q` clocks), CPUs, and the contention PIDs
   (killed by recorded PID at the end).
 - Report to main in ≤ 4 lines.
+
+## Results (job 1135630, written 2026-11-12 ~19:10 UTC by fastenv; everything above is the pre-results text, md5 b1d4fe17)
+Run `$C/runs/v3i1-20261112-180801-1135630/` (i1/i1.json, i1/i1-rows.jsonl, i1.log, manifest.txt). dove01, Tesla T4,
+code a131f90, net sha256 35cd1007…ad1c, i1 rc 0, 305 s of bench after a 12 min pre-read.
+
+**Void check: NOT VOID.** The job finished (rc 0); E32 ran; 5,904 leaves ≥ 5,400 (96 terminal skipped, 0 engine
+errors); all 14 burners ready (11 mcts + 3 spin, 15 s), killed by recorded PID.
+
+**Parity (vs E32, B 256, 5,904 leaves):**
+- E16 PASSES: mean |ΔP| 9.8e-5 (≤ 0.002), q99 3.9e-4 (≤ 0.01), max 9.9e-4; policy top-1 flips 0.037% of 5,384
+  multi-action leaves, opp_action flips 0.15% of 5,904 (both ≤ 0.5%); policy TV q50 1.7e-4 / q99 3.2e-3; all finite.
+- G32, G16 FAIL (they errored; the rule fails the configuration, the run is not void): CUDA graph capture raised
+  "Cannot copy between CPU and CUDA tensors during CUDA graph capture unless the CPU tensor is pinned", i.e. the
+  model's forward does an unpinned host→device copy. No graph number exists.
+- Batch invariance (info): E32 at B 1024 vs B 256, max |ΔP| 5.4e-7.
+
+**Throughput, leaves/s (8 s windows):**
+
+| cfg | cond | B 128 | 192 | 256 | 384 | 512 (info) | 1024 (info) |
+|---|---|---|---|---|---|---|---|
+| E32 | u | 5,238 | 6,866 | 7,661 | 9,083 | 9,729 | 11,157 |
+| E16 | u | 4,274 | 6,035 | 7,928 | 10,840 | 12,334 | 15,297 |
+| E32 | c | 1,838 | 4,620 | 6,500 | 7,388 | 7,325 | 9,813 |
+| E16 | c | 3,325 | 4,775 | 5,751 | 7,465 | 10,750 | 13,227 |
+
+**Rule: I1 FAILS.** No parity-passing configuration reaches G ≥ 35,300 leaves/s at B ≤ 384 under (c). The best is
+E16 at B 384: 7,465 leaves/s ⇒ 0.85 × 7,465 / 3 ≈ **2,115 leaves per decision** (the target is 10,000). Named
+option: none. Per main's decision (4): no Rust build.
+
+**Deviation (disclosed, does not change the verdict):** the job asked for `--cpus-per-task=16` but was given 12
+(SLURM_CPUS_ON_NODE 12, cpuset 5-16), so condition (c) put 14 burners + the server on 12 CPUs, harsher than the
+pre-registered 15 of 16. The uncontended rates miss the target too: the best at B ≤ 384 is E16 10,840 (≈ 3,070 per
+decision), 3.3× short; even B 1024 uncontended (15,297) is 2.3× short.
+
+**Reading (no rule):** the graph configurations, the design's main lever (V3-RUST-DESIGN §1c), are untested because
+of the capture error. Making them run means changing the model's forward (or pinning its constants), which is new
+work and a new decision; the uncontended eager numbers leave a 2.3–3.3× gap that graphs alone would have to close.
