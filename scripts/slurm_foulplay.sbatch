@@ -46,50 +46,98 @@ if ! [ -x "$FP/$FP_VENV/bin/python" ]; then
   "$FP/$FP_VENV/bin/pip" install -q --no-cache-dir poke-engine==0.0.48 \
     --config-settings="build-args=--features $FP_FEATURES --no-default-features"
 fi
+# Local login patch: send "/trn NAME,0," (the --no-security server needs no assertion), then wait for the server's
+# |updateuser| with that name (at most 10 s) instead of a fixed 3 s sleep. Upgrades a file carrying the first version
+# of this patch (fixed sleep) in place, atomically; the old marker stays a substring so old copies of this script
+# leave the file alone.
 python3 - "$FP/fp/websocket_client.py" <<'EOF'
-import sys
+import os, sys
 from pathlib import Path
 p = Path(sys.argv[1]); s = p.read_text()
-marker = "patched for the Porygon benchmark"
-if marker not in s:
-    a = "        guest_login = self.password is None\n\n        if guest_login:"
-    b = ("        guest_login = self.password is None\n\n"
-         "        if guest_login and (\"localhost\" in self.address or \"127.0.0.1\" in self.address):\n"
-         f"            # local --no-security server: no assertion needed ({marker})\n"
-         "            await self.send_message(\"\", [\"/trn \" + self.username + \",0,\"])\n"
-         "            await asyncio.sleep(3)\n"
-         "            return self.username\n\n"
-         "        if guest_login:")
+old_marker = "patched for the Porygon benchmark"
+marker = old_marker + ", v2: waits for the rename"
+head = ("        if guest_login and (\"localhost\" in self.address or \"127.0.0.1\" in self.address):\n"
+        "            # local --no-security server: no assertion needed ({})\n"
+        "            await self.send_message(\"\", [\"/trn \" + self.username + \",0,\"])\n")
+old_block = head.format(old_marker) + "            await asyncio.sleep(3)\n            return self.username\n\n"
+new_block = head.format(marker) + (
+    "            want = \"\".join(c for c in self.username.lower() if c.isalnum())\n"
+    "            loop = asyncio.get_running_loop()\n"
+    "            deadline = loop.time() + 10\n"
+    "            while loop.time() < deadline:\n"
+    "                try:\n"
+    "                    msg = await asyncio.wait_for(self.receive_message(), deadline - loop.time())\n"
+    "                except asyncio.TimeoutError:\n"
+    "                    break\n"
+    "                if msg.startswith(\"|updateuser|\") and \"\".join(\n"
+    "                        c for c in msg.split(\"|\")[2].lower() if c.isalnum()) == want:\n"
+    "                    break\n"
+    "            return self.username\n\n")
+anchor = "        guest_login = self.password is None\n\n"
+if marker in s:
+    sys.exit(0)
+if old_marker in s:
+    if s.count(anchor + old_block) != 1:
+        print(f"warning: {p} has an unknown version of the login patch; left as it is", file=sys.stderr)
+        sys.exit(0)
+    s = s.replace(anchor + old_block, anchor + new_block)
+else:
+    a = anchor + "        if guest_login:"
     assert s.count(a) == 1, "Foul Play's login changed; update the patch"
-    p.write_text(s.replace(a, b))
+    s = s.replace(a, anchor + new_block + "        if guest_login:")
+tmp = p.with_name(p.name + ".porygon-tmp")
+tmp.write_text(s)
+os.replace(tmp, p)  # atomic: a Foul Play (re)starting meanwhile imports the old or the new file, never a torn one
 EOF
 
 OUT=runs/foulplay-$(date +%Y%m%d-%H%M%S)-$SLURM_JOB_ID; mkdir -p "$OUT"
 LOGS=${TMPDIR:-/tmp}/porygon-fp-$SLURM_JOB_ID; mkdir -p "$LOGS"  # Foul Play logs are chatty: keep them off the shared disk
 PORT=$(( 20000 + (SLURM_JOB_ID % 2000) * 16 + 15 ))
-# duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged
+# duplicate battles: pairs of games with the same seeds and the teams swapped, true teams logged. The server writes
+# both synchronously (appendFileSync at every battle end, writeFileSync at every battle start): on the shared disk one
+# slow write froze the whole server, every battle and query, for 15-30 s, a few times per 100 games. So they go to the
+# node-local $LOGS and are copied to $OUT every 5 min and at the end (the oracle reads $PORYGON_DUPLICATE_TEAMS).
 [ -f .showdown-eval/dist/server/index.js ] || scripts/build_eval_server.sh
-export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$ROOT/$OUT/battles.jsonl
-export PORYGON_DUPLICATE_TEAMS=$ROOT/$OUT/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS"  # true teams (--oracle)
+export PS_DIR=$ROOT/.showdown-eval PORYGON_DUPLICATE=$SLURM_JOB_ID PORYGON_DUPLICATE_LOG=$LOGS/battles.jsonl
+export PORYGON_DUPLICATE_TEAMS=$LOGS/teams; mkdir -p "$PORYGON_DUPLICATE_TEAMS" "$OUT/teams"  # true teams (--oracle)
 export PORYGON_DUPLICATE_GROUP='^fp'
+save_dup() { cp "$LOGS/battles.jsonl" "$OUT/" 2>/dev/null || true; cp -ru "$LOGS/teams/." "$OUT/teams/" 2>/dev/null || true; }
 scripts/start_servers.sh 1 "$PORT"
 LOOPS=()
-trap 'kill "${LOOPS[@]}" 2>/dev/null || true
+(while sleep 300; do save_dup; done) & LOOPS+=($!)
+trap 'kill "${LOOPS[@]}" 2>/dev/null || true; save_dup
       pkill -u "$USER" -f "^node pokemon-showdown start --skip-build --no-security $PORT\$" || true
-      pkill -u "$USER" -f "run.py --websocket-uri ws://localhost:$PORT/" || true
+      pkill -u "$USER" -f "^[^ ]*python[0-9.]* run\.py --websocket-uri ws://localhost:$PORT/" || true
       cp "$LOGS"/fp0.log "$OUT"/ 2>/dev/null || true; rm -rf "$LOGS"' EXIT
 
 # Pull the Python environments into the page cache first: on a slow shared disk, modules imported lazily
 # during a websocket handshake can take longer than the 10 s handshake timeout.
 find "$FP/$FP_VENV" "$FP/fp" .venv/lib/python3.12/site-packages/{websockets,poke_env} -type f \( -name '*.py' -o -name '*.so*' \) -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null || true
 NAMES=()
+FATAL='run.py", line [0-9]*, in <module>'  # the traceback Foul Play logs before it exits on an exception
 for ((i = 0; i < K; i++)); do
   NAMES+=("fp${SLURM_JOB_ID}x$i")
-  # restarted if it exits (e.g. "timed out during handshake" while the server is still slow to start)
-  (cd "$FP" && while true; do "$FP_VENV"/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
-     --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format "$FORMAT" \
-     --search-time-ms 1000 --search-parallelism "$FP_PAR" --run-count 1000000 --log-level INFO; echo "restarting"; sleep 10; done) \
-     < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
+  # restarted whenever it exits (e.g. "timed out during handshake" while the server is still slow to start, or a
+  # crash inside its search). A failing exit must not end the loop (set -e did: gen9 runs 515847/515849/515852 each
+  # lost an instance for the rest of the run after a ZeroDivisionError in Foul Play's move selection), and a process
+  # that logged its fatal traceback but does not exit within WD_GRACE s (an executor thread still searching) is killed.
+  (cd "$FP" && while true; do
+     "$FP_VENV"/bin/python run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
+       --ps-username "fp${SLURM_JOB_ID}x$i" --bot-mode accept_challenge --pokemon-format "$FORMAT" \
+       --search-time-ms 1000 --search-parallelism "$FP_PAR" --run-count 1000000 --log-level INFO &
+     pid=$!; log=$LOGS/fp$i.log; start=$(stat -c %s "$log")
+     while kill -0 "$pid" 2>/dev/null; do  # every 2 s: the log's tail written since this start
+       sleep 2
+       size=$(stat -c %s "$log"); from=$(( size - 65536 > start ? size - 65536 : start ))
+       if [ "$(tail -c +$(( from + 1 )) "$log" | grep -c "$FATAL")" != 0 ]; then  # (grep -c: no SIGPIPE under pipefail)
+         for ((g = 0; g < ${WD_GRACE:-30}; g++)); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+         kill -0 "$pid" 2>/dev/null && { echo "watchdog: fatal error logged but pid $pid still running: killed"; kill -9 "$pid"; }
+         break
+       fi
+     done
+     wait "$pid" && rc=0 || rc=$?
+     echo "restarting (exit $rc)"; sleep 10
+   done) < /dev/null >> "$LOGS/fp$i.log" 2>&1 &
   LOOPS+=($!)
 done
 for ((i = 0; i < K; i++)); do  # importing on a slow shared disk can take minutes
@@ -103,6 +151,7 @@ WORKERS=$(( $(nproc) - K * FP_PAR - 3 ))
 echo "nproc $(nproc), $K Foul Play instances x $FP_PAR cores, $WORKERS engine workers for our search"
 .venv/bin/python scripts/vs_foulplay.py "$MODEL" --player search --port "$PORT" --opponents "${NAMES[@]}" \
   --n "$N" --workers "$WORKERS" --results "$OUT/results.jsonl" --log-dir "$OUT" --format "$FORMAT" "$@" 2>&1 | tee "$OUT/vs.log" || true
+save_dup
 .venv/bin/python scripts/analyze_benchmark.py "$OUT" 2>&1 | tee "$OUT/analysis.txt" || true
 python3 - "$OUT/results.jsonl" <<'EOF'
 import json, math, sys

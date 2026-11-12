@@ -1,0 +1,145 @@
+"""Weight edits of the gen4 network (weight-space programming): each edit is a function policy -> None that writes
+weights in place (no gradients), registered in EDITS with a one-line rationale. `make` loads the base checkpoint,
+applies the edit, logs how many weights changed, checks the result on the logged positions (policy agreement /
+KL vs the original, agreement with the search) and saves a pool-format .pt that every tool loads
+(porygon.model.load_policy, h2h_dup, search --model).
+
+    python scripts/wsp/edit_lib.py EDIT [EDIT ...] --base 500M --out ckpt/edits
+"""
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from wsp_common import Net, load, load_data, run_batched
+
+EDITS = {}
+
+
+def edit(name, why):
+    def deco(f):
+        EDITS[name] = (f, why)
+        return f
+    return deco
+
+
+@edit("temp05", "control: policy temperature 0.5 (score.2 weight and bias x2); sampled play closer to argmax")
+def temp05(p):
+    with torch.no_grad():
+        p.action_net.score[2].weight.mul_(2.0)
+        p.action_net.score[2].bias.mul_(2.0)
+
+
+def _temp(p, k):
+    with torch.no_grad():
+        p.action_net.score[2].weight.mul_(k)
+        p.action_net.score[2].bias.mul_(k)
+
+
+@edit("temp025", "follow-up to temp05: temperature 0.25 (score.2 x4)")
+def temp025(p):
+    _temp(p, 4.0)
+
+
+@edit("temp0125", "follow-up to temp05: temperature 0.125 (score.2 x8, close to argmax play)")
+def temp0125(p):
+    _temp(p, 8.0)
+
+
+def mean_ablate_head(p, layer: int, head: int, n: int = 8000):
+    """Mean-ablate one attention head in weights: zero its value projection and set its value bias to the head's
+    mean output z (over logged positions and all tokens) — since the attention pattern sums to 1, the head then
+    outputs exactly that constant whatever it attends to."""
+    d = load_data("data")
+    idx = np.random.default_rng(1).choice(len(d["obs"]), n, replace=False)
+    net = Net(p)
+    zs = []
+    with torch.no_grad():
+        for s in range(0, n, 1000):
+            c = {}
+            net.forward(torch.as_tensor(d["obs"][idx[s:s + 1000]], dtype=torch.float32),
+                        torch.as_tensor(d["mask"][idx[s:s + 1000]]), cache=c)
+            zs.append(c[f"L{layer}.z"][:, :, head].reshape(-1, net.dh))
+    zbar = torch.cat(zs).mean(0)
+    att = net.layers[layer].self_attn
+    D, dh = net.d, net.dh
+    rows = slice(2 * D + head * dh, 2 * D + (head + 1) * dh)
+    with torch.no_grad():
+        att.in_proj_weight[rows] = 0.0
+        att.in_proj_bias[rows] = zbar
+
+
+@edit("l2h6", "remove L2H6 (one-hot 'current favourite' selector that the att study found works against the search): "
+              "mean-ablation written into its value weights")
+def l2h6(p):
+    mean_ablate_head(p, 2, 6)
+
+
+@edit("identity", "control: no change (A/A)")
+def identity(p):
+    pass
+
+
+def changed(a: dict, b: dict) -> tuple[int, int]:
+    n = tot = 0
+    for k in a:
+        if k.startswith(("pi_features_extractor", "vf_features_extractor")):
+            continue
+        tot += a[k].numel()
+        n += int((a[k] != b[k]).sum())
+    return n, tot
+
+
+def summarize(base_net, new_net, d, idx):
+    x, m = d["obs"][idx], d["mask"][idx]
+    o = run_batched(base_net, x, m)
+    e = run_batched(new_net, x, m)
+    sh = d["shares"][idx]
+    p0, p1 = o["probs"], e["probs"]
+    kl = float(np.mean(np.sum(p0 * (np.log(p0 + 1e-9) - np.log(p1 + 1e-9)), 1)))
+    a0, a1 = p0.argmax(1), p1.argmax(1)
+    return {"KL(orig||edit)": kl, "top1_same": float((a0 == a1).mean()),
+            "orig_top1=search": float((a0 == sh.argmax(1)).mean()),
+            "edit_top1=search": float((a1 == sh.argmax(1)).mean()),
+            "orig_E[share|argmax]": float(sh[np.arange(len(a0)), a0].mean()),
+            "edit_E[share|argmax]": float(sh[np.arange(len(a1)), a1].mean()),
+            "orig_E[share|sample]": float((sh * p0).sum(1).mean()),
+            "edit_E[share|sample]": float((sh * p1).sum(1).mean()),
+            "orig_entropy": float(-(p0 * np.log(p0 + 1e-9)).sum(1).mean()),
+            "edit_entropy": float(-(p1 * np.log(p1 + 1e-9)).sum(1).mean()),
+            "mean|dV|": float(np.abs(o["value"] - e["value"]).mean())}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("edits", nargs="+")
+    ap.add_argument("--base", default="500M")
+    ap.add_argument("--out", default="ckpt/edits")
+    ap.add_argument("--data", default="data")
+    ap.add_argument("--n-check", type=int, default=12000)
+    a = ap.parse_args()
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    d = load_data(a.data)
+    idx = np.random.default_rng(0).choice(len(d["obs"]), min(a.n_check, len(d["obs"])), replace=False)
+    base = load(a.base)
+    base_sd = {k: v.clone() for k, v in base.state_dict().items()}
+    for name in a.edits:
+        f, why = EDITS[name]
+        p = load(a.base)
+        f(p)
+        n, tot = changed(base_sd, p.state_dict())
+        s = summarize(Net(base), Net(p), d, idx)
+        s.update({"edit": name, "why": why, "base": a.base, "weights_changed": n, "weights_total": tot,
+                  "fraction_changed": n / tot})
+        path = out / f"{a.base}_{name}.pt"
+        p.save(str(path))
+        (out / f"{a.base}_{name}.json").write_text(json.dumps(s, indent=1))
+        print(json.dumps(s))
+
+
+if __name__ == "__main__":
+    main()
