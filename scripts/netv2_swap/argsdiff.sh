@@ -6,7 +6,8 @@
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW swapped    after a committed swap (r1 g9q, g9 g9p2): first starts + successors
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW now        the 2026-11-12 cluster (swap COMMITted + applied, r1 g9q = G9q on the
 #                                                 A30 in 1135184, g9 g9r = G9r on the A16 in 810367; restarts in place
-#                                                 + fresh successors 1200001 (r1) / 1200002 (g9) on a30 / a16 / a40)
+#                                                 + fresh successors 1200001 (r1) / 1200002 (g9) on a30 / a16 / a40;
+#                                                 R1b-F: 829660 and its running successor 1136569)
 # ARGSDIFF_R1_MODE / ARGSDIFF_G9_MODE: override the MODE files (a sweep over every mode a branch knows).
 # The tree has the 24c633f, 4f18108 and (v10) ff32b71 wrappers; ARGSDIFF_NO_AS=1 drops 4f18108 (the cluster since 11-10).
 set -u
@@ -39,6 +40,7 @@ tree() {  # tree JOB: a fresh fake tree for one job
     718701) mkdir -p "$L/run/G9p/pool" "$L/run/G9"; echo top > "$L/run/final_model.pt"; echo f > "$L/run/G9p/final_model.pt"; echo s > "$L/run/G9/final_model.pt" ;;
     741849) mkdir -p "$L/run/G9q/pool" "$L/run/G9" "$L/run/G9s"; echo top > "$L/run/final_model.pt"; echo f > "$L/run/G9q/final_model.pt"; echo s > "$L/run/G9/final_model.pt" ;;
     829660) mkdir -p "$L/run/R1bF/pool"; echo f > "$L/run/R1bF/final_model.pt" ;;
+    1136569) mkdir -p "$L/run/R1bF/pool"; echo f > "$L/run/R1bF/final_model.pt"; touch "$L/.nv2-watchdog" ;;  # R1b-F's running job (watchdog done at its first source)
     1135184) mkdir -p "$L/run/G9q/pool"; echo top > "$L/run/final_model.pt"; echo f > "$L/run/G9q/final_model.pt" ;;
     810367) if [ "$WHAT" = now ]; then mkdir -p "$L/run/G9r/pool"; echo top > "$L/run/final_model.pt"; echo f > "$L/run/G9r/final_model.pt"; fi ;;
   esac
@@ -74,7 +76,7 @@ one() {  # one ENVFILE RUN JOB GPU_MIB
 }
 run() {  # run ENVFILE
   local jobs=("r1 718701 24576" "r1 810366 24576" "r1 810366 46068" "g9 741849 15356" "g9 810367 15356" "g9 810367 46068" "g4r1bf 829660 15360")
-  if [ "$WHAT" = now ]; then jobs=("r1 1135184 24576" "r1 1200001 24576" "r1 1200001 46068" "g9 810367 15356" "g9 1200002 15356" "g9 1200002 46068" "g4r1bf 829660 15360"); fi
+  if [ "$WHAT" = now ]; then jobs=("r1 1135184 24576" "r1 1200001 24576" "r1 1200001 46068" "g9 810367 15356" "g9 1200002 15356" "g9 1200002 46068" "g4r1bf 829660 15360" "g4r1bf 1136569 15360"); fi
   for x in "${jobs[@]}"; do
     set -- "$1" $x; echo "$3 $2 gpu=$4: $(one "$1" "$2" "$3" "$4")"; set -- "$1"
   done

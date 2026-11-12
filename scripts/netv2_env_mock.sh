@@ -741,6 +741,150 @@ yes_ 47f '[ "$o" = "RC=1|" ] && [ "$(nsb)" = 0 ]'; check 47f2 "/tmp has 5 GB < 2
 wdtree; touch "$WDQ.fail"; o=$(wdsrc r1 1200500 ws-netv2-r1); yes_ 48a '[ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 0 ] && [ "$(grep -c "^squeue" "$WDQ.calls")" = 3 ]'
 check 48b "squeue failed 3 times.*no successor queued \(squeue failed\)" "$(wdlog r1)"; rm -f "$WDQ.fail"
 wdtree; touch "$WDQ.sbfail"; o=$(wdsrc r1 1200501 ws-netv2-r1); yes_ 49a '[ -n "${o#*|TRAIN_ARGS=}" ]'; check 49b "queued successor NOTHING \(sbatch failed\)" "$(wdlog r1)"
+if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_V14:-}" ]; then
+# 50-55 (v14, 2026-11-12; G9t takes the A16, G9r PARKED resumable; skipped with MOCK_SKIP_V14=1 or MOCK_SKIP_G9T=1). The
+# park INLINE_CMD ($G9T_KIT, default scripts/netv2_g9t/inline-a16-park-g9r-start-g9t.sh) runs in 810367 (g9 MODE g9r)
+# after the G9r trainer's SIGINT: G9r's lineage dir copied whole to runs/g9r-parked (MD5SUMS, load check, PARKED.txt),
+# then MODE g9t; the same sourcing is G9t's first start (RECIPE "g9q 0.5": G9q's recipe + --gae-lambda 0.5 from P3).
+# v14's one change: MODE g9t refused while runs/g9r-parked/PARKED.txt exists -> HOLD (allocation kept), re-check, never
+# G9r; not parked -> v13 (G9r continues). The tree is the 2026-11-12 cluster state (swap COMMITted + applied, r1 g9q on
+# the A30, g9 g9r on the A16 = G9r in 810367 at 60,000,000 steps; 4f18108 disabled).
+G9T_KIT=${G9T_KIT:-$(dirname "$(readlink -f "$0")")/netv2_g9t}; PK0=$NV2_PARK_PY
+printf '#!/bin/bash\n# mock: the park script'"'"'s checkpoint load (PARK_MOCK_STEPS / PARK_MOCK_FAIL)\n[ -z "${PARK_MOCK_FAIL:-}" ] || { echo "RuntimeError: mock load failure"; exit 1; }\necho "counters: {'"'"'steps'"'"': ${PARK_MOCK_STEPS:-60000000}, '"'"'updates'"'"': 1440, '"'"'games'"'"': 1}"; echo "keys: ['"'"'args'"'"', '"'"'counters'"'"', '"'"'optimizer'"'"']"; echo "pp: $PYTHONPATH"\n' > "$ROOTM.parkpy14"; chmod +x "$ROOTM.parkpy14"
+export NV2_PARK_PY=$ROOTM.parkpy14
+t14tree() {  # g9rtree (v-env on disk, ff32b71 src + wrapper) + the 2026-11-12 state; G9r live in 810367 ($B/run/G9r)
+  g9rtree; rm -f "$N/bin/py-src-4f18108"
+  echo "COMMIT by r1 718701 2026-11-11T11:05:44" > "$N/runs/swap-50M/DECISION"; touch "$N/runs/r1/SWAP_APPLIED" "$N/runs/g9/SWAP_APPLIED" "$N/runs/r1/G9Q_A30_STARTED" "$N/runs/g9/G9P_A16_STARTED"
+  echo g9q > "$N/runs/r1/MODE"; echo g9r > "$N/runs/g9/MODE"; date > "$N/runs/g9r/G9R_STARTED"; echo "old trip" > "$N/runs/g9r/FU.reason"
+  mkdir -p "$A/run/G9q/pool" "$N/runs/g9t/lam"; echo g9q-a30-final > "$A/run/G9q/final_model.pt"
+  GR=$B/run/G9r; mkdir -p "$GR/pool/frozen" "$GR/checkpoints" "$GR/tb" "$GR/eval"
+  echo g9r-final-60M > "$GR/final_model.pt"; echo g9r-best > "$GR/best_model.pt"; echo g9r-ema > "$GR/ema_model.pt"
+  for s in 00050000000 00055000000; do echo "r$s" > "$GR/pool/$s.pt"; done; echo P3 > "$GR/pool/frozen/P3-g9-s2.pt"; echo br > "$GR/pool/frozen/best-00045000000.pt"
+  echo c1 > "$GR/checkpoints/ckpt_00050003097.pt"; echo c2 > "$GR/checkpoints/ckpt_00055000000.pt"; echo t > "$GR/tb/events.x"; echo e > "$GR/eval/eval.log"; echo old > "$GR/GUARD_TRIPPED.fu-010101"
+  printf '2026-11-12 18:49:30 v2 trainer: gen9randombattle ...\n2026-11-12 23:40:00 upd 1440 steps 60,000,000 (+41600) sps 440\n2026-11-12 23:40:01 [eval @ 60,000,000] vs P1 61.0%%\n2026-11-12 23:41:30 saved final_model.pt at 60,000,000 steps\n' > "$GR/train.log"
+  echo "g9q 0.5" > "$N/runs/g9t/RECIPE"; echo prereg-g9t > "$N/runs/g9t/PREREG.txt"; chmod 444 "$N/runs/g9t/PREREG.txt"
+  touch "$B/.toucher-G9t" "$B/.toucher-G9r"
+}
+park14() {  # the netv2 agent installs the INLINE_CMD (10 min ago), then the trainer's SIGINT save lands (now)
+  cp "$G9T_KIT/inline-a16-park-g9r-start-g9t.sh" "$N/runs/g9/INLINE_CMD" 2>/dev/null || echo 'echo "mock: no g9t park kit"; exit 1' > "$N/runs/g9/INLINE_CMD"
+  touch -d '10 minutes ago' "$N/runs/g9/INLINE_CMD"; touch "$B/run/G9r/final_model.pt"
+}
+Z=$N/runs/g9r-parked
+# 50 (i): the park in 810367's restart in place: G9r parked whole, MODE g9t, the same sourcing = G9t's first start from
+# P3 with G9q's recipe + --gae-lambda 0.5 (exact args: wsd, constant lr 7e-5, entropy floor 0.5, KL anchor + frozen P3,
+# P1 eval anchor, 8 workers, cache 72 + cpu 200), PY = the ff32b71 wrapper, November sets, G9T_STARTED "TIME g9q 0.5 g9 810367"
+t14tree; park14; o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); G9TP="TRAIN_ARGS=$(G9TA g9q 0.5 8 "$B/run/G9t" "$A16X" "$P3")$"
+check 50a "^FORMAT=gen9randombattle\|ANCHOR=$P1\|$G9TP" "$o"; checkno 50a2 "lr-schedule|entropy-min 0.35|/G9r|P1-g9h-dmg-s2.pt --kl" "${o#*TRAIN_ARGS=}"
+check 50b "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8} g9q 0.5 g9 810367$" "$(cat "$N/runs/g9t/G9T_STARTED" 2>/dev/null)"
+check 50c "^PY=$W9\|PAT=\^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train\( \|\\\$\)$" "$(pyof 810367 g9 A16)"; check 50c2 "child sees $NOV" "$(psof 810367 g9 A16)"
+yes_ 50d '[ "$(cat "$N/runs/g9/MODE")" = g9t ] && [ ! -e "$N/runs/g9/PARKED" ] && [ ! -e "$N/runs/g9/HOLD" ] && [ ! -e "$Z.tmp" ] && [ -d "$B/run/G9t/pool" ] && ls "$N"/runs/g9/INLINE_CMD.done-* > /dev/null 2>&1'
+yes_ 50e 'cmp -s "$Z/final_model.pt" "$B/run/G9r/final_model.pt" && [ "$(ls "$Z/pool" | grep -c pt$) $(ls "$Z/pool/frozen" | grep -c pt$) $(ls "$Z/checkpoints" | grep -c pt$) $(cat "$Z/best_model.pt") $(cat "$Z/ema_model.pt")" = "2 2 2 g9r-best g9r-ema" ] && [ -f "$Z/tb/events.x" ] && [ -f "$Z/eval/eval.log" ] && cmp -s "$Z/train.log" "$B/run/G9r/train.log" && [ -f "$Z/state/G9R_STARTED" ] && [ -f "$Z/state/FU.reason" ]'
+yes_ 50f '(cd "$Z" && md5sum -c --quiet MD5SUMS) && [ "$(wc -l < "$Z/MD5SUMS")" -ge 14 ] && [ -f "$Z/PARKED.txt" ] && [ "$(cat "$B/run/G9r/final_model.pt")" = g9r-final-60M ] && [ -f "$B/run/G9r/checkpoints/ckpt_00055000000.pt" ]'
+check 50g "^G9r PARKED .* in job 810367 .*MODE g9r -> g9t; runs/g9t/RECIPE 'g9q 0.5'.*steps: 60000000 \(final_model.pt saved .*source: $B/run/G9r .*guard state runs/g9r.*counters: \{'steps': 60000000.*pp: $N/src-ff32b71:$N/src .*last update: .*upd 1440 steps 60,000,000.*last save: .*saved final_model.pt at 60,000,000 steps.*\[eval @ 60,000,000\].*FU.started '', FU.reason 'old trip'.*resume: " "$(tr '\n' ' ' < "$Z/PARKED.txt" 2>/dev/null)"
+check 50h "park-g9r DONE: G9r parked in $Z at 60000000 steps .*MODE g9r -> g9t" "$(cat "$N/runs/g9t/park.log" 2>/dev/null)"
+check 50i "G9t first start in run g9: from P3 $P3 \(steps 0\); C = g9q's recipe \(entropy floor 0.5\) \+ --gae-lambda 0.5 \(runs/g9t/RECIPE\); November sets for the collector \(PORYGON_PS=$NOV\)" "$(cat "$B/run/train.log")"
+yes_ 50j '[ -f "$B/run/G9r/GUARD_TRIPPED.fu-010101" ] && [ -f "$Z/GUARD_TRIPPED.fu-010101" ] && ! grep -q "MODE g9t refused" "$B/run/train.log"'
+# 50k: "one change": G9t's args = MODE g9q's (G9q's recipe, same job and GPU) + --gae-lambda 0.5 (lineage dir and --resume aside)
+cp -a "$N/runs/g9" "$ROOTM.g9save"; echo g9q > "$N/runs/g9/MODE"; oq=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); rm -rf "$N/runs/g9"; mv "$ROOTM.g9save" "$N/runs/g9"
+yes_ 50k '[ -n "$(norm "$o")" ] && [ "$(norm "$o")" = "$(norm "$oq")" ] && [ "$(printf "%s" "$o" | grep -o -- "--gae-lambda [0-9.]*")" = "--gae-lambda 0.5" ]'
+# 50l: G9t's restart in place (in 810367 and on >= 40 GB): its own save; no second first start, no second park
+echo g9t-final > "$B/run/G9t/final_model.pt"; s0=$(cat "$N/runs/g9t/G9T_STARTED")
+o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); check 50l "TRAIN_ARGS=$(G9TA g9q 0.5 8 "$B/run/G9t" "$A16X" "$B/run/G9t/final_model.pt")$" "$o"
+o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=46068 src g9 A16); check 50l2 "TRAIN_ARGS=$(G9TA g9q 0.5 8 "$B/run/G9t" "$A16Y" "$B/run/G9t/final_model.pt")$" "$o"
+yes_ 50l3 '[ "$(grep -c "G9t first start" "$B/run/train.log")" = 1 ] && [ "$(grep -c "park-g9r DONE" "$N/runs/g9t/park.log")" = 1 ] && [ "$(cat "$N/runs/g9t/G9T_STARTED")" = "$s0" ]'
+# 50m: the other runs are untouched: r1 (1135184 G9q on the A30) and R1b-F (1136569)
+o=$(SLURM_JOB_ID=1135184 NV2_GPU_MIB=24576 src r1 A30); check 50m "--run-dir $A/run/G9q .*--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400 --resume $A/run/G9q/final_model.pt$" "$o"; checkno 50m2 "gae-lambda|G9t|G9r" "$o"
+# 51 (iv): the park refuses (FAIL in runs/g9t/park.log, MODE untouched, no runs/g9r-parked, no G9T_STARTED; G9r relaunches
+# from its own save): RECIPE missing / "g9q 0.6" / "g9r 0.5" / two lines; PREREG missing / writable; G9T_STARTED exists;
+# runs/g9r-parked exists; a live trainer; a stale save (older than the queued INLINE_CMD; too old; an update or a
+# checkpoint past the last save; counters != the save line); the load fails; MODE g9q; v13 on disk
+G9RC="--run-dir $B/run/G9r --pool-dir $B/run/G9r/pool $A16X --lr-schedule power --lr-horizon 300000000 --resume $B/run/G9r/final_model.pt$"
+for c in norecipe r06 rg9r r2 noprereg prw started parked live olderq old upd ckpt counters noload mode env13; do
+  t14tree; park14; ma=g9r; lp=""; pe=""; why=""
+  case $c in
+    norecipe) rm -f "$N/runs/g9t/RECIPE"; why="no runs/g9t/RECIPE" ;;
+    r06) echo "g9q 0.6" > "$N/runs/g9t/RECIPE"; why="RECIPE is not exactly 'g9q 0.5' \(1 line\(s\), first: 'g9q 0.6'\)" ;;
+    rg9r) echo "g9r 0.5" > "$N/runs/g9t/RECIPE"; why="RECIPE is not exactly 'g9q 0.5'" ;;
+    r2) printf 'g9q 0.5\ng9q 0.5\n' > "$N/runs/g9t/RECIPE"; why="RECIPE is not exactly 'g9q 0.5' \(2 line" ;;
+    noprereg) rm -f "$N/runs/g9t/PREREG.txt"; why="no runs/g9t/PREREG.txt" ;;
+    prw) chmod 644 "$N/runs/g9t/PREREG.txt"; why="PREREG.txt is not read-only \(mode 644\)" ;;
+    started) echo "2026-11-12T20:00:00 g9q 0.5 g9 810367" > "$N/runs/g9t/G9T_STARTED"; why="G9T_STARTED exists" ;;
+    parked) mkdir -p "$Z"; echo earlier > "$Z/PARKED.txt"; why="$Z exists already" ;;
+    live) ( exec -a "/x/python -u -m porygon.v2.train --run-dir $B/run/G9r --pool-dir $B/run/G9r/pool" /bin/sleep 120 ) & lp=$!; /bin/sleep 0.3; why="a trainer with --run-dir under $B/run is still running" ;;
+    olderq) touch -d '20 minutes ago' "$B/run/G9r/final_model.pt"; why="is not newer than the queued INLINE_CMD .*stale" ;;
+    old) touch -d '3 hours ago' "$N/runs/g9/INLINE_CMD"; touch -d '1 hour ago' "$B/run/G9r/final_model.pt"; why="final_model.pt is [0-9]+ s old" ;;
+    upd) echo "2026-11-12 23:43:00 upd 1441 steps 60,041,600 (+41600) sps 440" >> "$B/run/G9r/train.log"; why="the last save \(60000000 steps\) is not the newest step \(last update 60041600" ;;
+    ckpt) echo c3 > "$B/run/G9r/checkpoints/ckpt_00060041600.pt"; why="is not the newest step \(.*newest checkpoint 00060041600\)" ;;
+    counters) pe="PARK_MOCK_STEPS=55000000"; why="counters say steps 55000000, its train.log save line 60000000" ;;
+    noload) pe="PARK_MOCK_FAIL=1"; why="does not load with optimizer \+ counters: .*mock load failure" ;;
+    mode) ma=g9q; echo g9q > "$N/runs/g9/MODE"; why="runs/g9/MODE is 'g9q' \(expected g9r\)" ;;
+    env13) grep -v 'runs/g9r-parked/PARKED.txt' "$ENVF" > "$N/netv2.env"; why="netv2.env has no v14 g9t mode" ;;
+  esac
+  o=$(if [ -n "$pe" ]; then export "${pe?}"; fi; SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16)
+  if [ -n "$lp" ]; then kill "$lp" 2>/dev/null; wait "$lp" 2>/dev/null; fi
+  yes_ "51$c" '[ "$(cat "$N/runs/g9/MODE")" = $ma ] && [ ! -e "$N/runs/g9/PARKED" ] && ls "$N"/runs/g9/INLINE_CMD.done-* > /dev/null 2>&1 && [ "$(cat "$B/run/G9r/final_model.pt")" = g9r-final-60M ] && [ ! -d "$B/run/G9t" ]'
+  case $c in
+    parked) yes_ "51$c-2" '[ "$(cat "$Z/PARKED.txt")" = earlier ] && [ "$(ls -A "$Z")" = PARKED.txt ] && [ ! -e "$N/runs/g9t/G9T_STARTED" ]' ;;
+    started) yes_ "51$c-2" '[ ! -e "$Z" ] && [ "$(cat "$N/runs/g9t/G9T_STARTED")" = "2026-11-12T20:00:00 g9q 0.5 g9 810367" ]' ;;
+    *) yes_ "51$c-2" '[ ! -e "$Z" ] && [ ! -e "$N/runs/g9t/G9T_STARTED" ]' ;;
+  esac
+  check "51$c-3" "park-g9r FAIL \(MODE untouched: $ma\): .*$why" "$(cat "$N/runs/g9t/park.log" 2>/dev/null)"
+  checkno "51$c-4" "gae-lambda|/G9t" "$o"
+  if [ $ma = g9r ]; then check "51$c-5" "$G9RC" "$o"; fi
+done
+# 52 (ii): the pending g9 successor 1137377 (afterany:810367; id >= NV2_WD_MIN_JOB) starts fresh after the park and G9t's
+# first segment (MODE g9t, G9T_STARTED, runs/g9r-parked/PARKED.txt): not blocked by the park, queues exactly ONE
+# successor, resumes G9t's newest MIRRORED file (never the newer G9r mirror or the parked dir); 52b: while a park
+# INLINE_CMD is queued (it names runs/g9r-parked) a fresh g9 job exits at once (intended)
+wdtree; echo g9t > "$N/runs/g9/MODE"; mkdir -p "$N/runs/g9t"; echo "2026-11-12T23:45:00 g9q 0.5 g9 810367" > "$N/runs/g9t/G9T_STARTED"; rm -f "$N/runs/g9t/RECIPE"
+KT=$N/runs/g9/20261112-015035-810367/G9t; mkdir -p "$KT/pool/frozen" "$KT/checkpoints" "$Z/pool" "$Z/checkpoints"
+echo g9t-ckpt > "$KT/checkpoints/ckpt_00004000000.pt"; touch -d '2026-11-14 23:00' "$KT/checkpoints/ckpt_00004000000.pt"
+echo g9t-mirror > "$KT/final_model.pt"; touch -d '2026-11-15 01:31' "$KT/final_model.pt"; echo b > "$KT/best_model.pt"; echo P3 > "$KT/pool/frozen/P3-g9-s2.pt"; echo s > "$KT/pool/00004000000.pt"
+touch -d '2026-11-15 01:40' "$K2/final_model.pt"; echo parked > "$Z/final_model.pt"; echo pk > "$Z/checkpoints/ckpt_00060000000.pt"; echo p > "$Z/PARKED.txt"; touch -d '2026-11-15 01:50' "$Z/final_model.pt" "$Z/checkpoints/ckpt_00060000000.pt"
+sq 1137377 ws-netv2-g9 RUNNING 2026-11-15T01:46:00 "(null)"
+mkdir -p "$ROOTM/wd-1137377"; touch "$ROOTM/wd-1137377/.toucher-G9t"
+o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 wdsrc g9 1137377 ws-netv2-g9); W1=$ROOTM/wd-1137377
+check 52a "^RC=0\|TRAIN_ARGS=$(G9TA g9q 0.5 8 "$W1/run/G9t" "$A16X" "$KT/final_model.pt")$" "$o"; checkno 52a2 "/G9r|g9r-parked|lr-schedule" "$o"
+check 52a3 "^sbatch --job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 --dependency=afterany:1137377 scripts/slurm_train_v2.sbatch g9$" "$(cat "$WDQ.sbatch" 2> /dev/null)"
+yes_ 52a4 '[ "$(nsb)" = 1 ] && [ "$(grep -c 1137377 "$N/runs/g9/JOBSTARTS")" = 1 ] && [ "$(cat "$N/runs/g9/chain_left")" = 0 ] && [ ! -e "$N/runs/g9/HOLD" ] && [ "$(cat "$N/runs/g9/MODE")" = g9t ]'
+check 52a5 "first start on nodex: .*MODE g9: g9t .*queued successor 1300001 \(afterany:1137377\)" "$(wdlog g9)"; checkno 52a6 "exit without training" "$(wdlog g9)"
+yes_ 52a7 '[ -f "$W1/run/G9t/best_model.pt" ] && [ -f "$W1/run/G9t/pool/frozen/P3-g9-s2.pt" ] && [ -L "$W1/run/final_model.pt" ] && grep -q "fresh job: G9t resumes from $KT/final_model.pt" "$W1/run/train.log" && ! grep -q "G9t first start" "$W1/run/train.log"'
+o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 wdsrc g9 1137377 ws-netv2-g9); yes_ 52a8 '[ "$(nsb)" = 1 ] && [ "${o%%|*}" = RC=0 ]'  # its restart in place: no second successor
+wdtree; echo g9r > "$N/runs/g9/MODE"; cp "$G9T_KIT/inline-a16-park-g9r-start-g9t.sh" "$N/runs/g9/INLINE_CMD"; o=$(WD_PART=a16 WD_GPU=15356 wdsrc g9 1137377 ws-netv2-g9)
+yes_ 52b '[ "$o" = "RC=0|" ] && [ "$(nsb)" = 0 ] && [ -f "$N/runs/g9/INLINE_CMD" ]'; check 52b2 "exit without training or chaining: a park / swap INLINE_CMD is queued \(runs/g9/INLINE_CMD\)" "$(wdlog g9)"
+# 53 (iii): MODE g9t refused WITH G9r parked -> HOLD rounds (the mock caps them: NV2_G9T_HOLD_ROUNDS), never G9r:
+# (a) RECIPE removed and G9T_STARTED corrupted; (b) the same, fixed by a human during round 1 (an INLINE_CMD that a
+# queued one installs: nv2_pause runs it inside the HOLD round) -> G9t continues from its own save; (c) the record says
+# r1; (d) outside a job (LOCAL / SLURM_JOB_ID unset): no HOLD possible, no G9r either (the generic branch)
+t53() { t14tree; park14; SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16 > /dev/null; echo g9t-final > "$B/run/G9t/final_model.pt"; rm -f "$N/runs/g9t/RECIPE"; echo "corrupt" > "$N/runs/g9t/G9T_STARTED"; : > "$B/run/train.log"; }
+t53; o=$(NV2_G9T_HOLD_ROUNDS=2 SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); l=$(cat "$B/run/train.log")
+checkno 53a "TRAIN_ARGS=" "$o"; yes_ 53a2 '[ -f "$N/runs/g9/HOLD" ] && [ "$(cat "$N/runs/g9/MODE")" = g9t ] && [ "$(cat "$N/runs/g9t/G9T_STARTED")" = corrupt ] && [ -f "$Z/PARKED.txt" ]'
+check 53a3 "MODE g9t refused: runs/g9t/G9T_STARTED unreadable \('corrupt'\): HOLD: G9r is parked \(runs/g9r-parked/PARKED.txt\) and never resumes on a refusal; nothing continues" "$l"
+check 53a4 "MODE g9t refused with G9r parked \(round 1\): HOLD .*MODE g9t refused with G9r parked \(round 2\): HOLD .*MODE g9t held 2 rounds \(mock cap\): exit" "$(tr '\n' ' ' <<< "$l")"
+checkno 53a5 "G9r continues" "$l"; check 53a6 "^3$" "$(grep -c 'MODE g9t refused: ' <<< "$l")"
+t53; printf 'echo "2026-11-12T23:45:00 g9q 0.5 g9 810367" > runs/g9t/G9T_STARTED\nrm -f runs/g9/HOLD\n' > "$ROOTM.fixer"
+echo "cp $ROOTM.fixer runs/g9/INLINE_CMD" > "$N/runs/g9/INLINE_CMD"
+o=$(NV2_G9T_HOLD_ROUNDS=3 SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); l=$(cat "$B/run/train.log")
+check 53b "TRAIN_ARGS=$(G9TA g9q 0.5 8 "$B/run/G9t" "$A16X" "$B/run/G9t/final_model.pt")$" "$o"; checkno 53b2 "G9r continues|round 2" "$l"
+yes_ 53b3 '[ ! -e "$N/runs/g9/HOLD" ] && [ "$(grep -c "refused with G9r parked (round 1)" <<< "$l")" = 1 ] && [ "$(cut -d" " -f2- "$N/runs/g9t/G9T_STARTED")" = "g9q 0.5 g9 810367" ]'
+t53; echo "2026-11-12T23:45:00 g9q 0.5 r1 1135184" > "$N/runs/g9t/G9T_STARTED"; o=$(NV2_G9T_HOLD_ROUNDS=1 SLURM_JOB_ID=810367 src g9 A16)
+checkno 53c "TRAIN_ARGS=" "$o"; check 53c2 "MODE g9t refused: G9t started in run r1 .*: HOLD: G9r is parked" "$(cat "$B/run/train.log")"; yes_ 53c3 '[ -f "$N/runs/g9/HOLD" ]'
+t53; o=$( ( set -euo pipefail; NV2=$N; RUN_NAME=g9; unset LOCAL SLURM_JOB_ID; NV2_GPU_MIB=15356; source "$ENVF"; echo "TRAIN_ARGS=$TRAIN_ARGS" ) 2>&1 )
+check 53d "TRAIN_ARGS=.*--kl-anchor $P1 " "$o"; checkno 53d2 "/G9r|lr-schedule|gae-lambda|entropy-min 0.35" "$o"; yes_ 53d3 '[ ! -e "$N/runs/g9/HOLD" ]'
+# 54 (iii): refused WITHOUT G9r parked (no runs/g9r-parked/PARKED.txt: never parked, a failed park's .tmp, a voided park)
+# -> v13: G9r continues from its own save with G9r's exact args, train.log "G9r continues", no HOLD
+for v in none tmp void; do
+  t14tree; rm -f "$N/runs/g9t/RECIPE"; echo g9t > "$N/runs/g9/MODE"
+  case $v in tmp) mkdir -p "$Z.tmp"; echo p > "$Z.tmp/PARKED.txt" ;; void) mkdir -p "$Z.void-1112-235959"; echo p > "$Z.void-1112-235959/PARKED.txt" ;; esac
+  o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16)
+  check "54$v" "TRAIN_ARGS=$(G9RA "$B/run/G9r" "$A16X" "$B/run/G9r/final_model.pt")$" "$o"
+  check "54$v-2" "MODE g9t refused: no runs/g9t/RECIPE: G9r continues" "$(cat "$B/run/train.log")"; yes_ "54$v-3" '[ ! -e "$N/runs/g9/HOLD" ] && [ ! -e "$N/runs/g9t/G9T_STARTED" ]'
+done
+# 55: G9r parked and the recipe valid: no HOLD, no refusal note (the guard is silent when G9t may start)
+t14tree; park14; SLURM_JOB_ID=810367 src g9 A16 > /dev/null; echo g9t-final > "$B/run/G9t/final_model.pt"; o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16)
+yes_ 55 '[ ! -e "$N/runs/g9/HOLD" ] && ! grep -q "refused" "$B/run/train.log"'; check 55b "--run-dir $B/run/G9t .*--gae-lambda 0.5 --resume $B/run/G9t/final_model.pt$" "$o"
+chmod -R u+w "$N/runs/g9t" 2>/dev/null; rm -f "$ROOTM.parkpy14" "$ROOTM.fixer"; export NV2_PARK_PY=$PK0
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
