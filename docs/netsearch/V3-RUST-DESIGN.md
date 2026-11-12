@@ -13,8 +13,7 @@ Tags: [m] measured, [e] estimated.
   | 369 µs | 440 µs | 385 µs | 136 µs | 980 µs |
   | 18% | 21% | 19% | 7% | 47% |
 
-  - Mean depth 2.2.
-  - Python's CPU cost is 1,330 µs per leaf, outside the forward pass.
+  - Mean depth 2.2. Python's CPU cost is 1,330 µs per leaf, outside the forward pass.
 - **The T4 on its own [m]** (eager fp32, aux heads off), in leaves per second:
 
   | | B 64 | B 256 | B 1024 |
@@ -23,27 +22,21 @@ Tags: [m] measured, [e] estimated.
   | 12 processes | 7.9k | 12.3k | 13.6k |
 
   - At B 64 it is launch-bound: about 1,000 small kernels per forward, about 650 of them in the damage layer.
-- **The v2 net [m, laptop, synthetic observations]:**
-  - 10.5M parameters;
-  - 158 MFLOP of matmul per leaf (168 with damage untrimmed);
-  - 12.3 KB of observation per leaf.
-  - At 14.5k leaves/s the T4 runs at 2.3 TFLOP/s, 28% of its 8.1 fp32 peak.
+- **The v2 net [m, laptop, synthetic observations]:** 10.5M parameters, 158 MFLOP of matmul per leaf (168 with damage
+  untrimmed), 12.3 KB of observation per leaf. At 14.5k leaves/s the T4 runs at 2.3 TFLOP/s, 28% of its 8.1 fp32 peak.
 
 ## 1. Scope: what moves to Rust
 **A new crate, `porygon-v3`**: a pyo3 extension built with maturin. It links poke-engine 0.0.48 as a Rust library
 (path dependency, `features = ["gen9"]`), with exactly the patch set and features that built gloria's `.engine-gen9`
 (.so 7965d8b3; the patch md5s go in the manifest).
-- **Not a patch inside poke-engine:** the existing patches stay as they are, and nothing that runs today changes.
-- **poke-engine is MIT,** so linking it is free (Foul Play's GPL code is not touched).
+- **Not a patch inside poke-engine:** nothing that runs today changes. poke-engine is MIT, so linking it is free.
 - **Rust-level calls** (all `pub` in 0.0.48): `generate_instructions_from_move_pair`, `apply_instructions` /
   `reverse_instructions`, `get_all_options`, `State::deserialize`, and `genx::evaluate::evaluate`.
   - The missing `evaluate` in the gen9 *Python binding* does not affect the crate.
 
 **(a) Tree: moves to Rust.**
-- Decoupled pUCT at the simultaneous-move nodes:
-  - our side: the net's policy as prior;
-  - the opponent: the `opp_action` aux head at the root, and its policy below the root. The joint node keeps both
-    sides' statistics.
+- Decoupled pUCT at the simultaneous-move nodes. Our prior is the net's policy; the opponent's is the `opp_action`
+  aux head at the root and its policy below the root. The joint node keeps both sides' statistics.
 - Chance outcomes are sampled by the instruction percentages.
 - Arena (index) nodes, no `HashMap<Box>`. That is SPEEDUPS row 2's fix, which removes the teardown cost.
 - Virtual loss, K leaves in flight per tree (a parameter, see §3).
@@ -53,18 +46,14 @@ Tags: [m] measured, [e] estimated.
 
 **(b) Leaf encoder: port `v3leaf.LeafEncoder.encode`** (365 lines, the P1-gated reference) and the option lists
 (`side_options`, `needs_switch`, `terminal`, `action_mask`).
-- **Precomputed in Python, at the root only, not ported:**
-  - the set posterior;
-  - species / items / abilities / move ids and candidates, stats, levels;
-  - the whole root observation, which Rust copies and patches as v3leaf does.
-  - P1-B accepted stale knowledge fields at the leaves (0.021).
+- **Precomputed in Python, at the root only, not ported:** the set posterior; species / items / abilities / move ids
+  and candidates, stats, levels; the whole root observation, which Rust copies and patches as v3leaf does. P1-B
+  accepted stale knowledge fields at the leaves (0.021).
 - **Fresh opponent slots:** per determinization, Python precomputes a slot template (`fresh_opp`) for each unseen
   opponent mon. The posterior with nothing revealed comes out of the existing code.
-- **Static tables** go to Rust as one JSON written by Python at init, never hand-copied:
-  - volatile → effect column, the status / weather / terrain maps;
-  - screen lengths, the hazard and boost attributes, charging moves;
-  - `is_status_move` per move slot, the root observation's column indices (spec 2.1, checked against
-    `SPEC_VERSION`).
+- **Static tables** go to Rust as one JSON written by Python at init, never hand-copied: volatile → effect column,
+  the status / weather / terrain maps, screen lengths, hazard and boost attributes, charging moves, `is_status_move`
+  per move slot, and the observation's column indices (spec 2.1, checked against `SPEC_VERSION`).
 - **The damage features are part of the net** (`porygon.v2.damage`, a torch module on the GPU). Nothing to port.
 - Estimate: 5–15 µs per leaf (memcpy of 12.3 KB plus about 300 writes) [e], against 440 µs in Python.
 
@@ -80,10 +69,8 @@ Tags: [m] measured, [e] estimated.
 | R-pt16: + fp16 autocast trunk (damage stays fp32, as the model already does) | ≈ 25 | 35–50k [e] | ≈ 10–14k |
 | R-trt: ONNX → TensorRT fp16 (ort TRT EP, or a Python TRT engine) | ≈ 25 | 45–65k [e] | ≈ 13–18k |
 
-How the last column is derived:
-- leaves/decision ≈ η · min(4·10⁶/c_cpu, G/3), with η ≈ 0.85 for pipeline bubbles;
-- c_cpu is the CPU µs per leaf of one tree thread;
-- G is the whole T4's rate, shared by 3 concurrent battles over a 1 s window.
+The last column is leaves/decision ≈ η · min(4·10⁶/c_cpu, G/3): η ≈ 0.85 for pipeline bubbles, c_cpu the CPU µs per
+leaf of one tree thread, G the whole T4's rate, shared by 3 concurrent battles over a 1 s window.
 
 **Reading.**
 1. In Python, the CPU caps V3 at ≈ 3k leaves per decision whatever the GPU does. The Rust tree and encoder lift that
@@ -102,10 +89,8 @@ How the last column is derived:
 ## 2. Parity plan (R1: gate)
 **E0, engine identity.** On 10,000 (state, joint move) pairs from P1's roots (`p1/roots.pkl`) and from random tree
 paths of depth 1–4, our crate's `generate_instructions_from_move_pair` must equal `.engine-gen9`'s:
-- the same instruction lists, in order;
-- percentages within |Δ| ≤ 10⁻⁶;
-- `State::serialize` round-trips.
-- **Rule:** 100% agreement.
+the same instruction lists in order, percentages within |Δ| ≤ 10⁻⁶, and `State::serialize` round-trips.
+**Rule:** 100% agreement.
 
 **E1, encoder.** Rust `encode(state)` vs Python `LeafEncoder.encode(state)` on the same states:
 - P1's 300 pairs × 2 determinizations, test A and test B;
@@ -128,12 +113,8 @@ paths of depth 1–4, our crate's `generate_instructions_from_move_pair` must eq
 - E2 is re-run whenever the deployed net changes (re-freeze), ≈ 10 min.
 
 **E3, tree unit tests** (cargo test plus pytest):
-- determinism (one thread, fixed seed ⇒ identical visits);
-- virtual loss fully undone;
-- visits conserved;
-- terminals scored without the net (win 1, loss 0, as P2);
-- a forced-KO position picks the KO;
-- a 1 s budget overruns by ≤ 20 ms at p99.
+determinism (one thread, fixed seed ⇒ identical visits); virtual loss fully undone; visits conserved; terminals
+scored without the net (win 1, loss 0, as P2); a forced-KO position picks the KO; a 1 s budget overruns ≤ 20 ms at p99.
 
 ## 3. Gates before any slot game (pre-registered in full before they run; P1/P2 rules carried over)
 - **R1 parity (gate):** E0, E1 and E2 all pass.
@@ -153,10 +134,8 @@ paths of depth 1–4, our crate's `generate_instructions_from_move_pair` must eq
   strength read.
   - **Fallback:** on any Rust error the player falls back to H's own search for that decision. Over 2% fallbacks
     voids, as in Stages 2 and 3.
-- **Then the slot stages, unchanged from NEXT-PROPOSAL §3:**
-  - V3-T: c_puct ∈ {1, 2, 4} vs H;
-  - V3-H: 500 pairs, lower 95% > 50%;
-  - V3-F vs Foul Play, paired with 3b.
+- **Then the slot stages, unchanged from NEXT-PROPOSAL §3:** V3-T (c_puct ∈ {1, 2, 4} vs H), V3-H (500 pairs, lower
+  95% > 50%), V3-F (vs Foul Play, paired with 3b).
 - **Disclosure:** V3 uses a T4 that H does not. H's root forwards stay on CPU, as in Stage 3.
 
 ## 4. Effort (agent-days) and risks
@@ -199,12 +178,8 @@ paths of depth 1–4, our crate's `generate_instructions_from_move_pair` must eq
 ## 5. Order, with the re-freeze (re-freeze first whenever its trigger is real; HANDOFF steps unchanged)
 0. **Now (with GO):** I1 in a helper job this afternoon, ≈ 1 h, done before 23:30. It decides the inference row and
    whether R2's 10k is reachable. Report to main; then steps 1–4 (development; helper jobs only for builds and tests).
-1. **≈ 23:30–00:30 tonight:** netv2 branches G9q-cd at ≥ 300M. Re-freeze steps 2–5 take my helper slot first:
-   - copy plus sha256;
-   - netv2's in-process trigger;
-   - δ_c in a ≈ 1 h helper job;
-   - `rfsmoke20261112`.
-   - V3 build/test jobs are held (one helper job per stream).
+1. **≈ 23:30–00:30 tonight:** netv2 branches G9q-cd at ≥ 300M. Re-freeze steps 2–5 take my helper slot first (copy
+   plus sha256, netv2's in-process trigger, δ_c in a ≈ 1 h helper job, `rfsmoke20261112`); V3 jobs are held meanwhile.
 2. **The re-freeze slot R (≈ 5.5 h)** runs only after netv2's gen4 prior test RELEASEs. That test was released for
    submission at 11:22 and takes ≈ 12–16 h, so it frees ≈ 23:30–03:30. Then main approves and I CLAIM.
 3. **V3 R1–R4 ≈ 11-17…11-20 (helper only).** E2 is re-run on the adopted net if the re-freeze adopts G9q-cd.
