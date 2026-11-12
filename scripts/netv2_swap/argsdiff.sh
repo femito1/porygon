@@ -12,8 +12,9 @@
 set -u
 OLD=$(readlink -f "$1"); NEW=$(readlink -f "$2"); WHAT=${3:-current}
 R=${ARGSDIFF_ROOT:-/tmp/nv2s/.argsdiff-tree}
+WDB=$(dirname "$(dirname "$(readlink -f "$0")")")/netv2_wd_stubs
 tree() {  # tree JOB: a fresh fake tree for one job
-  rm -rf "$R"; N=$R/nv2; mkdir -p "$N/bin" "$N/runs/r1" "$N/runs/g9" "$N/runs/g9q" "$N/runs/g9a30" "$N/runs/g4r1bf" "$N/runs/pretrain" "$N/runs/r1b-parked/pool"
+  rm -rf "$R" "$R.wdq"*; N=$R/nv2; mkdir -p "$N/bin" "$N/runs/r1" "$N/runs/g9" "$N/runs/g9q" "$N/runs/g9a30" "$N/runs/g4r1bf" "$N/runs/pretrain" "$N/runs/r1b-parked/pool"
   for w in py-src-24c633f py-src-4f18108 py-src-ff32b71; do printf '#!/bin/bash\nexit 0\n' > "$N/bin/$w"; chmod +x "$N/bin/$w"; done
   # ARGSDIFF_NO_AS=1: the cluster since 2026-11-10 15:06 (py-src-4f18108 disabled after its drift check)
   if [ -n "${ARGSDIFF_NO_AS:-}" ]; then rm -f "$N/bin/py-src-4f18108"; fi
@@ -62,6 +63,8 @@ one() {  # one ENVFILE RUN JOB GPU_MIB
   tree "$3"
   ( set -euo pipefail
     NV2=$R/nv2; LOCAL=$R/local-$3; RUN_NAME=$2; SLURM_JOB_ID=$3; SLURM_JOB_NAME=ws-netv2-$2; NV2_GPU_MIB=$4; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    # v12: the watchdog runs in fresh jobs with ids >= 1135476 (1200001 / 1200002 in 'now'): stub squeue / sbatch / df
+    PATH=$WDB:$PATH; WDQ=$R.wdq; export WDQ; NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0
     if fresh "$3"; then unset LOCAL; fi  # a fresh job: the first source of the job script (LOCAL from SLURM_JOB_ID)
     TMPDIR=$R/tmp
     source "$1" > /dev/null 2>&1
@@ -79,4 +82,4 @@ run() {  # run ENVFILE
 run "$OLD" > "$R.old"; run "$NEW" > "$R.new"
 if [ "$WHAT" = swapped ]; then echo "== $NEW (swapped)"; cat "$R.new"; echo "== $OLD (swapped)"; cat "$R.old"; fi
 if diff "$R.old" "$R.new" > "$R.diff"; then echo "identical ($WHAT MODE files): $(wc -l < "$R.new") job/GPU cases"; cat "$R.new"; else echo "DIFFERENT ($WHAT MODE files):"; cat "$R.diff"; fi
-rm -rf "$R" "$R.old" "$R.new" "$R.diff" "$R.one"
+rm -rf "$R" "$R.old" "$R.new" "$R.diff" "$R.one" "$R.wdq"*

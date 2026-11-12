@@ -506,7 +506,8 @@ done
 g9rtree; echo g9r > "$N/runs/g9/MODE"; date > "$N/runs/g9r/G9R_STARTED"
 o=$(SLURM_JOB_ID=718701 src r1 A30); check 33a "$G9PARGS .*--run-dir $A/run/G9p .*--snapshot-cache 192 --stacked-opp --resume $A/run/G9p/final_model.pt$" "$o"; checkno 33b "lr-schedule|G9r|entropy-min 0.35" "$o"
 check 33c "^PY=$N/bin/py-src-4f18108\|" "$(pyof 718701 r1 A30)"
-# 34-41 (v12 DRAFT, not deployed; .orchestra/netv2/NEXT-RECIPE-PROPOSAL.md 3 / 5): MODE g9t = control C's recipe + ONE
+if [ -z "${MOCK_SKIP_G9T:-}" ]; then
+# 34-41 (g9t DRAFT, not deployed; skipped with MOCK_SKIP_G9T=1 for an env without g9t; .orchestra/netv2/NEXT-RECIPE-PROPOSAL.md 3 / 5): MODE g9t = control C's recipe + ONE
 # change, --gae-lambda LAMBDA; C and LAMBDA from runs/g9t/RECIPE ("g9q|g9r 0.5|0.6", one non-comment line), recorded at
 # the first start in runs/g9t/G9T_STARTED ("TIME C LAMBDA RUN JOB": later starts use the record, only in RUN). Lineage
 # dir G9t, guard state runs/g9t, P3 init / anchor / frozen, P1 eval anchor, November sets, PY = the ff32b71 wrapper.
@@ -564,10 +565,10 @@ for d in "$N/runs/g9r-parked" "$N/runs/g9t-parked"; do mkdir -p "$d/pool"; echo 
 for g in 15356 46068; do
   S=$ROOTM/local-S; rm -rf "$S"; mkdir -p "$S/run"; touch "$S/run/train.log" "$S/.toucher-G9t"
   x=$A16X; [ $g = 46068 ] && x=$A16Y
-  o=$(SLURM_JOB_ID=1200001 NV2_GPU_MIB=$g src g9 S); check "36a-$g" "TRAIN_ARGS=$(G9TA g9q 0.6 8 "$S/run/G9t" "$x" "$K/G9t/final_model.pt")$" "$o"
+  o=$(SLURM_JOB_ID=1100001 NV2_GPU_MIB=$g src g9 S); check "36a-$g" "TRAIN_ARGS=$(G9TA g9q 0.6 8 "$S/run/G9t" "$x" "$K/G9t/final_model.pt")$" "$o"
 done
 yes_ 36b '[ -f "$S/run/G9t/best_model.pt" ] && [ -f "$S/run/G9t/pool/frozen/P3-g9-s2.pt" ] && [ -L "$S/run/final_model.pt" ] && ! grep -q "first start" "$S/run/train.log"'
-check 36c "^PY=$W9\|" "$(pyof 1200001 g9 S)"; check 36d "child sees $NOV" "$(psof 1200001 g9 S)"
+check 36c "^PY=$W9\|" "$(pyof 1100001 g9 S)"; check 36d "child sees $NOV" "$(psof 1100001 g9 S)"
 # 37: the job has no G9t final_model.pt (its first trainer crashed): the newest checkpoint (local); none anywhere: P3 again
 g9ttree; recipe "g9r 0.6\n"; SLURM_JOB_ID=810367 src g9 A16 > /dev/null; mkdir -p "$B/run/G9t/checkpoints"; echo k1 > "$B/run/G9t/checkpoints/ckpt_00005000000.pt"
 o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); check 37a "TRAIN_ARGS=$(G9TA g9r 0.6 8 "$B/run/G9t" "$A16X" "$B/run/G9t/checkpoints/ckpt_00005000000.pt")$" "$o"
@@ -635,6 +636,112 @@ o=$(SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A16); check 41g "$G9RCONT" "$o"
 g4tree; L=$ROOTM/local-T4; mkdir -p "$N/runs/g9t" "$N/bin"; echo "g9q 0.5" > "$N/runs/g9t/RECIPE"; echo g9t > "$N/runs/g9/MODE"; echo g9t > "$N/runs/r1/MODE"
 printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
 o=$(SLURM_JOB_ID=829660 src g4r1bf T4); check 41i "--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $N/runs/r1b-parked/final_model.pt$" "$o"; checkno 41j "gae-lambda" "$o"
+fi
+# 42-49 (v12, 2026-11-12, orchestrator-approved): the successor watchdog (nv2_watchdog, at a job's FIRST source, ids >=
+# 1135476, runs r1 / g9 / g4r1bf). Stubs on PATH (scripts/netv2_wd_stubs: squeue from $WDQ, sbatch with the cluster's
+# banner that registers its job PENDING, scontrol, df from $WDQ.df, hostname nodex). The tree is the 2026-11-12 state.
+WDB=$(dirname "$(readlink -f "$0")")/netv2_wd_stubs; WDQ=$ROOTM.wdq; export WDQ
+wdtree() {  # swaptree + now: COMMIT applied, r1 MODE g9q (G9q on the A30), g9 MODE g9r (G9r on the A16), R1b-F parked
+  swaptree; rm -f "$N/bin/py-src-4f18108"; rm -f "$WDQ"*; echo 1300001 > "$WDQ.next"
+  mkdir -p "$N/runs/swap-50M" "$N/runs/g9r" "$N/runs/g4r1bf" "$N/runs/r1b-parked/pool"; echo "COMMIT by r1 718701 2026-11-11T11:05:44" > "$N/runs/swap-50M/DECISION"
+  printf '2026-11-11T11:05:44 r1 718701 phase2 applied COMMIT: MODE g9p -> g9q\n' > "$N/runs/swap-50M/STATE"
+  touch "$N/runs/r1/SWAP_APPLIED" "$N/runs/g9/SWAP_APPLIED" "$N/runs/r1/G9Q_A30_STARTED" "$N/runs/g9/G9P_A16_STARTED" "$N/runs/g4r1bf/R1BF_STARTED"; date > "$N/runs/g9r/G9R_STARTED"
+  printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-ff32b71"; chmod +x "$N/bin/py-src-ff32b71"; echo g9q > "$N/runs/r1/MODE"; echo g9r > "$N/runs/g9/MODE"
+  echo 0 > "$N/runs/r1/chain_left"; echo 0 > "$N/runs/g9/chain_left"; echo 3 > "$N/runs/g4r1bf/chain_left"; echo x > "$N/runs/r1b-parked/final_model.pt"; echo b75 > "$N/runs/r1/restart-best-7.5M.pt"
+  J2=$N/runs/r1/20261112-112408-1135184/G9q; K2=$N/runs/g9/20261112-015035-810367/G9r; Q2=$N/runs/g4r1bf/20261109-190000-829660/R1bF
+  for d in "$J2" "$K2" "$Q2"; do mkdir -p "$d/pool/frozen"; echo "mirror-${d##*/}" > "$d/final_model.pt"; done
+  rm -rf "$ROOTM"/wd-*
+}
+wdsrc() {  # wdsrc RUN JOB NAME [JOBARGS...]: a job's first source (fresh LOCAL, as the job script makes it) -> "RC=n|TRAIN_ARGS=..."
+  local run=$1 job=$2 name=$3; shift 3
+  mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/.toucher-G9q" "$ROOTM/wd-$job/.toucher-G9r" "$ROOTM/wd-$job/.toucher-R1bF" "$ROOTM/wd-$job/.toucher-G9p"
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=$run; SLURM_JOB_ID=$job; SLURM_JOB_NAME=$name
+    SLURM_JOB_PARTITION=${WD_PART:-a30}; SLURM_CPUS_ON_NODE=${WD_CPUS:-30}; SLURM_MEM_PER_NODE=${WD_MEM:-98304}; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-24576}
+    source "$ENVF"; echo "TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
+  echo "RC=$?|$(grep '^TRAIN_ARGS=' "$ROOTM.wdout" || true)"
+}
+sq() { echo "$1 $2 $3 $4 $5" >> "$WDQ"; }  # sq ID NAME STATE START DEP
+nsb() { grep -c . "$WDQ.sbatch" 2> /dev/null || echo 0; }
+wdlog() { cat "$N/runs/$1/WATCHDOG.log" 2> /dev/null | tr '\n' ' '; }
+RES="--job-name=ws-netv2-r1 --partition=a30 --gres=gpu:1 --cpus-per-task=30 --mem=98304M --time=72:00:00"
+# 42: inactive: the running jobs (1135184 r1, 810367 g9, 829660 g4r1bf) at a restart in place or a first source,
+# ids < 1135476, other runs, the kill switch -> no squeue / sbatch / JOBSTARTS / WATCHDOG.log; TRAIN_ARGS as without it
+wdtree; sq 1135184 ws-netv2-r1 RUNNING 2026-11-12T11:12:24 "(null)"
+for c in "r1 1135184 ws-netv2-r1" "g9 810367 ws-netv2-g9" "g4r1bf 829660 ws-netv2-g4" "r1 1135475 ws-netv2-r1" "smoke 1200009 ws-netv2-smoke"; do
+  read -r r j nm <<< "$c"; o=$(wdsrc $r $j $nm); o2=$(NV2_WD_OFF=1 wdsrc $r $j $nm)
+  yes_ "42a-$j" '[ "${o%%|*}" = RC=0 ] && [ "$o" = "$o2" ] && [ ! -e "$WDQ.sbatch" ] && [ ! -e "$WDQ.calls" ] && [ ! -e "$N/runs/$r/JOBSTARTS" ] && [ ! -e "$N/runs/$r/WATCHDOG.log" ] && [ ! -e "$ROOTM/wd-$j/.nv2-watchdog" ]'
+done
+touch "$N/runs/WATCHDOG_OFF"; o=$(wdsrc r1 1200001 ws-netv2-r1); yes_ 42b '[ "${o%%|*}" = RC=0 ] && [ ! -e "$WDQ.sbatch" ] && [ ! -e "$N/runs/r1/JOBSTARTS" ]'; rm -f "$N/runs/WATCHDOG_OFF"
+# 43: r1's pending successor 1135476 starts (fresh job; 1135184 gone): JOBSTARTS, a successor afterany:1135476 with this
+# job's resources and job args, its id parsed past the banner, chain_left stays 0, MODE / TRAIN_ARGS as without the watchdog
+wdtree; o=$(wdsrc r1 1135476 ws-netv2-r1 --extra 1); o2=$(NV2_WD_OFF=1 wdsrc r1 1135476 ws-netv2-r1 --extra 1)
+check 43a "^sbatch $RES --dependency=afterany:1135476 scripts/slurm_train_v2.sbatch r1 --extra 1$" "$(cat "$WDQ.sbatch" 2> /dev/null)"
+yes_ 43b '[ "$(nsb)" = 1 ] && [ "${o%%|*}" = RC=0 ] && [ "${o#*|}" = "${o2#*|}" ] && [ -n "${o#*|TRAIN_ARGS=}" ]'
+check 43c "queued successor 1300001 \(afterany:1135476\)" "$(wdlog r1)"; check 43d "^1135476 [0-9]+ nodex$" "$(cat "$N/runs/r1/JOBSTARTS" 2> /dev/null)"
+check 43e "watchdog: queued successor 1300001" "$(cat "$ROOTM/wd-1135476/run/train.log")"; yes_ 43f '[ "$(cat "$N/runs/r1/chain_left") $(cat "$N/runs/r1/MODE")" = "0 g9q" ]'
+check 43g "TRAIN_ARGS=.*--run-dir $ROOTM/wd-1135476/run/G9q .*--resume $J2/final_model.pt$" "$o"
+# 43h: g4r1bf's first chained job (chain_left 3): chain_left -> 0, its successor on the training partition
+wdtree; o=$(WD_PART=training WD_CPUS=10 WD_MEM=40960 wdsrc g4r1bf 1200100 ws-netv2-g4)
+check 43h "^sbatch --job-name=ws-netv2-g4 --partition=training --gres=gpu:1 --cpus-per-task=10 --mem=40960M --time=72:00:00 --dependency=afterany:1200100 scripts/slurm_train_v2.sbatch g4r1bf$" "$(cat "$WDQ.sbatch" 2> /dev/null)"
+check 43i "chain_left 3 -> 0" "$(wdlog g4r1bf)"; yes_ 43j '[ "$(cat "$N/runs/g4r1bf/chain_left")" = 0 ]'; check 43k "TRAIN_ARGS=.*--resume $Q2/final_model.pt$" "$o"
+# 44 (b): at most one pending successor: a second source in the same job (a restart in place), the successor's own
+# start while another job of the name is pending, a requeue of the same id; two jobs racing (both RUNNING)
+wdtree; wdsrc r1 1135476 ws-netv2-r1 > /dev/null; o=$(wdsrc r1 1135476 ws-netv2-r1); yes_ 44a '[ "$(nsb)" = 1 ] && [ "$(grep -c . "$N/runs/r1/JOBSTARTS")" = 1 ] && [ "${o%%|*}" = RC=0 ]'
+wdtree; sq 1135500 ws-netv2-r1 PENDING N/A "(null)"; o=$(wdsrc r1 1135476 ws-netv2-r1); yes_ 44b '[ "$(nsb)" = 0 ] && [ "${o%%|*}" = RC=0 ]'; check 44b2 "successor already pending: 1135500" "$(wdlog r1)"
+wdtree; wdsrc r1 1135476 ws-netv2-r1 > /dev/null; rm -rf "$ROOTM/wd-1135476"; o=$(wdsrc r1 1135476 ws-netv2-r1)  # requeued (same id, new LOCAL)
+yes_ 44c '[ "$(nsb)" = 1 ] && [ "$(grep -c . "$N/runs/r1/JOBSTARTS")" = 2 ]'
+wdtree; sq 1135476 ws-netv2-r1 RUNNING 2026-11-13T10:00:00 "(null)"; sq 1135600 ws-netv2-r1 RUNNING 2026-11-13T10:05:00 "(null)"; sq 1300001 ws-netv2-r1 PENDING N/A afterany:1135476; echo 1300002 > "$WDQ.next"
+o=$(wdsrc r1 1135600 ws-netv2-r1); yes_ 44d '[ "$o" = "RC=0|" ] && [ "$(nsb)" = 0 ] && [ ! -e "$N/runs/r1/JOBSTARTS" ] && [ ! -d "$ROOTM/wd-1135600" ]'
+check 44d2 "exit without training or chaining: job 1135476 of run r1 is already running \(started 2026-11-13T10:00:00\); pending: 1300001" "$(wdlog r1)"
+o=$(wdsrc r1 1135476 ws-netv2-r1); yes_ 44e '[ "${o%%|*}" = RC=0 ] && [ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 0 ]'  # the earlier job trains on
+wdtree; sq 1135476 ws-netv2-r1 RUNNING 2026-11-13T10:00:00 "(null)"; sq 1135600 ws-netv2-r1 RUNNING 2026-11-13T10:00:00 "(null)"  # same second, nothing pending
+o=$(wdsrc r1 1135600 ws-netv2-r1); yes_ 44f '[ "$o" = "RC=0|" ]'; check 44f2 "^sbatch $RES --dependency=afterany:1135476 scripts/slurm_train_v2.sbatch r1$" "$(cat "$WDQ.sbatch" 2> /dev/null)"
+o=$(wdsrc r1 1135476 ws-netv2-r1); yes_ 44g '[ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 1 ]'; check 44g2 "successor already pending: 1300001" "$(wdlog r1)"
+# 45 (a): deliberate stops: the job exits 0 at once (no training, no successor, no JOBSTARTS, LOCAL removed, reason logged)
+k=0
+for c in "r1 HOLD" "g9 PARKED" "g4r1bf CHAIN_STOPPED" "g9 INLINE_CMD.running" "g9 park" "r1 swapkit" "r1 swapstate" "g9 swapfail"; do
+  read -r r what <<< "$c"; k=$((k + 1)); wdtree; nm=ws-netv2-$r; [ $r = g4r1bf ] && nm=ws-netv2-g4
+  case $what in
+    park) cp "$G9R_KIT/inline-a16-park-g9r.sh" "$N/runs/g9/INLINE_CMD"; why="a park / swap INLINE_CMD is queued" ;;
+    swapkit) cp "$KIT/inline-718701-g9p.sh" "$N/runs/r1/INLINE_CMD"; why="a park / swap INLINE_CMD is queued" ;;
+    swapstate) rm -f "$N/runs/swap-50M/DECISION"; mkdir -p "$N/runs/r1/handover-g9p-a16"; echo d > "$N/runs/r1/handover-g9p-a16/DONE"; why="the 50M swap is in progress" ;;
+    swapfail) rm -f "$N/runs/swap-50M/DECISION" "$N/runs/swap-50M/STATE"; echo x > "$N/runs/swap-50M/FAIL-r1"; why="the 50M swap is in progress" ;;
+    *) echo stop > "$N/runs/$r/$what"; why="runs/$r/$what exists" ;;
+  esac
+  o=$(wdsrc $r 1200200 $nm)
+  yes_ "45a-$k" '[ "$o" = "RC=0|" ] && [ "$(nsb)" = 0 ] && [ ! -e "$N/runs/$r/JOBSTARTS" ] && [ ! -d "$ROOTM/wd-1200200" ]'; check "45b-$k" "exit without training or chaining: $why" "$(wdlog $r)"
+done
+# 45c: not stops: a decided swap long ago (above), a finished park's PARKED.txt, runs/r1/R1B_PARKED, a failed park's leftover
+# *.tmp, a generic queued INLINE_CMD, an undecided swap for g4r1bf
+wdtree; mkdir -p "$N/runs/g9p-parked-a16" "$N/runs/g9q-parked.tmp"; echo p > "$N/runs/g9p-parked-a16/PARKED.txt"; touch "$N/runs/r1/R1B_PARKED"; echo 'echo hello' > "$N/runs/g9/INLINE_CMD"
+o=$(WD_PART=a16 WD_GPU=15356 wdsrc g9 1200201 ws-netv2-g9); yes_ 45c '[ "${o%%|*}" = RC=0 ] && [ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 1 ]'
+o=$(wdsrc r1 1200202 ws-netv2-r1); yes_ 45c2 '[ -n "${o#*|TRAIN_ARGS=}" ]'
+rm -f "$N/runs/swap-50M/DECISION"; echo x > "$N/runs/swap-50M/FAIL-r1"; o=$(WD_PART=training wdsrc g4r1bf 1200203 ws-netv2-g4); yes_ 45c3 '[ -n "${o#*|TRAIN_ARGS=}" ]'
+# 46: crash-loop cap: the previous two jobs each lived < 30 min -> CHAIN_STOPPED (reason, JOBSTARTS), no successor, it trains;
+# the next job then exits at once; long-lived predecessors -> no cap
+wdtree; t=$(date +%s); printf '1200300 %s n1\n1200301 %s n2\n' $((t - 1500)) $((t - 600)) > "$N/runs/r1/JOBSTARTS"
+o=$(wdsrc r1 1200302 ws-netv2-r1); yes_ 46a '[ "${o%%|*}" = RC=0 ] && [ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 0 ]'
+check 46b "the previous two jobs each lived < 30 min \(900 s, 6[0-9][0-9] s\): crash loop; this job keeps training" "$(head -n 1 "$N/runs/r1/CHAIN_STOPPED" 2> /dev/null)"
+check 46c "JOBSTARTS \(last 3\): 1200300 .* 1200302 " "$(tr '\n' ' ' < "$N/runs/r1/CHAIN_STOPPED" 2> /dev/null)"
+o=$(wdsrc r1 1200303 ws-netv2-r1); yes_ 46d '[ "$o" = "RC=0|" ] && [ "$(nsb)" = 0 ]'
+wdtree; printf '1200300 %s n1\n1200301 %s n2\n' $((t - 9000)) $((t - 600)) > "$N/runs/r1/JOBSTARTS"; o=$(wdsrc r1 1200302 ws-netv2-r1); yes_ 46e '[ "$(nsb)" = 1 ] && [ ! -e "$N/runs/r1/CHAIN_STOPPED" ]'
+# 47: /tmp guard (< 20 GB at the start): resubmit with --exclude=<node>[,previous], no --dependency, exit 1 before
+# training, MODE kept, TMP_ALERT; a pending job instead gets the node in its ExcNodeList; with a crash loop: no resubmit
+wdtree; echo $((10 * 1048576)) > "$WDQ.df"; o=$(SLURM_JOB_EXC_NODES=hopper wdsrc r1 1200400 ws-netv2-r1 --extra 1)
+yes_ 47a '[ "$o" = "RC=1|" ] && [ "$(nsb)" = 1 ] && [ "$(cat "$N/runs/r1/MODE")" = g9q ] && [ ! -d "$ROOTM/wd-1200400" ] && [ -f "$N/runs/r1/TMP_ALERT" ]'
+check 47b "^sbatch $RES --exclude=nodex,hopper scripts/slurm_train_v2.sbatch r1 --extra 1$" "$(cat "$WDQ.sbatch" 2> /dev/null)"
+check 47c "/tmp has 10 GB < 20 GB: resubmitted as 1300001 excluding nodex,hopper; exit before training \(MODE stays g9q\)" "$(wdlog r1)"
+echo $((25 * 1048576)) > "$WDQ.df"; o=$(wdsrc r1 1300001 ws-netv2-r1); yes_ 47d '[ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 2 ]'; check 47d2 "TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300001/run/G9q " "$o"
+wdtree; sq 1300009 ws-netv2-r1 PENDING N/A afterany:1135184; echo hopper > "$WDQ.exc-1300009"; echo $((5 * 1048576)) > "$WDQ.df"; o=$(wdsrc r1 1200401 ws-netv2-r1)
+yes_ 47e '[ "$o" = "RC=1|" ] && [ "$(nsb)" = 0 ]'; check 47e2 "scontrol update jobid=1300009 ExcNodeList=hopper,nodex" "$(cat "$WDQ.scontrol" 2> /dev/null)"
+wdtree; printf '1200300 %s n1\n1200301 %s n2\n' $((t - 1500)) $((t - 600)) > "$N/runs/r1/JOBSTARTS"; echo $((5 * 1048576)) > "$WDQ.df"; o=$(wdsrc r1 1200402 ws-netv2-r1)
+yes_ 47f '[ "$o" = "RC=1|" ] && [ "$(nsb)" = 0 ]'; check 47f2 "/tmp has 5 GB < 20 GB on nodex and the previous two jobs" "$(head -n 1 "$N/runs/r1/CHAIN_STOPPED" 2> /dev/null)"
+# 48-49: squeue failing (3 tries) -> no duplicate check and no successor (logged); sbatch failing -> logged, it trains
+wdtree; touch "$WDQ.fail"; o=$(wdsrc r1 1200500 ws-netv2-r1); yes_ 48a '[ -n "${o#*|TRAIN_ARGS=}" ] && [ "$(nsb)" = 0 ] && [ "$(grep -c "^squeue" "$WDQ.calls")" = 3 ]'
+check 48b "squeue failed 3 times.*no successor queued \(squeue failed\)" "$(wdlog r1)"; rm -f "$WDQ.fail"
+wdtree; touch "$WDQ.sbfail"; o=$(wdsrc r1 1200501 ws-netv2-r1); yes_ 49a '[ -n "${o#*|TRAIN_ARGS=}" ]'; check 49b "queued successor NOTHING \(sbatch failed\)" "$(wdlog r1)"
+rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
 echo "passed $pass, failed $fail"

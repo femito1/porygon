@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+# mock squeue: $WDQ lines "ID NAME STATE START DEP"; supports -h -u U -n NAME -t STATE -o FORMAT ('%i %T %S %E' or '%i')
+import os, sys
+q = os.environ.get("WDQ", ""); a = sys.argv[1:]
+open(q + ".calls", "a").write("squeue " + " ".join(a) + "\n") if q else None
+if q and os.path.exists(q + ".fail"): sys.exit(1)
+def opt(k):
+    return a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None
+name, st, fmt = opt("-n"), opt("-t"), opt("-o") or "%i %T %S %E"
+for line in (open(q).read().splitlines() if q and os.path.exists(q) else []):
+    f = line.split()
+    if len(f) < 5 or (name and f[1] != name) or (st and f[2] != st): continue
+    print(f[0] if fmt == "%i" else f"{f[0]} {f[2]} {f[3]} {f[4]}")

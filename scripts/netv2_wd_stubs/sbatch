@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+# mock sbatch: logs its args to $WDQ.sbatch; prints the cluster's banner then "Submitted batch job N"; registers N PENDING
+import os, sys
+q = os.environ.get("WDQ", "/tmp/wdq"); a = sys.argv[1:]
+open(q + ".sbatch", "a").write("sbatch " + " ".join(a) + "\n")
+if os.path.exists(q + ".sbfail"): print("sbatch: error: Batch job submission failed"); sys.exit(1)
+n = int(open(q + ".next").read()) if os.path.exists(q + ".next") else 1300001
+open(q + ".next", "w").write(str(n + 1))
+name = next((x.split("=", 1)[1] for x in a if x.startswith("--job-name=")), "?")
+dep = next((x.split("=", 1)[1] for x in a if x.startswith("--dependency=")), "(null)")
+open(q, "a").write(f"{n} {name} PENDING N/A {dep}\n")
+print("Assigning requested gpu/s to the job (banner)", file=sys.stderr); print("Assigning requested gpu/s: gpu:1"); print(f"Submitted batch job {n}")

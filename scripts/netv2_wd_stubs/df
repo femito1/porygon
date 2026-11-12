@@ -1,0 +1,5 @@
+#!/bin/bash
+# mock df -Pk DIR: available KB from $WDQ.df (first line consumed while more than one remains); default 100 GB
+f=${WDQ:-/tmp/wdq}.df; v=104857600
+if [ -f "$f" ]; then v=$(head -n 1 "$f"); [ "$(wc -l < "$f")" -gt 1 ] && sed -i 1d "$f"; fi
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "tmpfs 200000000 1 $v 1% /tmp"
