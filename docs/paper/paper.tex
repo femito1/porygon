@@ -145,12 +145,12 @@ raw-outcome fit scored 52.1\%~$\pm$~2.2\% against it at the same scale (1834 sel
 iterations), so the method is plain outcome regression.
 All rows in Table~\ref{tab:fp} add a PPO policy prior with weight 0.25 to the visit shares (Section~\ref{sec:where}):
 the 500M-step network in the second and third rows (\verify{and the first}, per our notes: runs do not log the
-network), the 600M-step one in the compute-matched rows; we have not compared the two networks directly. The Generation~9 search uses no network (prior weight 0): our network has no tera actions.
+network), the 600M-step one in the compute-matched rows; we have not compared the two networks directly. The Generation~9 search uses no network (prior weight 0): our Generation~4 network has no tera actions.
 
 \textbf{Generation 9.} The same recipe on 39{,}970 Generation~9 self-play games gives a larger held-out
 improvement (Table~\ref{tab:fit}); in engine self-play the fitted evaluation at $k{=}2$ scores
 60.2\%~$\pm$~1.4\% against the stock one and the rescaled stock evaluation 58.4\%~$\pm$~1.4\% (4000 games each).
-Against Foul Play, however, the gain is within noise: with pure engine search (no network prior; our network has
+Against Foul Play, however, the gain is within noise: with pure engine search (no network prior; our Generation~4 network has
 no tera actions) the stock evaluation scores 51.7\%~$\pm$~2.4\% (1508 games), the rescaled stock evaluation
 53.3\%~$\pm$~2.3\% (1600) and the fitted one 53.3\%~$\pm$~2.4\% (1494): $+1.6\pm3.4$ points. Engine-only
 self-play over-predicts the gain under hidden information. \todo{whether the Generation~4 gain depends on the
