@@ -1,5 +1,5 @@
-# V3 I1: inference bench, pre-registration (fastenv, 2026-11-12 ~12:20 UTC, before any I1 code or measurement)
-**Main's decisions (2026-11-12 ~12:05):**
+# V3 I1: inference bench, pre-registration (fastenv, 2026-11-12 ~11:40 UTC, before any I1 code or measurement)
+**Main's decisions (2026-11-12 ~11:40):**
 1. I1 GO: a ≈ 1 h inference bench in a helper job, with no Rust. The pass rule is written first: "10k leaves/decision
    reachable on the slot's T4 under contention", naming the option that reaches it.
 2. fp16 is allowed for LEAF inference only, gated on parity (mean |ΔP| ≤ 0.002, top-1 flips ≤ a stated rate).

@@ -1,4 +1,4 @@
-# V3 Rust port: design (fastenv, 2026-11-12 ~11:50 UTC; DESIGN ONLY, nothing built or submitted)
+# V3 Rust port: design (fastenv, 2026-11-12 ~11:38 UTC; DESIGN ONLY, nothing built or submitted)
 **User decision (relayed by main, 2026-11-12 ~11:30):** V3 goes to a Rust port. The user chose it over speeding up
 inference first, building the full Python V3, or pausing. This file covers scope, parity, gates, effort and order.
 Tags: [m] measured, [e] estimated.

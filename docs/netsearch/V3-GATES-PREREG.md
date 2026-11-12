@@ -125,7 +125,7 @@ concurrent processes.
 - After P1 and P2: report to main and STOP. No tree tuning, no games, no Rust, without a new decision.
 - Code commit, net sha256, node, GPU and the CPU count go into the run manifest.
 
-## Results (added 2026-11-12 ~11:50 UTC, after the run; the text above is unchanged, pre-results md5 3407619d5ae99628a932d24fbec1428d)
+## Results (added 2026-11-12 ~11:38 UTC, after the run; the text above is unchanged, pre-results md5 3407619d5ae99628a932d24fbec1428d)
 Job 1127567 (training, dove02, -c 12, 1 T4; code 889d626, net G9p-cd@104.71M sha256 35cd1007…ad1c, engine 7965d8b3).
 Run dir `$C/runs/v3gates-20261112-014733-1127567/`. P1 02:24:59Z, P2 03:06:23Z, both rc 0. Neither is void: P1 300/300
 pairs (0 failed records), P2 90/90 decisions at every B, 0 errors. Numbers read from p1/p1.json and p2/p2.json.
