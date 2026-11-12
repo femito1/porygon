@@ -1,0 +1,4 @@
+$PY -m porygon.fastenv_eval --format gen4randombattle --a runs/smoke-687853/checkpoints/ppo_10000000_steps.zip --b random --games 400 --workers 3 --battles 32
+$PY -m porygon.fastenv_eval --format gen4randombattle --a old-ckpts/ppo_2499840_steps.pt --b random --games 400 --workers 3 --battles 32
+$PY -m porygon.fastenv_eval --format gen4randombattle --a runs/smoke-687853/checkpoints/ppo_10000000_steps.zip --b old-ckpts/ppo_2499840_steps.pt --games 1000 --workers 3 --battles 32
+$PY -m porygon.fastenv_eval --format gen4randombattle --a runs/smoke-687853/checkpoints/ppo_10000000_steps.zip --b old-ckpts/ppo_9999360_steps.pt --games 1000 --workers 3 --battles 32

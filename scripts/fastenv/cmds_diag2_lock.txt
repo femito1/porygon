@@ -1,0 +1,6 @@
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-lock-710562/checkpoints/ppo_2499840_steps.zip --b old-ckpts/ppo_2499840_steps.pt
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-lock-710562/checkpoints/ppo_4999680_steps.zip --b old-ckpts/ppo_4999680_steps.zip
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-lock-710562/checkpoints/ppo_2499840_steps.zip --b runs/diag2-async-710562/checkpoints/ppo_2500000_steps.zip
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-lock-710562/checkpoints/ppo_4999680_steps.zip --b runs/diag2-async-710562/checkpoints/ppo_5000000_steps.zip
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-lock-710562/checkpoints/ppo_4999680_steps.zip --b heuristic --games 600
+$PY -m porygon.fastenv_eval --format gen4randombattle --workers 6 --battles 32 --games 1000 --a runs/diag2-async-710562/checkpoints/ppo_5000000_steps.zip --b heuristic --games 600

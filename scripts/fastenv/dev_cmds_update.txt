@@ -1,0 +1,4 @@
+$PY scripts/fastenv/time_update.py --n-actions 10 --updates 2 --autocast bf16
+$PY scripts/fastenv/time_update.py --n-actions 10 --updates 2 --epochs 2 --batch 4096
+$PY scripts/fastenv/time_update.py --n-actions 10 --updates 2 --epochs 2 --batch 4096 --autocast bf16
+$PY scripts/fastenv/time_update.py --n-actions 10 --updates 2 --epochs 3 --batch 2048 --autocast bf16 --rollout 79872
