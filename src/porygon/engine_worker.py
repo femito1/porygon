@@ -8,6 +8,7 @@ runs them under another interpreter, e.g. a venv with a different poke-engine bu
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -62,9 +63,13 @@ class EnginePool:
 
     async def _spawn(self) -> asyncio.subprocess.Process:
         cmd = [self.python, str(Path(__file__))] if self.python else [sys.executable, "-m", "porygon.engine_worker"]
+        env = None  # opt-in (label jobs): PORYGON_ENGINE_MALLOC=/path/libtcmalloc_minimal.so.4 preloads a faster
+        lib = os.environ.get("PORYGON_ENGINE_MALLOC")  # allocator into the workers (tree teardown 136-212 -> 44-83 ms)
+        if lib and Path(lib).exists():
+            env = os.environ | {"LD_PRELOAD": ":".join(x for x in (lib, os.environ.get("LD_PRELOAD")) if x)}
         return await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, limit=2**24,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, limit=2**24, env=env,
         )
 
     async def search(self, state_str: str, ms: int, priors: dict[str, float] | None = None,
