@@ -15,30 +15,42 @@ on the ladder); Foul Play (pmariglia, open source, peak 2341 / 88 in gen9) is th
 | gen4, oracle: true sets of revealed mons / whole team | 62.1% ± 3.2% / 64.4% ± 3.0% |
 | gen9, pure engine search (no network), stock / stock ×2 / fitted ×2 | 51.7% / 53.3% / 53.3% (± 2.4%) |
 
-The gen4 network alone is far weaker than the search (it loses ~75% to it). The gen9 fit beat stock 60.2% in
-engine self-play but not measurably against Foul Play. Opponent inference is near its ceiling (whole set right
-56–58%, hidden item 82–88%, move 79–80%, ability 96–97%).
+Opponent inference is near its ceiling (whole set right 56–58%, hidden item 82–88%, move 79–80%, ability
+96–97%). The gen9 fit beat stock 60.2% in engine self-play but not measurably against Foul Play.
 
-**Tried, no gain — don't retry as is:** 8 determinizations instead of 4; root PUCT on the prior (`--c-puct`);
-regret matching in the tree (`--rm-gamma`); Bayesian root game (`--root-game max`; `sample` is −13 points);
-prior weight 0.5 / 1.0; one-turn value lookahead (`--value-weight`); luck-adjusted fit targets (raw outcomes are
-as good); patched vs stock engine (correctness fix, neutral); PPO 400M → 600M and +40M steps at the learning-rate
-floor; boosted embedding learning (`--embedding-lr-mult`); one round of expert iteration (9k battles); oracle
-labels from the same engine (side with the search, cannot judge the network). The 0.25 network prior does help
-(+3.8 ± 3.5 vs none, 800 games).
+**Networks (2026-11-09).** These come from the network-first campaign; its code lives on the `ws/*` branches (not
+merged yet), and its state and handoffs are in `.orchestra/`. Raw networks at temperature 0.5:
+| | result |
+|---|---|
+| gen4, v2 network @17M steps vs the old v1 network @46M | 56.9% ± 2.9% (1008 games) |
+| gen9, v1-style BC vs v2 BC (P1), same human data | 22.4% ± 2.4% (1008 games) |
+| gen9, P1 (v2 BC on ≥1900-rated replays) vs our gen9 search / vs Foul Play | 31.0% ± 4.3% / 33.8% ± 4.7% |
+| gen9, P1 + 13M RL steps (G9p) vs our gen9 search | 35.8% ± 4.8% |
+The old gen4 v1 network alone scores 46.2% ± 3.8% vs Foul Play (MissingNo.Zero's raw net: 61.6%).
+
+**Tried, no gain — don't retry as is:**
+- **Search:** 8 determinizations instead of 4; root PUCT on the prior (`--c-puct`); regret matching in the tree
+  (`--rm-gamma`); Bayesian root game (`--root-game max`; `sample` is −13 points); prior weight 0.5 / 1.0; one-turn
+  value lookahead (`--value-weight`); a G9p prior in the gen9 search (51.5% ± 4.5% vs none).
+- **Leaf evaluation and engine:** luck-adjusted fit targets (raw outcomes are as good); patched vs stock engine
+  (a correctness fix, neutral).
+- **v1 network training:** PPO 400M → 600M and +40M steps at the learning-rate floor; constant lr 3·10⁻⁵ from 600M
+  (worse); boosted embedding learning (`--embedding-lr-mult`); one round of expert iteration (9k battles); SWA of
+  late checkpoints; direct weight edits (weight-space programming).
+- **Search labels as BC targets** (4 × 500 ms search, 108k decisions): 34.9% ± 2.8% vs human BC.
+- **PPO settings:** bf16 autocast (broke SB3 PPO); lr 2·10⁻⁴ for v2 (degraded after 7.5M).
+- **Judging networks:** oracle labels from the same engine side with the search, so they cannot judge the network.
+
+The 0.25 network prior does help the gen4 search (+3.8 ± 3.5 vs none, 800 games).
 
 ## Roadmap
-1. **A strong network (the main lever).** Likely gaps vs Jaxcalibur, by expected value: damage calculations as
-   inputs (per pair of mons; ours gets only power, type effectiveness and stats); auxiliary heads predicting the
-   opponent's hidden sets and next action; ~5× more games and a bigger model (8.5M vs our 3.5M); a learning-rate
-   schedule that does not decay to ~2·10⁻⁶ (ours did by 400M steps, so the "plateau" may be no learning).
-   A gen9 network needs tera actions (poke-env actions 22–25). Measure every network against our search head to
-   head (target: beat it) and against Foul Play (target in gen9: ~75%, Jaxcalibur's level by Elo).
-   Undecided: gen9 first (where the bar is) or gen4 (existing baseline network).
-2. **A faster training environment:** self-play inside poke-engine (Rust) with a partial-observation encoder
-   instead of Showdown servers (~2k steps/s now). Worth it once the network shows it responds to data.
-3. **Network in the search:** the network as prior and leaf value inside the tree needs Rust-side inference
-   (Python evaluates ~1.3k states/s per thread vs the engine's ~430k iterations/s); then expert iteration at scale.
+1. **A strong network (the main lever).** v2 is built: damage inputs, aux heads for opponent sets and next action,
+   small-init embeddings, gen9 tera actions. Two gen9 RL runs are in progress, one from scratch and one from human
+   BC. Next: grow the raw network past our search head to head, then past Foul Play (gen9 target ~75%).
+2. **Network in the search:** prior and leaf value inside the tree. The gap to the engine is network FLOPs, not
+   Python (`.orchestra/SPEEDUPS.md`). Prototype in Python first; a batched-leaf Rust tree only if it gains on
+   Showdown.
+3. **Stronger distillation targets:** a longer or network-guided search as teacher, with sharpened targets.
 4. **Leaf evaluation, round 2:** refit on self-play played with the fitted evaluation; TreeStrap-style targets
    from deeper search; recheck the leaf scale whenever the time per move changes. Engine-only head-to-heads
    over-predict Showdown gains (gen9: 60% in self-play, +1.6 ± 3.4 vs Foul Play): confirm on Showdown.
@@ -46,8 +58,9 @@ labels from the same engine (side with the search, cannot judge the network). Th
 6. **Search fidelity left:** locked moves always last 3 turns (gen4: 2–3); a taunt applied after its target moved
    misses that turn; encore needs the engine's last-move tracking; damage evidence ignores crits, stat stages and
    screens; gen9 team sampling lacks the Fire / Freeze-Dry weakness caps.
-7. **A public rating:** the official ladder is closed to us (both accounts flagged as bots, datacenter IPs locked);
-   the PokéAgent Challenge ladder has no random battles.
+7. **A public rating:** Showdown's bot registry (2026-10-13) and opt-in bot matchmaking (2026-10-20) let a
+   registered bot ladder against other bots and opted-in humans, from home IPs only. pkmn.bot is a bot-only
+   ladder with a gen9 random-battles table. Both need the owner's logins.
 
 ## Layout
 | | |
