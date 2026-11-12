@@ -37,10 +37,10 @@ def test_js_encoder_matches_poke_env(fmt):
     assert parity.report(st, fmt), st.examples
 
 
-NETV2 = ROOT.parent / "ws-netv2" / "src" / "porygon" / "v2" / "encoder.py"
+NETV2 = ROOT / "src" / "porygon" / "v2" / "encoder.py"
 
 
-@pytest.mark.skipif(not _have_showdown() or not NETV2.exists(), reason="needs node, Showdown and the ws-netv2 worktree")
+@pytest.mark.skipif(not _have_showdown() or not NETV2.exists(), reason="needs node, Showdown and porygon.v2")
 @pytest.mark.parametrize("fmt", ["gen4randombattle", "gen9randombattle"])
 def test_js_encoder_v2_matches_reference(fmt):
     r = subprocess.run([sys.executable, str(ROOT / "scripts/fastenv/parity_v2.py"), "--record", "3", fmt,

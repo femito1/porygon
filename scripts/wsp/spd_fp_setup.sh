@@ -17,7 +17,7 @@ ln -sfn "$W/src" "$R/src"
 for f in vs_foulplay.py analyze_benchmark.py stop_servers.sh build_eval_server.sh slurm_foulplay.sbatch; do
   ln -sfn "$W/scripts/$f" "$R/scripts/$f"
 done
-sed 's#^(cd "$PS" \&\& node build).*#: \# spd test copy: no build in the shared .showdown-eval#' \
+sed 's#^if .*(cd "$PS" \&\& node build); fi$#: \# spd test copy: no build in the shared .showdown-eval#' \
   "$W/scripts/start_servers.sh" > "$R/scripts/start_servers.sh"
 chmod +x "$R/scripts/start_servers.sh"
 grep -q "spd test copy" "$R/scripts/start_servers.sh" || { echo "start_servers.sh changed: no build line removed" >&2; exit 1; }

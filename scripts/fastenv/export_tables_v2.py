@@ -2,7 +2,7 @@
 reference implementation (porygon.v2, branch ws/netv2, read-only), so the set posterior and every id are
 bit-identical to `porygon.v2.encoder.encode` / `aux_targets`.
 
-    python scripts/fastenv/export_tables_v2.py [--netv2 PATH/TO/ws-netv2/src]   # writes fastenv/js/tables/*_v2.json
+    python scripts/fastenv/export_tables_v2.py [--netv2 PATH/TO/src]   # writes fastenv/js/tables/*_v2.json
 
 Outputs (fastenv/js/tables/):
   spec_v2.json        SPEC_VERSION, fields(gen) / aux_fields(gen) as [name, dtype, shape] (spec order), MON_NUM,
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-NETV2_SRC = ROOT.parent / "ws-netv2" / "src"
+NETV2_SRC = ROOT / "src"
 OUT = ROOT / "fastenv" / "js" / "tables"
 DT = {"float32": "f32", "int32": "i32", "uint32": "u32", "int16": "i16", "uint16": "u16", "uint8": "u8",
       "int8": "i8"}

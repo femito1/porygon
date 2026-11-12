@@ -30,9 +30,9 @@ def block(run: Path, arm: int, j: int, outcomes: list[tuple[float, float]], name
 
 
 def test_scoring_matches_netv2():
-    nv = Path(__file__).resolve().parents[2] / "ws-netv2" / "src"
+    nv = Path(__file__).resolve().parents[1] / "src"
     if not (nv / "porygon" / "v2" / "evaluate.py").exists():
-        pytest.skip("netv2's porygon.v2 not on this machine")
+        pytest.skip("porygon.v2 not found")
     sys.dont_write_bytecode = True  # read-only: no __pycache__ in netv2's tree
     import porygon
     if str(nv / "porygon") not in porygon.__path__:
