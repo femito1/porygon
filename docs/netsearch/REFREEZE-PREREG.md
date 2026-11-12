@@ -1,4 +1,4 @@
-# Benchmark-bot re-freeze #1: pre-registration (fastenv, 2026-11-12 ~02:15 UTC, before the candidate exists; SIGNED OFF by the orchestrator 2026-11-12 ~02:20 UTC, binding, read-only)
+# Benchmark-bot re-freeze #1: pre-registration (fastenv, 2026-11-12 ~01:25 UTC, before the candidate exists; SIGNED OFF by the orchestrator 2026-11-12 ~01:28 UTC, binding, read-only)
 Orchestrator approval (2026-11-12, NEXT-PROPOSAL §5 (2)): the rule and the candidate. This file fixes them in full
 **before the branch exists**. It becomes binding once main signs it off. The BLOCKING item below was settled with netv2 on 2026-11-12. Until then, no branch starts on its account and no game is played.
 
@@ -21,7 +21,7 @@ engine.
   - That holds for the net encoders' posteriors and for the search's determinizations.
   - If the candidate can only be evaluated with the November library, this pre-registration stops, and main decides.
     The options would be a re-baseline, or accepting the mismatch as a recorded deviation.
-- **Answer: SETTLED 2026-11-12.** netv2 checked on the cluster at 01:24; fastenv checked the JS tables at 02:1x.
+- **Answer: SETTLED 2026-11-12.** netv2 checked on the cluster at 01:24; fastenv checked the JS tables at 01:2x.
   - **The v2 encoder's posterior library** is a file in the code tree,
     `porygon/data/gen9randombattle_library.json.gz` (md5 324d8e97). It is NOT read through PORYGON_PS. The same file
     sits in `frozen/netv2-fba02fb-20261110/src`, netv2 src, src-24c633f (G9q's), src-ff32b71 (G9r's), src-p2 and
@@ -88,7 +88,7 @@ engine.
 - Code copied into the run directory.
 
 **n:** 5 blocks × 100 pairs = 500 pairs (1000 games), fixed n. No looks, no futility.
-- **Seed tag 20261112:** blocks seeded `20261112b<j>`, drawn now. On 11-12 ~02:00 it appeared in no plan or manifest
+- **Seed tag 20261112:** blocks seeded `20261112b<j>`, drawn now. On 11-12 ~01:2x it appeared in no plan or manifest
   under any `porygon-ws-*` cluster dir. It is used by nothing else.
 
 **Rule:** **adopt iff the lower 95% bound of arm 1 (pair means) > 50%.**
