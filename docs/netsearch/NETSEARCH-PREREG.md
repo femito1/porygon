@@ -121,3 +121,27 @@ pairs (tag 20261111). Foul Play config as the gen9 benchmark.
 **Decisions** as the design §6: 3a and 3b succeed → the hybrid becomes the benchmark bot and V3 is next; 3a only →
 report the vs-search gain, no Foul Play-specific tuning; 3a fails → no headline claim, override analysis, V2 / V6 at
 Stage 2.
+
+## Results (fixed n, as registered; written 2026-11-12 by fastenv)
+**Stage 2** (943438, 6.3 h, not void): arm 1 δ 0.0212 53.25% ± 4.56%, arm 2 δ 0.0261 48.75% ± 4.47%, arm 3 δ 0.0358
+51.5% ± 4.44% (200 pairs each) ⇒ δ\* = 0.0212, GO (≥ 51.5%).
+
+**Stage 3a + 3c** (985078, 9.6 h, not void; `$C/runs/netsearch-stage3ac-20261110-171632-985078/result.txt`).
+- 3a H(0.0212) vs pure search: **55.0% ± 3.0% [52.0, 58.0]**, 500 pairs; overrides 23.4% ⇒ **Q1 SUCCESS**.
+- 3c raw T 0.5 vs pure search: 48.05% ± 2.96%, 500 pairs.
+- Q3 paired 3a − 3c: **+7.0 ± 4.2 points** (500 common pairs).
+
+**Stage 3b** (1026613, 2026-11-11 03:02–19:37Z, 16.6 h; `$C/runs/netsearch-stage3b-20261111-025822-1026613/result.txt`).
+- Not void: no HARNESS_FAIL; 10/10 blocks with 100 full pairs (0 incomplete); our fallbacks 6/34,116 = 0.02% (arm 1)
+  and 0.01% (arm 2); 0 battle timeouts, 0 no-accepts, 0 re-challenges in every block; Foul Play restarts 1 in 10
+  blocks (a2b1 instance x0, a Foul Play ZeroDivisionError; reported, not voiding).
+- Arm 1 H(0.0212) vs Foul Play gen9: **56.2% ± 2.8% [53.4, 59.0]**, 500 pairs (won both 137, split 288, lost both 75);
+  overrides 22.0% of 34,116 searched decisions; 7.98 h.
+- Arm 2 pure gen9 search vs Foul Play gen9: **51.6% ± 2.8% [48.8, 54.4]**, 500 pairs (110 / 296 / 94); 8.46 h.
+- **Q2:** `netsearch_slot.py paired RUN 1 2`: H − pure search **+4.6 ± 3.9 points [+0.7, +8.5]** on 500 common team
+  pairs (unmatched 0) ⇒ the CI excludes 0 ⇒ **Q2 SUCCESS**.
+- Context only (not a test): H vs Foul Play 56.2% next to H vs pure search 55.0% (3a).
+
+**Decision (design §6, 3a and 3b succeed):** "network + search beats our search and Foul Play by more than our
+search does". The hybrid H(0.0212) with G9p-cd@104.71M becomes the gen9 benchmark bot; V3 (net value at the leaves,
+Python first) is next, with its own pre-registration (draft: `NEXT-PROPOSAL.md`).
