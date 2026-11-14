@@ -27,8 +27,26 @@ for i in $(seq 1 60); do
 done
 touch "$D/.t0"; st "no eval running: netv2_check_at.sh g4r1bf R1bF 300000000 (v1@46M | v1@500M) 1000 --gen 4 --seed 9600"
 cp "$C/scripts/netv2_check_at.sh" "/tmp/nv2-check300-$$.sh"
+# hang guard (attempt 1, 15:22-15:44: all 8 shards timed out in the websocket handshake and their evaluate processes
+# hung with 0 games, the trainer paused): an h2h of this attempt with 0 results after 12 min => kill this INLINE (its
+# bash, then its evaluate processes, by PID; the trainer relaunches), attempt void
+( while sleep 60; do
+    [ -e "$D/.guard-stop" ] && exit 0
+    for h in "$C"/runs/h2h-*-"$J"; do
+      [ -d "$h" ] && [ "$h" -nt "$D/.t0" ] && [ ! -f "$h/result.txt" ] || continue
+      age=$(( $(date +%s) - $(stat -c %Y "$h/manifest.txt" 2>/dev/null || date +%s) ))
+      n=$(cat "$h"/shard-*/results.jsonl 2>/dev/null | wc -l)
+      if [ "$age" -ge 720 ] && [ "$n" = 0 ]; then
+        echo "$(date -u +%FT%T) HANG GUARD: $h has 0 games after $((age / 60)) min ($(grep -l handshake "$h"/shard-*/evaluate.log 2>/dev/null | wc -l) shards with handshake errors): killing the INLINE" | tee -a "$D/STATUS"
+        for p in $(pgrep -u fr1226 -f "INLINE_CMD.running" || true); do tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q "runs/g4r1bf/INLINE_CMD.running" && kill -TERM "$p"; done
+        for p in $(pgrep -u fr1226 -f "porygon.v2.evaluate .*check-R1bF-ckpt_00300027150" || true); do kill -TERM "$p"; done
+        touch "$D/.hung"; exit 0
+      fi
+    done
+  done ) & guard=$!
 NV2_POLL=60 bash "/tmp/nv2-check300-$$.sh" g4r1bf R1bF 300000000 "$V46,temperature=0.5|$V500,temperature=0.5" 1000 --gen 4 --seed 9600 > "$D/check_at.log" 2>&1
-rc=$?; rm -f "/tmp/nv2-check300-$$.sh"
+rc=$?; rm -f "/tmp/nv2-check300-$$.sh"; touch "$D/.guard-stop"; kill "$guard" 2>/dev/null
+[ ! -e "$D/.hung" ] || fail "attempt void: an h2h hung with 0 games (hang guard; R1b-F relaunched)"
 st "check_at exit $rc: $(grep -E 'checkpoint|relaunched' "$D/check_at.log" | tr '\n' ' ' | cut -c1-300)"
 [ "$rc" = 0 ] || fail "netv2_check_at.sh exited $rc (log $D/check_at.log)"
 r46=""; r500=""
