@@ -138,11 +138,11 @@ def read_plan(run: Path) -> dict:
 
 
 def spec_margin(spec: str) -> float:
-    """The arm's margin: netsearch specs carry margin=M; any other player (a raw net) is margin +inf."""
-    if not spec.startswith("netsearch:"):
+    """The arm's margin: netsearch / lookahead specs carry margin=M; any other player (a raw net) is margin +inf."""
+    if not spec.startswith(("netsearch:", "lookahead:")):
         return math.inf
     m = re.search(r",margin=([^,]+)", spec)
-    return float(m.group(1)) if m else 0.03  # NetSearchPlayer's default
+    return float(m.group(1)) if m else 0.03  # NetSearchPlayer's and LookaheadPlayer's default
 
 
 # ---------------------------------------------------------------- look / report
@@ -184,7 +184,9 @@ def report(run: Path, go: float, tie: float, void_fallbacks: float) -> dict:
     arms = []
     for k, spec in enumerate(plan["ARMS"], 1):
         s = arm_stats(run, k)
-        s |= {"spec": spec, "margin": spec_margin(spec), "stopped": (run / f"arm-{k}" / "STOPPED").exists()}
+        seq = run / f"arm-{k}" / "SEQ_DECISION"
+        s |= {"spec": spec, "margin": spec_margin(spec), "stopped": (run / f"arm-{k}" / "STOPPED").exists(),
+              "seq_decision": seq.read_text().strip() if seq.exists() else None}
         dec_a, dec_b = s["stats_a"].get("decisions", 0), s["stats_b"].get("decisions", 0)
         s["fallback_rate_a"] = s["stats_a"].get("fallbacks", 0) / dec_a if dec_a else None
         s["fallback_rate_b"] = s["stats_b"].get("fallbacks", 0) / dec_b if dec_b else None
@@ -209,7 +211,8 @@ def format_report(r: dict) -> str:
             wr = "no pairs"
         ov = f"{a['override_rate']:.1%}" if a["override_rate"] is not None else "-"
         fb = "/".join("-" if x is None else f"{x:.2%}" for x in (a["fallback_rate_a"], a["fallback_rate_b"]))
-        flags = (" STOPPED (futility)" if a["stopped"] else "") + (" VOID (fallbacks)" if a["void"] else "")
+        stop = f" STOPPED (sequential: {a['seq_decision']})" if a.get("seq_decision") else " STOPPED (futility)"
+        flags = (stop if a["stopped"] else "") + (" VOID (fallbacks)" if a["void"] else "")
         lines.append(f"  arm {a['arm']} margin {a['margin']}: {wr} ({a['pairs']} pairs, {a['games']} games, "
                      f"{a['blocks']} blocks; won both {a['won_both']}, split {a['split']}, lost both "
                      f"{a['lost_both']}; incomplete {a['incomplete_pairs']}); overrides {ov} of "
