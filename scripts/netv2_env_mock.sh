@@ -974,6 +974,57 @@ o=$(q2src 1300100); check 57g "--lr 3.5e-5 .*--kl-anchor-coef 0.1 .*--resume $N/
 for f in HOLD PARKED; do q2tree; touch "$N/runs/g9/$f"; o=$(q2src 1300100); check "57h-$f" "^RC=0\|$" "$o"; yes_ "57h2-$f" '[ ! -e "$N/runs/g9q2/G9Q2_STARTED" ] && [ "$(nsb)" = 0 ]'; done
 # 57i: the other runs never see g9q2: r1 (G9q on the A30) and g4r1bf restarts unchanged by MODE g9 = g9q2 (argsdiff too)
 fi
+# 58 (2026-11-15 20:34, orchestrator): R1b-F's stale follow-up #1 (at 360M it would resume runs/r1/restart-best-7.5M.pt
+# and park the pool > 7.5M) disarmed by runs/r1/FU.started = "0 <time> orchestrator: ..." (first field 0). A restart in
+# place of the live job (1137378, wrapper, watchdog already run): an anchor-drop trip -> runs/g4r1bf/HOLD (nv2_second_trip),
+# the trip file renamed .second-*, no FOLLOWUP1 / FU.reason, no 7.5M resume, the pool kept, TRAIN_ARGS identical to the
+# no-trip restart; after rm HOLD the same config continues; G9q (r1 MODE g9q) never reads runs/r1/FU.started.
+g4tree; L=$ROOTM/local-T4; mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/R1bF/final_model.pt"; touch "$L/.nv2-watchdog"
+base=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+check 58a "--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$base"
+echo "0 2026-11-15T20:34:00 orchestrator: follow-up #1 disarmed (stale at 360M)" > "$N/runs/r1/FU.started"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58b '[ "$o" = "$base" ] && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+echo "eval score 74.0% < best 84.5% - 10% for 2 evals" > "$L/run/R1bF/GUARD_TRIPPED"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58c '[ "$o" = "$base" ]'
+yes_ 58d '[ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$L/run/R1bF/GUARD_TRIPPED" ] && ls "$L"/run/R1bF/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+yes_ 58e '[ ! -e "$N/runs/r1/FOLLOWUP1" ] && [ ! -e "$N/runs/g4r1bf/FU.reason" ] && [ -f "$L/run/R1bF/pool/00020009055.pt" ] && [ ! -d "$N/runs/r1/pool-before-FU" ] && grep -q "^0 2026-11-15T20:34:00 orchestrator" "$N/runs/r1/FU.started"'
+checkno 58f "ent-coef|restart-best-7.5M|zero-avoid" "$o"; check 58g "second guard trip of R1bF after its fallback: HOLD" "$(cat "$L/run/train.log")"
+rm -f "$N/runs/g4r1bf/HOLD"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58h '[ "$o" = "$base" ] && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+wdtree; o1=$(wdsrc r1 1300500 ws-netv2-r1); wdtree; echo "0 2026-11-15T20:34:00 orchestrator" > "$N/runs/r1/FU.started"; o2=$(wdsrc r1 1300500 ws-netv2-r1)
+yes_ 58i '[ "$o1" = "$o2" ] && [ "${o1#RC=0|TRAIN_ARGS=}" != "$o1" ]'; check 58j "--lr 7e-5 .*--kl-anchor-coef 0.1 " "$o2"; checkno 58k "ent-coef|3.5e-5|kl-anchor-coef 0.3" "$o2"
+rm -f "$N/runs/r1/FU.started"
+if [ -z "${MOCK_SKIP_V16:-}" ]; then
+# 59 (v16, 2026-11-15; runs/g4r1bf/HOLD-PREREG.txt): the R1b-F ROLLBACK hook. runs/g4r1bf/ROLLBACK "PATH STEP MD5" valid
+# -> the first relaunch resumes PATH at --lr 3.5e-5 and parks snapshots > STEP (local + this job's mirror) once; later
+# restarts keep --lr 3.5e-5 from R1b-F's own final; a bad file -> HOLD, the same config; r1 / g9 never see it.
+rbtree() {
+  g4tree; L=$ROOTM/local-T4; mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+  src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/R1bF/final_model.pt"; touch "$L/.nv2-watchdog"
+  echo "0 2026-11-15T20:34:58 orchestrator" > "$N/runs/r1/FU.started"
+  MP=$N/runs/g4r1bf/20261115-175703-1137378/R1bF/pool; mkdir -p "$MP" "$N/runs/g4r1bf-hold1"
+  for x in 00350016623 00360021860 00365000000; do echo "s$x" > "$L/run/R1bF/pool/$x.pt"; echo "s$x" > "$MP/$x.pt"; done
+  RB=$N/runs/g4r1bf-hold1/rollback-00355016707.pt; echo r355 > "$RB"
+}
+rbtree; base=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+check 59a "--lr 7e-5 .*--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$base"
+echo "$RB 355016707 $(md5sum < "$RB" | cut -c1-8)" > "$N/runs/g4r1bf/ROLLBACK"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+yes_ 59b '[ "$o" = "$(sed -e "s# --lr 7e-5 # --lr 3.5e-5 #" -e "s#--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt\$#--guard-anchor-drop 0.0999 --resume $RB#" <<< "$base")" ]'
+checkno 59c "--lr 7e-5|R1bF/final_model.pt" "$o"
+yes_ 59d 'grep -q " $RB 355016707 " "$N/runs/g4r1bf/ROLLBACK.started" && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+yes_ 59e '[ -f "$L/run/R1bF/pool/00350016623.pt" ] && [ -f "$MP/00350016623.pt" ] && [ -f "$L/run/R1bF/pool/00020009055.pt" ] && [ ! -e "$L/run/R1bF/pool/00360021860.pt" ] && [ ! -e "$MP/00365000000.pt" ] && [ -f "$N/runs/g4r1bf/pool-after-rollback/00360021860.pt" ] && [ -f "$N/runs/g4r1bf/pool-after-rollback/00365000000.pt" ]'
+check 59f "R1b-F ROLLBACK \(runs/g4r1bf/ROLLBACK\): resume $RB \(steps 355016707\) at --lr 3.5e-5" "$(cat "$L/run/train.log")"
+echo s370 > "$L/run/R1bF/pool/00370000000.pt"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+yes_ 59g '[ "$o" = "$(sed "s# --lr 7e-5 # --lr 3.5e-5 #" <<< "$base")" ] && [ -f "$L/run/R1bF/pool/00370000000.pt" ]'
+for bad in "md5 $RB 355016707 deadbeef" "step $RB 35501x707 $(md5sum < "$RB" | cut -c1-8)" "path $N/nope.pt 355016707 deadbeef"; do
+  rbtree; read -r w x <<< "$bad"; echo "$x" > "$N/runs/g4r1bf/ROLLBACK"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+  yes_ "59h-$w" '[ "$o" = "$base" ] && [ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$N/runs/g4r1bf/ROLLBACK.started" ] && [ -f "$L/run/R1bF/pool/00365000000.pt" ]'
+  check "59i-$w" "R1b-F ROLLBACK refused" "$(cat "$L/run/train.log")"; done
+wdtree; o1=$(wdsrc r1 1300500 ws-netv2-r1); q1=$(wdsrc g9 1300501 ws-netv2-g9); wdtree; mkdir -p "$N/runs/g4r1bf"; echo "/x 355016707 deadbeef" > "$N/runs/g4r1bf/ROLLBACK"; touch "$N/runs/g4r1bf/ROLLBACK.started"
+o2=$(wdsrc r1 1300500 ws-netv2-r1); q2=$(wdsrc g9 1300501 ws-netv2-g9); yes_ 59j '[ "$o1" = "$o2" ] && [ "$q1" = "$q2" ] && [ "${o1#RC=0|TRAIN_ARGS=}" != "$o1" ]'
+rm -f "$N/runs/g4r1bf/ROLLBACK" "$N/runs/g4r1bf/ROLLBACK.started" "$N/runs/r1/FU.started"
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
