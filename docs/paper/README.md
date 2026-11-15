@@ -34,14 +34,19 @@ could be claimed as new; every item below needs its own pre-registered tests bef
    more than δ = 0.0212 in root Q; ~22% of moves) beat pure search 55.0% ± 3.0% and Foul Play 56.2% ± 2.8%, against
    pure search's 51.6% ± 2.8% on the same team pairs: paired +4.6 ± 3.9 points (1000 games per arm, fixed n,
    `docs/netsearch/NETSEARCH-PREREG.md`). A margin rule between a learned policy and search is not ours
-   (MissingNo.Zero); the target is 65–75% vs Foul Play, so this is a step, not a headline.
+   (MissingNo.Zero); the target is 65–75% vs Foul Play, so this is a step, not a headline. Re-freezing it on
+   G9q-cd@305M was not adopted (50.7% ± 2.8% vs the current hybrid), and the raw G9q-cd@605M now scores 58.8% ±
+   2.9% on its own (1000 games), so the hybrid's value over its raw net is untested. A raw net beating Foul Play
+   is not new either: MissingNo.Zero's scores 66.7% in gen9.
 2. **Human data behind a self-play init.** Human-init RL beating scratch is not novel in general (AlphaStar, VPT,
    VGC-Bench in Pokémon), nor is BC strength rising with data. The narrow claim may be new: with the same PPO recipe
    and equal steps, the run from the init cloned from more human data (G9q from P3, 7.05M decisions) beat the run
    from less (G9p from P1, ≈ 0.9M): 61.1% [55.8, 65.9] at 25M and 58.2% [53.8, 62.3] at 50M steps. It is confounded and unfinished:
-   - P3 is also all ≥ 1900-rated, so it is "more and better data" until the size-vs-quality arm (U7: as many
-     decisions, rated ≥ 1500) reports (pending);
-   - one RL seed per arm; the KL anchor to each init lasts until 50M;
+   - P3 is also all ≥ 1900-rated, so it is "more and better data". U7 separates the two at the BC level: as many
+     decisions as P3 but rated ≥ 1500, it lost 47.2% ± 1.2% to P3 (quality matters at equal size; confound: U7's
+     games are older, median 2026-06-11 vs 07-05); no RL run starts from U7;
+   - one RL seed per arm: the claim needs the second G9q seed's step-matched 25M / 50M readings (G9q2, running);
+     the KL anchor to each init lasts until 50M;
    - it may not persist: G9q@112.5M vs G9p@338.6M is 49.4% ± 2.0%, and later step-matched points are not tested.
    Do not claim that human data is necessary (Jaxcalibur and MissingNo.Zero use none) or that the gap persists.
 3. **Inputlog re-simulation.** The technique is not novel (Showdown's owner described it in 2022; Metagross and
