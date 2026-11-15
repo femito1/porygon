@@ -4,6 +4,7 @@
     python -m porygon.play runs/<run>/best_model.zip --username NAME --ladder 50 --search   # porygon.search
     python -m porygon.play runs/<run>/best_model.zip --username NAME --password PASS --accept 5
     python -m porygon.play runs/<run>/best_model.zip --local --challenge YourName   # local server
+    python -m porygon.play runs/play/R1bF-300M.pt --username NAME --accept 3 --from FRIEND   # a v2 net (raw, T 0.5)
 """
 
 import argparse
@@ -37,8 +38,23 @@ class LoggingPlayer(Logging, PolicyPlayer):
 
 
 async def run(args: argparse.Namespace) -> None:
-    policy = load_policy(args.model)
-    if args.search:
+    from porygon.v2.evaluate import checkpoint_kind
+
+    if checkpoint_kind(args.model) == "v2":  # v2 Net (raw policy at --temperature)
+        if args.search:
+            raise SystemExit("--search takes a v1 model; v2 nets play raw here")
+        from porygon.v2.model import load
+        from porygon.v2.player import NetPlayer
+
+        class LoggingNetPlayer(Logging, NetPlayer):
+            pass
+
+        policy = load(args.model, device="cpu").eval()
+        if int(policy.gen) != int(args.format[3]):
+            raise SystemExit(f"the net is gen{policy.gen}, the format is {args.format}")
+        cls, extra = LoggingNetPlayer, dict(temperature=args.temperature)
+    elif args.search:
+        policy = load_policy(args.model)
         from porygon.search import SearchPlayer  # needs the gen4 poke-engine build
 
         class LoggingSearchPlayer(Logging, SearchPlayer):
@@ -46,6 +62,7 @@ async def run(args: argparse.Namespace) -> None:
 
         cls, extra = LoggingSearchPlayer, dict(ms=args.ms, samples=args.samples, prior_weight=args.prior_weight)
     else:
+        policy = load_policy(args.model)
         cls, extra = LoggingPlayer, {}
     player = cls(
         policy,
@@ -61,7 +78,7 @@ async def run(args: argparse.Namespace) -> None:
     elif args.challenge:
         await player.send_challenges(args.challenge, n_challenges=args.n)
     else:
-        await player.accept_challenges(None, args.accept)
+        await player.accept_challenges(args.from_user, args.accept)
     print(f"final record: {player.n_won_battles}-{player.n_lost_battles}")
     if args.search:
         print(f"search stats: {player.stats}")
@@ -78,6 +95,8 @@ def main():
     mode.add_argument("--ladder", type=int, metavar="N", help="play N ladder games")
     mode.add_argument("--accept", type=int, metavar="N", help="accept N challenges from anyone")
     mode.add_argument("--challenge", metavar="USER", help="challenge USER --n times")
+    p.add_argument("--from", dest="from_user", metavar="USER", help="with --accept: only accept challenges from USER")
+    p.add_argument("--temperature", type=float, default=0.5, help="v2 nets: sampling temperature (0.5 = how we evaluate)")
     p.add_argument("--n", type=int, default=1)
     p.add_argument("--concurrency", type=int, default=1, help="simultaneous battles")
     p.add_argument("--search", action="store_true", help="play with SearchPlayer (network-guided MCTS)")
