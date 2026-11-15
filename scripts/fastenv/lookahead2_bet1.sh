@@ -27,7 +27,7 @@ CODE=$S/code
 NET=$C/nets/g9q-cd-605.04M.pt; NET_SHA=b7957be4c74dd37fc41892706c250d47f6a110558621e7f813e0ad9a9124001b
 DESIGN_SRC=$CODE/scripts/fastenv/plans/seq-la2-bet1.json; DESIGN_MD5=f0911c195e850d1e11ea11359c0b0100
 FROZEN=$C/frozen/netv2-fba02fb-20261110
-MARGIN=@MARGIN@
+MARGIN=0.01  # delta* by the pre-registered rule: lookahead2/study-20261115/bench-all.txt (pooled 1,403 positions)
 WORLDS=8
 A="lookahead:$NET,margin=$MARGIN,temperature=0.5,worlds=$WORLDS,workers=10,leaf_device=cuda"
 B="$NET,temperature=0.5"
