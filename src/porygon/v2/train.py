@@ -465,7 +465,7 @@ HEADS_ONLY = ("value_head.", "aux_")  # what trains during --critic-warmup-steps
 
 def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio: bool, anchor: Net | None = None,
                anchor_coef: float = 0.0, heads_only: bool = False,
-               distill: DistillSet | None = None) -> dict[str, float]:
+               distill: DistillSet | None = None, ent_coef: float | None = None) -> dict[str, float]:
     keys = model_keys(net.gen) + ["drop_seed"]
     tensors = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in data.items()}
     n = len(data["action"])
@@ -545,7 +545,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
                 if heads_only:
                     total = args.vf_coef * L["vf"] + args.aux_coef * aux
                 else:
-                    total = (L["pg"] - args.ent_coef * L["ent"] + args.zero_avoid_coef * L["za"]
+                    total = (L["pg"] - (args.ent_coef if ent_coef is None else ent_coef) * L["ent"] + args.zero_avoid_coef * L["za"]
                              + args.vf_coef * L["vf"] + args.aux_coef * aux + anchor_coef * L["kla"])
                 (total * w).backward()
                 for k in ("pg", "ent", "za", "vf", "kl", "clip", "kla", "ptop"):
@@ -575,6 +575,8 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
     st = m.means()
     if anchor is not None:
         st["perf/kl_anchor_coef"] = anchor_coef
+    if ent_coef is not None:  # --ent-schedule linear only (the default path logs nothing new)
+        st["perf/ent_coef"] = ent_coef
     st["perf/heads_only"] = float(heads_only)
     v, ret = data["value"], data["ret"]
     var = ret.var()
@@ -665,6 +667,12 @@ def parse_args(argv=None):
     a("--decoupled", action="store_true", help="decoupled PPO: clip vs the update-start policy, truncated IS weights")
     a("--decoupled-rho", type=float, default=2.0, help="decoupled PPO: truncation of pi_prox / pi_behaviour")
     a("--ent-coef", type=float, default=0.01)
+    a("--ent-schedule", choices=("const", "linear"), default="const",
+      help="const: --ent-coef throughout (default); linear: --ent-coef at --ent-start, linearly to --ent-final at "
+           "--ent-start + --ent-horizon (absolute env steps, independent of --total-steps), flat after")
+    a("--ent-final", type=float, default=None, help="--ent-schedule linear: the coefficient at the end of the ramp")
+    a("--ent-start", type=int, default=0, help="--ent-schedule linear: the ramp's first absolute env step")
+    a("--ent-horizon", type=int, default=None, help="--ent-schedule linear: the ramp's length in env steps")
     a("--zero-avoid-coef", type=float, default=0.003)
     a("--vf-coef", type=float, default=0.5)
     a("--aux-coef", type=float, default=0.1)
@@ -739,6 +747,8 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.lr_schedule == "power" and (args.lr_horizon is None or args.lr_horizon <= args.warmup_steps):
         p.error("--lr-schedule power needs --lr-horizon > --warmup-steps")
+    if args.ent_schedule == "linear" and (args.ent_final is None or args.ent_horizon is None or args.ent_horizon <= 0):
+        p.error("--ent-schedule linear needs --ent-final and --ent-horizon > 0")
     return args
 
 
@@ -750,7 +760,19 @@ def lr_schedule_desc(args) -> str:
     s += f", lr {args.lr:g}, warm-up {args.warmup_steps}"
     if args.cooldown_start is not None:
         s += f", cosine cooldown {args.cooldown_start} -> {args.total_steps} to x{args.final_lr_frac:g}"
+    if getattr(args, "ent_schedule", "const") == "linear":
+        s += (f"; ent schedule linear {args.ent_coef:g} -> {args.ent_final:g} over [{args.ent_start}, "
+              f"{args.ent_start + args.ent_horizon}]")
     return s
+
+
+def ent_at(args, step: int) -> float:
+    """The entropy coefficient at absolute env step `step`: --ent-coef (const, the default), or the --ent-schedule
+    linear ramp from --ent-coef at --ent-start to --ent-final at --ent-start + --ent-horizon, flat outside it."""
+    if args.ent_schedule != "linear":
+        return args.ent_coef
+    x = min(1.0, max(0.0, (step - args.ent_start) / max(1, args.ent_horizon)))
+    return args.ent_coef + (args.ent_final - args.ent_coef) * x
 
 
 def lr_at(args, step: int) -> float:
@@ -1435,7 +1457,8 @@ class Trainer:
                 heads_only = c["steps"] < a.critic_warmup_steps
                 st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure,
                                 anchor=self.anchor if use_anchor else None, anchor_coef=beta, heads_only=heads_only,
-                                distill=self.distill)
+                                distill=self.distill,
+                                ent_coef=ent_at(a, c["steps"]) if a.ent_schedule == "linear" else None)
                 if self.ema is not None:
                     self.ema.update(self.net)
                 c["updates"] += 1
