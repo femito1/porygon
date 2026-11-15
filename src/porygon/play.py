@@ -9,6 +9,7 @@
 
 import argparse
 import asyncio
+import logging
 import os
 
 from poke_env import AccountConfiguration, LocalhostServerConfiguration, ShowdownServerConfiguration
@@ -35,6 +36,51 @@ class Logging:
 
 class LoggingPlayer(Logging, PolicyPlayer):
     pass
+
+
+class RefusalWatch(logging.Handler):
+    """Ends a --challenge run when Showdown refuses it: poke-env only logs the popup (user offline, not accepting
+    challenges) or the rejection pm, then waits forever for a battle that never starts."""
+
+    REFUSED = ("was not found", "not accepting challenges", "is blocking challenges", "rejected the challenge",
+               "cancelled the challenge")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, refused: asyncio.Future):
+        super().__init__(logging.INFO)
+        self.loop, self.refused = loop, refused
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if any(s in msg for s in self.REFUSED):
+            text = msg.split("|popup|")[-1].strip() if "|popup|" in msg else msg
+            self.loop.call_soon_threadsafe(lambda: self.refused.done() or self.refused.set_result(text))
+
+
+async def challenge(player, opponent: str, n: int) -> None:
+    loop = asyncio.get_running_loop()
+    refused = loop.create_future()
+    watch = RefusalWatch(loop, refused)
+    log = player.logger  # the ps_client logs through the same per-player logger
+    # rejections arrive as INFO pms: let INFO reach the watch only, keeping poke-env's console handlers as they were
+    shown, kept = log.getEffectiveLevel(), [(h, h.level) for h in log.handlers]
+    for h, lvl in kept:
+        h.setLevel(max(lvl, shown))
+    old_level = log.level
+    log.setLevel(min(shown, logging.INFO))
+    log.addHandler(watch)
+    task = asyncio.ensure_future(player.send_challenges(opponent, n_challenges=n))
+    try:
+        done, _ = await asyncio.wait({task, refused}, return_when=asyncio.FIRST_COMPLETED)
+        if task not in done:
+            task.cancel()
+            print(f"stopped: Showdown refused the challenge to {opponent}: {refused.result()}", flush=True)
+        else:
+            task.result()
+    finally:
+        log.removeHandler(watch)
+        log.setLevel(old_level)
+        for h, lvl in kept:
+            h.setLevel(lvl)
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -76,7 +122,7 @@ async def run(args: argparse.Namespace) -> None:
     if args.ladder:
         await player.ladder(args.ladder)
     elif args.challenge:
-        await player.send_challenges(args.challenge, n_challenges=args.n)
+        await challenge(player, args.challenge, args.n)
     else:
         await player.accept_challenges(args.from_user, args.accept)
     print(f"final record: {player.n_won_battles}-{player.n_lost_battles}")
