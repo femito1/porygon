@@ -1,0 +1,65 @@
+bf16 A/B ON G9q's RECIPE (A40 job 1173274 after G9q2's R50) — PRE-REGISTRATION, FINAL (netv2, 2026-11-15 ~21:30 UTC;
+ORCHESTRATOR DECISION 2026-11-15 ~20:05 (main, under the user's delegation), item 3; written before the deploy, the
+park, any bench step and any game; read-only copy runs/g9qbf/PREREG.txt). PLAN rule: fp32 only for PPO until a bf16
+A/B on v2 passes (TF32 matmuls are already on: torch.set_float32_matmul_precision("high")). The ONE change under test
+is the trainer's bf16 autocast (its default; G9q runs --no-bf16): rollout and opponent forwards and the PPO update.
+
+TRIGGER + ORDER (one cluster-side chain, scripts/netv2_g9qbf/chain.sh, a step of job 1173274; no agent):
+ 0. Waits (<= 40 h) for runs/g9q2/cmp/OVERALL.txt (r--; G9q2's readings, runs/g9q2/PREREG.txt 5d218a36); FAILED if
+    runs/g9q2/chain/FAILED appears or the wait expires.
+ 1. DEPLOY netv2.env v17 (= the live v16 + MODE g9qbf + the park guards below; laptop mocks: env, job, argsdiff over
+    every mode) only if: OVERALL.txt exists; the live netv2.env md5 is the pinned predecessor's; the staged r-- copy
+    $C/netv2.env.v17-g9qbf has its pinned md5 and passes bash -n; and NO job sits in nv2_pause (no INLINE_CMD,
+    INLINE_CMD.running, HOLD or WAIT_FOR in runs/r1, runs/g9, runs/g4r1bf; re-checked every 2 min for <= 6 h, then
+    FAILED). Backup netv2.env.bak-<YYYYmmdd-HHMM>; mv of a .new copy; md5 re-checked.
+ 2. PARK G9q2 (orchestrator PLACEMENT decision, logged in runs/g9q2/notes.log; not a rule deviation): ONE INLINE_CMD in
+    runs/g9 (restart flag + ONE SIGINT to G9q2's trainer, outside an async eval): G9q2's just-saved lineage dir +
+    guard state -> runs/g9q2-parked/ (cmp-verified copy, net counts, MD5SUMS, final_model.pt loads with optimizer +
+    counters at the saved step), PARKED.txt; published by mv. v17 then never resumes G9q2 while
+    runs/g9q2-parked/PARKED.txt exists (MODE g9q2 => HOLD round after round, allocation kept). A park failure leaves
+    G9q2 training (nothing else happens; FAILED).
+ 3. SPEED MICROBENCH (same INLINE, the A40 to itself): FORK POINT = G9q's newest mirrored checkpoint at that time
+    (newest runs/r1/*/G9q/checkpoints/ckpt_<S0>.pt), copied r-- to runs/g9qbf/fork-point-<S0>.pt (md5 in
+    runs/g9qbf/FORK_POINT). Its pool = that mirrored G9q dir's pool snapshots <= S0 + pool/frozen (P3 + best-* <= S0) +
+    best / ema, staged once in the fork's lineage dir. Two trainer runs from the fork point, ONE after the other, bf16
+    first then fp32 (a warm-cache order effect can only favour fp32): G9q2's live trainer argv (= G9q's recipe on this
+    A40: 8 workers, --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200, src-24c633f wrapper, PORYGON_PS
+    ps-2026-11) without --seed, without --no-bf16 for the bf16 arm, own run / pool dirs (pool = hard links of the staged
+    pool), --resume <fork point>, --total-steps S0 + 1,100,000 (~26 updates), no evals / snapshots / checkpoints
+    (--eval-every --snapshot-every --checkpoint-every 1e9), --max-hours 0.75. Per arm: every update's sps (whole
+    cycle), collect time (steps / collect_sps) and update time (upd_s); the first 3 updates are warm-up; >= 20 measured
+    updates per arm or the bench FAILS.
+    READING: GO iff median sps(bf16) >= 1.15 x median sps(fp32) over the measured updates; else SKIP. Output
+    runs/g9qbf-bench/RESULTS.txt (r--; medians, means, per-arm collect / update times, the ratio).
+    SKIP => runs/g9qbf/SKIP.txt with the numbers; MODE stays g9q2 (parked => HOLD, allocation kept); netv2 proposes an
+    entropy-schedule arm pre-registration for the A40 to the orchestrator (one change, a fork of G9q, cooled vs cooled).
+ 4. GO => the same INLINE writes runs/g9/MODE = g9qbf; the job relaunches into the FORK G9qbf: G9q's live recipe on the
+    A40 exactly as G9q2 runs it, ONE change: --no-bf16 dropped (bf16 autocast); unseeded (as G9q's restarts); from the
+    fork point (steps S0, its optimizer + counters), the staged pool, own lineage dir $LOCAL/run/G9qbf (mirrored
+    runs/g9/<job>/G9qbf/), --total-steps as G9q's (1e9; the chain stops it). Guard trips: NO fallback: any trip =>
+    runs/g9qbf/TRIPPED + HOLD (the A/B is then FAIL). The chain checks the first-start argv (= the bf16 arm's argv minus
+    the bench limits) and re-arms runs/g9/restart.
+ 5. READINGS (in-process, scripts/netv2_cmp_step.sh md5 a80c7da2 unmodified; A = G9qbf ("G9s" label), B = G9q ("G9p");
+    both raw T 0.5; duplicate pairs; wsp's sequential design runs/cmp/seq-gain.json f12fec7c: theta0 50 -> theta1 52%,
+    alpha 0.025 per one-sided test, power 0.8, looks every 100 pairs, n_max 2400; both directions on the same pairs;
+    nested pair-id order = record; in job 1173274, 4 workers while the fork trains (only its speed is affected)):
+    R+25, seed 1625251: G9qbf's first pool snapshot >= S0 + 25M vs G9q's first pool snapshot >= S0 + 25M (runs/r1/*/
+      G9q/pool). R+50, seed 1650501: the same at S0 + 50M.
+    The non-inferiority test is "fp32 > bf16" (= cmp_step's "G9p > G9s"): SUCCESS = bf16 worse (fp32's 95% repeated-CI
+    lower bound > 50%, i.e. bf16's upper bound < 50%; power 0.8 against a 2-point bf16 deficit); FUTILITY = a bf16
+    deficit of >= 2 points is unlikely (false-futility rate <= beta = 0.2 if bf16 is truly 2 points worse; >= 0.975 if
+    the two are equal).
+    STOP rule (both readings): "fp32 > bf16" SUCCESS => FAIL: the fork stops (parked), G9q stays fp32.
+    VERDICT (runs/g9qbf/VERDICT.txt, r--): PASS iff R+25 did not stop AND R+50 "fp32 > bf16" FUTILITY (bf16 is
+      non-inferior within ~2 points at 50M) => the orchestrator switches G9q to bf16 at its next restart in place;
+      FAIL iff a STOP or a guard trip (runs/g9qbf/TRIPPED); else INCONCLUSIVE => G9q stays fp32. "bf16 > fp32" runs
+      alongside (information only). Readings runs/g9qbf-r25/READING.txt, runs/g9qbf-r50/READING.txt (r--).
+ 6. After the verdict (or a STOP, or a guard trip, whose HOLD the chain lifts first: its outcome is FAIL by this
+    pre-registration): ONE INLINE_CMD parks G9qbf whole in runs/g9qbf-parked/ (PARKED.txt + MD5SUMS); v17 then HOLDs
+    the A40 round after round (allocation kept) until the orchestrator / user places it. A guard trip during a reading's
+    wait stops that reading (FAIL).
+Seeds 1625251 / 1650501, NEW: grep-checked 2026-11-15 ~20:35 UTC (598 record files under porygon-ws-{netv2,data,
+  fastenv,wsp} depth <= 4, gloria/runs manifests, the laptop's .orchestra/ and worktree scripts/docs): no hit.
+Outputs: runs/g9qbf-chain/{STATUS, FAILED}, runs/g9qbf-bench/{STATUS, RESULTS.txt, arm logs}, runs/g9qbf/{FORK_POINT,
+  fork-point-<S0>.pt, SKIP.txt, TRIPPED, VERDICT.txt}, runs/g9qbf-r25/, runs/g9qbf-r50/, runs/g9q2-parked/,
+  runs/g9qbf-parked/. Every result goes to the orchestrator, numbers re-read from the files.
