@@ -6,6 +6,10 @@ when GPU inference caps a Python or Rust tree at ~2k leaves per decision (V3 I1:
 Distil G9q's value head into a small value network that runs on the CPU inside poke-engine's Rust MCTS, in place of
 `evaluate()`. The search keeps its speed class (≥ 10⁴–10⁵ leaves per decision instead of ~10³) and gains a leaf score
 that knows what the network knows.
+- **Throughput.** With the stock eval, the benchmark search does ≈ 266k iterations per world per 1000 ms on one dove
+  core (study median), i.e. a few µs per leaf. A student costing ~10 µs per leaf keeps ≈ 70-90k leaves/s per core.
+  At the hybrid's 4 × 1000 ms that is ≈ 300k net-valued leaves per decision, about 150× the GPU-bound V3 ceiling
+  (~2k) and about 175× lookahead2's one-ply median (1.7k).
 - Bet 1 tests whether one ply of net-valued leaves helps.
 - Step 2 showed the net predicts outcomes better than `evaluate()`: human games, AUC 0.752 vs 0.718, calibrated
   log-loss 0.579 vs 0.611. The one-turn change carries more outcome information too: log-loss gain 0.015 vs 0.009.
