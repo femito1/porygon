@@ -907,6 +907,66 @@ t56; o=$(PARK_MOCK_STEPS=55600000 SLURM_JOB_ID=810367 NV2_GPU_MIB=15356 src g9 A
 check 56h "--resume $B/run/G9t/final_model.pt$" "$o"; yes_ 56h2 '[ ! -e "$N/runs/g9t-parked" ] && [ ! -e "$N/runs/g9/PARKED" ]'; check 56h3 "park-g9t FAIL .*counters say steps 55600000" "$(cat "$N/runs/g9t/park.log")"
 chmod -R u+w "$N/runs/g9t" 2>/dev/null; rm -f "$ROOTM.parkpy14" "$ROOTM.fixer"; export NV2_PARK_PY=$PK0
 fi
+# 57 (v15, 2026-11-15, USER decision ~14:05; runs/g9q2/PREREG.txt): g9 MODE g9q2 = G9q2 = G9q's recipe (the MODE g9q
+# branch) with only the seed changed (--seed 7272027 on the FIRST start only), lineage G9q2, guard state runs/g9q2,
+# PY = the 24c633f wrapper (missing -> HOLD), cache 72 + cpu 200 on the A16 (512 + stacked-opp on >= 40 GB), November sets
+if [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+q2tree() {  # the 2026-11-15 state: wdtree + G9t parked (runs/g9/PARKED removed at deploy), g9 MODE g9q2, a16 job
+  wdtree; echo g9q2 > "$N/runs/g9/MODE"; mkdir -p "$N/runs/g9t-parked" "$N/runs/g9t"; echo "parked" > "$N/runs/g9t-parked/PARKED.txt"
+  echo "2026-11-13T09:11:25 g9q 0.5 parked 810367" > "$N/runs/g9t/G9T_STARTED"; echo "g9q 0.5" > "$N/runs/g9t/RECIPE"
+}
+q2src() {  # q2src JOB [first]: a source in job JOB (LOCAL wd-JOB; "first" = the job's first source, watchdog included) -> PY|PS|TRAIN_ARGS
+  local job=$1
+  mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log" "$ROOTM/wd-$job/.toucher-G9q2" "$ROOTM/wd-$job/.toucher-G9q"
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=g9; SLURM_JOB_ID=$job; SLURM_JOB_NAME=ws-netv2-g9
+    SLURM_JOB_PARTITION=a16; SLURM_CPUS_ON_NODE=10; SLURM_MEM_PER_NODE=65536; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-15356}
+    source "$ENVF"; echo "PY=${PY:-unset}|PS=${PORYGON_PS:-unset}|child=$(bash -c 'echo ${PORYGON_PS:-nothing}')|TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
+  echo "RC=$?|$(grep '^PY=' "$ROOTM.wdout" || true)"
+}
+QBASE="--no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 $G9QARGS --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16"
+# 57a: first start in a fresh a16 job: G9q's A16 branch args + --seed, from P3; G9Q2_STARTED; one successor queued
+q2tree; W=$ROOTM/wd-1300100; o=$(q2src 1300100)
+check 57a "^RC=0\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|child=$NOV\|TRAIN_ARGS=$QBASE --run-dir $W/run/G9q2 --pool-dir $W/run/G9q2/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --seed 7272027 --resume $P3$" "$o"
+checkno 57a2 "stacked-opp|lr-schedule|gae-lambda|actor-stream|/G9q/|/G9t|/G9r" "$o"
+check 57a3 "^20[0-9T:-]+ seed 7272027 g9 1300100$" "$(cat "$N/runs/g9q2/G9Q2_STARTED" 2>/dev/null)"
+check 57a4 "G9q2 first start: from P3 $P3 \(steps 0\); G9q's recipe \+ --seed 7272027 \(this start only\); November sets for the collector \(PORYGON_PS=$NOV\)" "$(cat "$W/run/train.log")"
+yes_ 57a5 '[ "$(nsb)" = 1 ] && grep -q -- "--partition=a16 .*--cpus-per-task=10 --mem=65536M --time=72:00:00 --dependency=afterany:1300100" "$WDQ.sbatch" && [ "$(cat "$N/runs/g9/MODE")" = g9q2 ] && [ ! -e "$N/runs/g9/HOLD" ]'
+check 57a6 "first start on nodex: .*MODE g9: g9q2 .*queued successor 1300001 \(afterany:1300100\)" "$(wdlog g9)"
+# 57a7: the same first start under MODE g9q (G9q's branch, a successor job) gives the same args up to the lineage name
+# and the seed: the argsdiff the user asked for ("only the seed + run dir")
+x=$(sed -E 's#/G9q2([/ ])#/G9q\1#g; s# --seed 7272027##' <<< "${o#*TRAIN_ARGS=}")
+q2tree; echo g9q > "$N/runs/g9/MODE"; rm -f "$N/runs/g9q/G9Q_STARTED"; y=$(q2src 1300100)
+yes_ 57a7 '[ "$x" = "${y#*TRAIN_ARGS=}" ] && [ "${o%%|TRAIN_ARGS=*}" = "${y%%|TRAIN_ARGS=*}" ]'
+# 57b: a restart in place of the same job after G9q2 saved: its own final, no --seed, no second first start
+q2tree; W=$ROOTM/wd-1300100; q2src 1300100 > /dev/null; echo g9q2-final > "$W/run/G9q2/final_model.pt"; s0=$(cat "$N/runs/g9q2/G9Q2_STARTED")
+o=$(q2src 1300100); check 57b "^RC=0\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|.*TRAIN_ARGS=$QBASE --run-dir $W/run/G9q2 --pool-dir $W/run/G9q2/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $W/run/G9q2/final_model.pt$" "$o"
+checkno 57b2 "--seed" "$o"; yes_ 57b3 '[ "$(cat "$N/runs/g9q2/G9Q2_STARTED")" = "$s0" ] && [ "$(grep -c "G9q2 first start" "$W/run/train.log")" = 1 ] && [ "$(nsb)" = 1 ]'
+# 57c: the fresh successor resumes G9q2's newest MIRRORED file (never G9q's, G9t's or G9r's), no --seed
+K3=$N/runs/g9/20261115-143000-1300100/G9q2; mkdir -p "$K3/pool/frozen" "$K3/checkpoints"; echo m > "$K3/final_model.pt"; echo b > "$K3/best_model.pt"; echo s > "$K3/pool/00001000000.pt"
+touch -d '2026-11-17 10:00' "$K3/final_model.pt"; K4=$N/runs/g9/20261109-021316-741849/G9q; mkdir -p "$K4"; echo q > "$K4/final_model.pt"; touch -d '2026-11-17 11:00' "$K4/final_model.pt"
+W2=$ROOTM/wd-1300001; o=$(q2src 1300001); check 57c "^RC=0\|.*TRAIN_ARGS=$QBASE --run-dir $W2/run/G9q2 --pool-dir $W2/run/G9q2/pool --snapshot-cache 72 --snapshot-cache-cpu 200 --resume $K3/final_model.pt$" "$o"
+checkno 57c2 "--seed" "$o"; yes_ 57c3 '[ -f "$W2/run/G9q2/best_model.pt" ] && [ "$(cat "$N/runs/g9q2/G9Q2_STARTED")" = "$s0" ]'
+# 57c4: a successor with a checkpoint newer than the mirrored final (a crash): the newest file of G9q2 either way
+rm -rf "$ROOTM/wd-1300002"; echo c > "$K3/checkpoints/ckpt_00031000000.pt"; touch -d '2026-11-17 12:00' "$K3/checkpoints/ckpt_00031000000.pt"
+o=$(q2src 1300002); check 57c4 "--resume $K3/checkpoints/ckpt_00031000000.pt$" "$o"
+# 57d: no wrapper -> runs/g9/HOLD + note (the job holds; the mock passes the hold at once)
+q2tree; mv "$N/bin/py-src-24c633f" "$N/bin/off"; W=$ROOTM/wd-1300100; o=$(q2src 1300100); mv "$N/bin/off" "$N/bin/py-src-24c633f"
+yes_ 57d '[ -f "$N/runs/g9/HOLD" ]'; check 57d2 "MODE g9q2 but no $N/bin/py-src-24c633f \(G9q2's src\): HOLD" "$(cat "$W/run/train.log")"
+# 57e: a >= 40 GB GPU: 512 + --stacked-opp (G9q's A16-branch rule; the a16 job never gets one)
+q2tree; W=$ROOTM/wd-1300100; o=$(WD_GPU=46068 q2src 1300100); check 57e "--pool-dir $W/run/G9q2/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --seed 7272027 --resume $P3$" "$o"
+# 57f: guard trips: collapse -> KL x3 from the trip state (state runs/g9q2 only); then a second trip -> HOLD
+q2tree; W=$ROOTM/wd-1300100; q2src 1300100 > /dev/null; echo g9q2-final > "$W/run/G9q2/final_model.pt"; echo "collapse: entropy 0.4 < 0.5" > "$W/run/G9q2/GUARD_TRIPPED"
+o=$(q2src 1300100); check 57f "--kl-anchor-coef 0.3 .*--run-dir $W/run/G9q2 .*--resume $W/run/G9q2/final_model.pt$" "$o"
+yes_ 57f2 'grep -q "^1 " "$N/runs/g9q2/FU.started" && grep -q collapse "$N/runs/g9q2/FU.reason" && [ ! -e "$N/runs/g9q/FU.started" ] && ls "$W"/run/G9q2/GUARD_TRIPPED.fu-* > /dev/null 2>&1'
+echo "eval score 40% < best 60% - 15%" > "$W/run/G9q2/GUARD_TRIPPED"; o=$(q2src 1300100); yes_ 57f3 '[ -f "$N/runs/g9/HOLD" ] && ls "$W"/run/G9q2/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+# 57g: a non-collapse first trip -> best_model.pt at --lr 3.5e-5
+q2tree; W=$ROOTM/wd-1300100; q2src 1300100 > /dev/null; echo g9q2-final > "$W/run/G9q2/final_model.pt"; echo g9q2-best > "$W/run/G9q2/best_model.pt"; echo "eval score 40% < best 60% - 15%" > "$W/run/G9q2/GUARD_TRIPPED"
+o=$(q2src 1300100); check 57g "--lr 3.5e-5 .*--kl-anchor-coef 0.1 .*--resume $N/runs/g9q2/fu-start-best.pt$" "$o"; yes_ 57g2 '[ "$(cat "$N/runs/g9q2/fu-start-best.pt")" = g9q2-best ]'
+# 57h: deploy blockers: runs/g9/HOLD or runs/g9/PARKED (G9t's park marker) -> a fresh job exits without training
+for f in HOLD PARKED; do q2tree; touch "$N/runs/g9/$f"; o=$(q2src 1300100); check "57h-$f" "^RC=0\|$" "$o"; yes_ "57h2-$f" '[ ! -e "$N/runs/g9q2/G9Q2_STARTED" ] && [ "$(nsb)" = 0 ]'; done
+# 57i: the other runs never see g9q2: r1 (G9q on the A30) and g4r1bf restarts unchanged by MODE g9 = g9q2 (argsdiff too)
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"

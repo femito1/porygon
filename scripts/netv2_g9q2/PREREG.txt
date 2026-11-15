@@ -1,0 +1,55 @@
+G9q2 PRE-REGISTRATION — FINAL (netv2, 2026-11-15 14:32 UTC; written before G9q2's first step; read-only)
+Decision: USER 2026-11-15 ~14:05 (relayed by the orchestrator): the A16 trains a second G9q seed ("G9q2").
+
+PURPOSE: (a) run-to-run (seed) variance of our PPO recipe at matched steps, which bounds what any single-seed
+comparison of two recipes (e.g. G9q vs G9p, G9t vs G9q, G9r vs G9q) can claim; (b) a second G9q lineage.
+
+G9q2 = G9q's recipe (runs/g9q/PREREG.txt md5 a64af3b2; first argv runs/g9q/g9q-first-argv.txt) with ONLY the seed changed:
+  init P3 = runs/pretrain/P3-g9-s2.pt (md5 3e600174; steps 0, fresh AdamW); lr 7e-5 WSD constant; KL anchor P3 coef 0.1,
+  linear decay to 0 over 50M; frozen P3 + --frozen-best; critic warm-up 1M; p_frozen 0.67; p_baseline 0.08; PPO 3 epochs
+  x batch 4096; fp32 (--no-bf16); --no-overlap; fastenv 8 workers x 48 battles, 16 + 16; eval anchor P1 (October eval
+  servers); November sets for the collector (PORYGON_PS ps-2026-11; unchanged since G9q's start: no file newer than
+  11-10 01:12 in it or in $C/fastenv); guards anchor drop 0.15 / entropy rel 1.5 / entropy floor 0.5 / ptop > 0.6 with
+  G9q's fallback rules (own state runs/g9q2/: collapse -> KL x3; other trip -> best_model.pt at --lr 3.5e-5; once; a
+  second trip -> HOLD). G9q tripped no guard in its first 61.9M.
+SEED: G9q ran with --seed unset (train.py default None: fastenv seed from os.urandom at each start (7954875 at its
+  first), numpy unseeded, torch's default generator seed). G9q2's FIRST start adds --seed 7272027 (torch, numpy and
+  fastenv seeded; grep-checked unused 2026-11-15); every later start of G9q2 runs without --seed, exactly as G9q's
+  restarts did (fresh os.urandom fastenv seed: "restarts must not replay teams", fastenv_v2.build_env). The first
+  start's argv vs G9q's first argv differs only by --seed 7272027, the lineage run / pool dirs (G9q2) and the code /
+  cache items below; argsdiff recorded at deploy.
+Code: $NV2/bin/py-src-24c633f (read-only src-24c633f = 9d0efe0's --snapshot-cache-cpu + the stacked-opp fix), the src
+  of G9q's own A30 segment since 11-10 and of G9q's A16 successor branch in netv2.env; its default path (no stacked-opp,
+  no lr schedule) is the trainer G9q trained its first 61.9M with ($C/src, unchanged since 11-10 01:12) plus the CPU
+  tier (same nets and logits, tested). A missing wrapper -> HOLD (never another src).
+Hardware / speed only: a fresh A16 job (`a16`, 10 CPUs, 64G, 72 h; watchdog successors), 8 workers, --snapshot-cache
+  72 + --snapshot-cache-cpu 200, no --stacked-opp (512 + --stacked-opp only on a >= 40 GB GPU, as G9q's A16 branch) =
+  G9q's own first 61.9M (741849, A16, 8 workers, cache 72; no CPU tier there: speed only).
+Env: netv2.env v15 (md5 c84b833f; ws/netv2 mocks: env 665/665 (v14 fails 17 new), job 177/177; argsdiff v14 vs v15 identical for every other mode (r1, g4r1bf, g9 modes g9q g9p2 g9r g9t g9s g9p r1b g9)) MODE g9 = g9q2 (written by hand at deploy, after runs/g9/HOLD and runs/g9/PARKED -- G9t's
+  persistent park marker; G9t stays parked in runs/g9t-parked -- are removed); first-start marker runs/g9q2/G9Q2_STARTED;
+  lineage G9q2, mirrored to runs/g9/<job>/G9q2/.
+
+READINGS (measurements; in-process spd_h2h via scripts/netv2_cmp_step.sh md5 a80c7da2, A = G9q2 ("G9s" label), B = G9q
+("G9p" label); both raw at T 0.5; duplicate pairs; wsp's sequential design runs/cmp/seq-gain.json (md5 f12fec7c):
+theta0 50 -> theta1 52%, alpha 0.025 per one-sided test, looks every 100 pairs, n_max 2400; both directions on the same
+pairs; nested pair-id order = the reading of record, round-robin alongside; run as a cluster-side chain in the data
+host, launched when both snapshots exist):
+  R25, seed 9925: G9q2's first pool snapshot >= 25M vs G9q runs/g9/20261109-021316-741849/G9q/pool/00025038951.pt
+      (md5 b1cb200f).
+  R50, seed 9926: G9q2's first pool snapshot >= 50M vs G9q runs/g9/20261109-021316-741849/G9q/pool/00050038810.pt
+      (md5 29b0d2af).
+  Per step: SUCCESS = either one-sided test ("G9q2 > G9q" or "G9q > G9q2") succeeds; FUTILITY = both directions
+  futile; else UNDECIDED (n_max).
+  OVERALL:
+  - EITHER SUCCESS (R25 or R50 SUCCESS, either direction) => the two seeds differ by more than noise at a matched step:
+    a single-seed recipe comparison of that size (e.g. G9q vs G9p 61.06% at 25M) can be seed variance, so single-seed
+    recipe claims are bounded by it (reported with the measured gap and interval).
+  - BOTH FUTILITY (R25 and R50 FUTILITY) => seed variance at matched steps below ~2 points (theta1 52%): single-seed
+    step-matched comparisons with gaps well above ~2 points stand.
+  - otherwise => inconclusive (stated as such).
+  No stop rule: these readings never stop G9q2. G9q2 runs on as the second G9q lineage until an orchestrator / user
+  decision; its guard fallbacks are G9q's.
+Seeds 9925 / 9926 / 7272027: grep-checked unused 2026-11-15 ~14:15 UTC (730 small text files PREREG* / NETS.txt / *.env /
+  manifest* / RESULT*.txt / READING* / *.sh / *.sbatch / NOTES* / *.meta.json / STATUS / *argv*.txt under porygon-ws-*/
+  runs, plans, scripts, logs and data's code/scripts, depth <= 4; .orchestra/: no hit).
+Reporting: 95% intervals; every reading to the orchestrator, numbers re-read from RESULT.txt / READING.txt.
