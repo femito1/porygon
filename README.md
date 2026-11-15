@@ -82,7 +82,9 @@ The 0.25 network prior does help the gen4 search (+3.8 ± 3.5 vs none, 800 games
 2. **Network in the search.** Done at the root: the hybrid above is the gen9 benchmark bot. Next: re-freeze #2 on a
    newer net (`docs/netsearch/REFREEZE-PREREG.md`; #1 on G9q-cd@305M was not adopted), and test the hybrid against
    the raw net it wraps. V3, the network's value at the leaves, is parked: inference on the benchmark GPU caps at
-   ~2k leaves per decision at 4 × 1 s, too few to justify a batched-leaf Rust tree (`docs/netsearch/V3-GATES-PREREG.md`).
+   ~2k leaves per decision at 4 × 1 s, too few to justify a batched-leaf Rust tree (gates:
+   `docs/netsearch/V3-GATES-PREREG.md`; inference bench: `docs/netsearch/V3-I1-PREREG.md`; design, not built:
+   `docs/netsearch/V3-RUST-DESIGN.md`).
 3. **Stronger distillation targets:** a longer or network-guided search as teacher, with sharpened targets.
 4. **Leaf evaluation, round 2:** refit on self-play played with the fitted evaluation; TreeStrap-style targets
    from deeper search; recheck the leaf scale whenever the time per move changes. Engine-only head-to-heads
