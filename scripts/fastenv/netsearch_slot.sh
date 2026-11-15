@@ -195,6 +195,8 @@ play_block() {  # K J: arm K's block J (node-local, then copied to OUT/arm-K/blo
   local n=$((2 * BLOCK_PAIRS)) tag=${JOB}a$1b$2
   rm -rf "$dir"; mkdir -p "$dir" "$OUT/arm-$k"
   case "$spec" in netsearch:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
+  local opp=$OPP  # a netsearch: opponent (re-freeze R) logs its own gate decisions too
+  case "$opp" in netsearch:*) opp="$opp,log=$dir/gate-opp.jsonl" ;; esac
   if [ "$DRY" = 1 ]; then
     $SLOT fake "$dir" --games "$n" --p "${DRY_P[$(($1 - 1))]}" --a "pa$tag" --seed "$seed" > "$dir/evaluate.log" 2>&1
     rc=$?
@@ -243,7 +245,7 @@ run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
       --summary "$dir/summary.json" --format "$FORMAT" > "$dir/evaluate.log" 2>&1
   else
     spawn "$dir/client.pgid" env PORYGON_DUPLICATE="$seed" PORYGON_DUPLICATE_LOG="$dir/battles.jsonl" \
-      PORYGON_DUPLICATE_GROUP='^pa' "$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" "$spec" "$OPP" --n-battles "$n" \
+      PORYGON_DUPLICATE_GROUP='^pa' "$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" "$spec" "$opp" --n-battles "$n" \
       --port "$PORT" --format "$FORMAT" --out "$dir" --concurrency "$CONC" --name-tag "$tag" --print-every 10 \
       > "$dir/evaluate.log" 2>&1
   fi

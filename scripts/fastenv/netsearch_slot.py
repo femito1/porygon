@@ -93,6 +93,7 @@ def arm_stats(run: Path, arm: int, upto: int | None = None) -> dict:
     stats_a: dict[str, float] = defaultdict(float)
     stats_b: dict[str, float] = defaultdict(float)
     gate = {"decisions": 0, "overrides": 0, "undefined_gap": 0}
+    gate_opp = {"decisions": 0, "overrides": 0, "undefined_gap": 0}  # a netsearch: opponent's gate-opp.jsonl
     seconds, statuses = 0.0, defaultdict(int)
     for b in blocks_of(run, arm)[:upto]:
         results = load_jsonl(b / "results.jsonl")
@@ -108,10 +109,11 @@ def arm_stats(run: Path, arm: int, upto: int | None = None) -> dict:
         for key, acc in (("search_stats_a", stats_a), ("search_stats_b", stats_b)):
             for k, v in (summ.get(key) or {}).items():
                 acc[k] += v
-        for row in load_jsonl(b / "gate.jsonl"):
-            gate["decisions"] += 1
-            gate["overrides"] += bool(row.get("override"))
-            gate["undefined_gap"] += row.get("gap") is None
+        for name, acc in (("gate.jsonl", gate), ("gate-opp.jsonl", gate_opp)):
+            for row in load_jsonl(b / name):
+                acc["decisions"] += 1
+                acc["overrides"] += bool(row.get("override"))
+                acc["undefined_gap"] += row.get("gap") is None
         blocks.append({"block": b.name, "pairs": len(m), "games": g, "incomplete": inc,
                        "seconds": summ.get("seconds"), "done": bool(summ)})
     mean, hw = interval(means)
@@ -119,7 +121,7 @@ def arm_stats(run: Path, arm: int, upto: int | None = None) -> dict:
             "mean": mean, "hw": hw, "lo": mean - hw, "hi": mean + hw,
             "won_both": sum(x == 1 for x in means), "lost_both": sum(x == 0 for x in means),
             "split": sum(0 < x < 1 for x in means), "client_status": dict(statuses), "seconds": seconds,
-            "stats_a": dict(stats_a), "stats_b": dict(stats_b), "gate": gate, "per_block": blocks}
+            "stats_a": dict(stats_a), "stats_b": dict(stats_b), "gate": gate, "gate_opp": gate_opp, "per_block": blocks}
 
 
 def read_plan(run: Path) -> dict:
@@ -187,6 +189,8 @@ def report(run: Path, go: float, tie: float, void_fallbacks: float) -> dict:
         s["fallback_rate_a"] = s["stats_a"].get("fallbacks", 0) / dec_a if dec_a else None
         s["fallback_rate_b"] = s["stats_b"].get("fallbacks", 0) / dec_b if dec_b else None
         s["override_rate"] = s["gate"]["overrides"] / s["gate"]["decisions"] if s["gate"]["decisions"] else None
+        go = s["gate_opp"]
+        s["override_rate_opp"] = go["overrides"] / go["decisions"] if go["decisions"] else None
         s["void"] = any(r is not None and r > void_fallbacks for r in (s["fallback_rate_a"], s["fallback_rate_b"]))
         arms.append(s)
     out = {"run": str(run), "name": plan.get("NAME"), "tag": plan.get("TAG"), "opponent": plan.get("OPP"),
@@ -211,6 +215,9 @@ def format_report(r: dict) -> str:
                      f"{a['lost_both']}; incomplete {a['incomplete_pairs']}); overrides {ov} of "
                      f"{a['gate']['decisions']} searched decisions; fallbacks ours/theirs {fb}; "
                      f"{a['seconds'] / 3600:.2f} h{flags}")
+        if a.get("override_rate_opp") is not None:
+            lines.append(f"      opponent overrides {a['override_rate_opp']:.1%} of {a['gate_opp']['decisions']} "
+                         f"searched decisions")
         lines.append(f"      {a['spec']}")
     sel = r.get("selection")
     if sel:
