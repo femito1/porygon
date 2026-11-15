@@ -189,8 +189,8 @@ def report(run: Path, go: float, tie: float, void_fallbacks: float) -> dict:
         s["fallback_rate_a"] = s["stats_a"].get("fallbacks", 0) / dec_a if dec_a else None
         s["fallback_rate_b"] = s["stats_b"].get("fallbacks", 0) / dec_b if dec_b else None
         s["override_rate"] = s["gate"]["overrides"] / s["gate"]["decisions"] if s["gate"]["decisions"] else None
-        go = s["gate_opp"]
-        s["override_rate_opp"] = go["overrides"] / go["decisions"] if go["decisions"] else None
+        gopp = s["gate_opp"]  # not `go`: that name is the go threshold passed to select() below
+        s["override_rate_opp"] = gopp["overrides"] / gopp["decisions"] if gopp["decisions"] else None
         s["void"] = any(r is not None and r > void_fallbacks for r in (s["fallback_rate_a"], s["fallback_rate_b"]))
         arms.append(s)
     out = {"run": str(run), "name": plan.get("NAME"), "tag": plan.get("TAG"), "opponent": plan.get("OPP"),
