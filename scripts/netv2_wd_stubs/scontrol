@@ -1,0 +1,4 @@
+#!/bin/bash
+echo "scontrol $*" >> "${WDQ:-/tmp/wdq}.scontrol"
+case $1 in show) [ -f "${WDQ:-/tmp/wdq}.exc-$3" ] && echo "   ReqNodeList=(null) ExcNodeList=$(cat "${WDQ:-/tmp/wdq}.exc-$3")" || echo "   ReqNodeList=(null) ExcNodeList=(null)" ;; esac
+exit 0

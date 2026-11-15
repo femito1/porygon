@@ -7,10 +7,12 @@
 # win (argparse: last wins), the pool it sees and what it resumed from, writes final_model.pt + a train.log line where the
 # real one would and exits (MOCK_WAIT=1: waits for SIGINT first); with runs/RUN/restart armed the restart loop runs once.
 #   bash scripts/netv2_job_mock.sh SBATCH_SCRIPT ENVFILE [old]   (old = a spooled pre-fix job script: no chain-flag case)
-# Expectations are the CORRECT behaviour: FAIL lines are gaps. S12-S13 (v10): G9r and the park INLINE_CMD.
+# Expectations are the CORRECT behaviour: FAIL lines are gaps. S12-S13 (v10): G9r and the park INLINE_CMD. S14 (v12
+# draft): G9t (MODE g9t, runs/g9t/RECIPE). S16 (v14): the G9r park -> G9t on the A16, the parked-HOLD guard.
 set -u
 SB=$(readlink -f "$1"); ENVF=$(readlink -f "$2"); OLD=${3:-}
 M=${MOCK_ROOT:-/tmp/netv2-job-mock}
+WDB=$(dirname "$(readlink -f "$0")")/netv2_wd_stubs
 pass=0; fail=0
 ok() { pass=$((pass + 1)); echo "  PASS $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL $1"; }
@@ -39,6 +41,7 @@ def rd(f):
     except OSError: return "MISSING"
 yn = lambda f: "y" if os.path.isfile(f) else "n"
 log = open(f"{M}/calls.log", "a")
+open(f"{M}/argv.log", "a").write(os.environ.get("SLURM_JOB_ID", "") + " " + " ".join(a) + "\n")  # S17: the full argv
 log.write(f"call resume={resume} [{rd(resume)}] run_dir={rundir} pool_dir={pooldir} pool={n(pooldir)} "
           f"frozen={n(pooldir + '/frozen')} best={yn(rundir + '/best_model.pt')} ema={yn(rundir + '/ema_model.pt')} "
           f"anchor={v.get('--anchor', '-')} ps={os.environ.get('PORYGON_PS', '-')} pp={os.environ.get('PYTHONPATH', '')}\n"); log.flush()
@@ -66,11 +69,13 @@ with open(rundir + "/train.log", "a") as f:  # the real trainer's start / update
     f.write("2026-11-11 21:30:00 v2 trainer: mock, resume=" + resume + "\n2026-11-11 21:40:00 upd 9 steps 99,000,000 (+43000) sps 2200\n"
             "2026-11-11 21:40:10 saved final_model.pt at 99,000,000 steps\n")
 EOF
-  cat > "$M/bin/sbatch" <<'EOF'
-#!/bin/bash
-echo "sbatch $*" >> "$MOCK/sbatch.log"; echo "Submitted batch job 999999"
-EOF
-  for c in squeue scontrol srun pkill; do printf '#!/bin/bash\necho "%s $*" >> "$MOCK/other.log"\nexit 0\n' "$c" > "$M/bin/$c"; done
+  # sbatch / squeue / scontrol: as before (log only) unless $MOCK/squeue.txt exists (the v12 watchdog scenarios S15):
+  # then the scripts/netv2_wd_stubs versions (a queue in squeue.txt; sbatch prints the cluster's banner and registers
+  # its job PENDING); df: the stub (100 GB available unless $MOCK/squeue.txt.df says otherwise)
+  printf '#!/bin/bash\necho "sbatch $*" >> "$MOCK/sbatch.log"\nif [ -f "$MOCK/squeue.txt" ]; then WDQ=$MOCK/squeue.txt exec %s/sbatch "$@"; fi\necho "Submitted batch job 999999"\n' "$WDB" > "$M/bin/sbatch"
+  for c in squeue scontrol; do printf '#!/bin/bash\necho "%s $*" >> "$MOCK/other.log"\nif [ -f "$MOCK/squeue.txt" ]; then WDQ=$MOCK/squeue.txt exec %s/%s "$@"; fi\nexit 0\n' "$c" "$WDB" "$c" > "$M/bin/$c"; done
+  for c in srun pkill; do printf '#!/bin/bash\necho "%s $*" >> "$MOCK/other.log"\nexit 0\n' "$c" > "$M/bin/$c"; done
+  printf '#!/bin/bash\nWDQ=$MOCK/squeue.txt exec %s/df "$@"\n' "$WDB" > "$M/bin/df"
   printf '#!/bin/bash\n# long sleeps fail at once (ends the job script'"'"'s background while-sleep loops)\ncase $1 in 0*|1|2|3|4) exec /bin/sleep "$1";; esac\nexit 1\n' > "$M/bin/sleep"
   printf '#!/bin/bash\necho "${SLURM_CPUS_ON_NODE:-30}"\n' > "$M/bin/nproc"
   # nvidia-smi: the GPU memory a scenario writes to $MOCK/gpu_mib (none: fails, like a node without a working GPU)
@@ -123,12 +128,13 @@ job() {  # job RUN_NAME JOBID CPUS PARTITION NAME [restart] -> runs the job scri
   ( cd "$M/nv2" && env -i HOME="$HOME" USER="${USER:-nand}" PATH="$M/bin:/usr/bin:/bin" MOCK="$M" NV2="$M/nv2" PY="$M/bin/python" \
       TMPDIR="$M/tmp" SLURM_SUBMIT_DIR="$M/nv2" SLURM_JOB_ID="$id" SLURM_JOB_NAME="$name" SLURM_JOB_PARTITION="$part" \
       SLURM_CPUS_ON_NODE="$cpus" SLURM_CPUS_PER_TASK=6 SLURM_MEM_PER_NODE="$([ "$part" = a16 ] && echo 65536 || echo 98304)" \
-      NODE_BIN=/nonexistent NV2_PARK_PY="$M/bin/parkpy" NV2_SWAP_SLEEP=1 NV2_SWAP_ITERS="${MOCK_SWAP_ITERS:-240}" ${MOCK_END:+SLURM_JOB_END_TIME=$MOCK_END NV2_DEADLINE_POLL_S=1 NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} MOCK_WAIT="${MOCK_WAIT:-}" \
+      NODE_BIN=/nonexistent NV2_PARK_PY="$M/bin/parkpy" NV2_SWAP_SLEEP=1 NV2_SWAP_ITERS="${MOCK_SWAP_ITERS:-240}" ${MOCK_END:+SLURM_JOB_END_TIME=$MOCK_END NV2_DEADLINE_POLL_S=1 NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} MOCK_WAIT="${MOCK_WAIT:-}" ${MOCK_HOLD_ROUNDS:+NV2_G9T_HOLD_ROUNDS=$MOCK_HOLD_ROUNDS NV2_HOLD_ITERS=0} NV2_TMPWATCH_POLL_S="${MOCK_POLL:-0}" NV2_WD_RETRY_S=0 ${MOCK_POLL:+NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} \
       setsid -w bash -c 'echo $$ > "$MOCK/sid-$SLURM_JOB_ID"; exec bash "$MOCK/nv2/scripts/slurm_train_v2.sbatch" "$1"' _ "$run" > "$M/job-$id.out" 2>&1 )
-  local rc=$? sid; sid=$(cat "$M/sid-$id" 2>/dev/null)
+  local rc=$? sid; sid=$(cat "$M/sid-$id" 2>/dev/null); echo "exit $rc" > "$M/rc-$id"
   if [ -n "$sid" ]; then /bin/sleep 1; pkill -s "$sid" 2>/dev/null; fi  # leftovers of this mock job only (its own session)
   echo "  exit $rc ; job log (trimmed):"; grep -v -E "pre-read|find: |^$" "$M/job-$id.out" | cut -c1-200 | sed 's/^/    | /' | head -n 12
 }
+job_rc() { cat "$M/rc-$1" 2>/dev/null; }
 calls() { c=$(cat "$M/calls.log" 2>/dev/null); printf '  trainer calls:\n%s\n' "$(sed 's/^/    /' <<< "$c")"; }
 stubs; export MOCK=$M
 T=$M/tmp
@@ -436,6 +442,181 @@ if [ -z "$OLD" ]; then  # 810367 was spooled with the current job script
   lineage "$K/G9r" G9r-mirror '12 01:44' 00001000000; echo 15356 > "$M/gpu_mib"; job g9 810367 10 a16 ws-netv2-g9 restart > /dev/null; calls
   expect "S13b 810367 resumes G9r (not G9p from the handover), MODE g9r, the COMMIT recorded as applied" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9r .*$PP9R" "$(sed -n 1p <<< "$c")"
   expect "S13b MODE g9r, SWAP_APPLIED, no G9P_A16_STARTED" "^g9r y n$" "$(cat "$G/MODE") $([ -f "$G/SWAP_APPLIED" ] && echo y) $([ -e "$G/G9P_A16_STARTED" ] && echo y || echo n)"
+  # S14 (g9t DRAFT, not deployed; skipped with MOCK_SKIP_G9T=1; NEXT-RECIPE-PROPOSAL 3 / 5): MODE g9t = C's recipe + --gae-lambda (runs/g9t/RECIPE
+  # "C LAMBDA", recorded in runs/g9t/G9T_STARTED at the first start). The tree is the 2026-11-12 state (swap COMMITted
+  # and applied, G9r on the A16, 4f18108 disabled). S14: the A16 job 810367 trains G9r; an INLINE_CMD queued during
+  # its trainer's run flips MODE g9t (+ a mock-only `touch restart`) -> the restart in place is G9t's first start from
+  # P3 (G9t dirs, P1 eval anchor, November sets, the ff32b71 wrapper, + --gae-lambda), then G9t restarts in place from
+  # its own save. S14b: the same without runs/g9t/RECIPE -> refused, G9r continues from its own save. S14c: a fresh
+  # successor (a16 / a40) after G9t started: its newest MIRRORED G9t file, never a newer G9r mirror or a parked dir.
+  # S14d: the A30 (r1 MODE g9t, a fresh job): G9t's first start with 28 workers, cache 192 + stacked-opp + cpu 400.
+  g9ttree() {  # g9rtree + the 2026-11-12 state; MODE g9r on the A16 with G9r started and mirrored
+    g9rtree; G=$M/nv2/runs/g9; rm -f "$M/nv2/bin/py-src-4f18108"; mkdir -p "$M/nv2/runs/g9t/lam"
+    echo "COMMIT by r1 718701 2026-11-11T11:05:44" > "$SW/DECISION"; touch "$G/SWAP_APPLIED" "$M/nv2/runs/r1/SWAP_APPLIED" "$G/G9P_A16_STARTED" "$M/nv2/runs/r1/G9Q_A30_STARTED"
+    echo g9r > "$G/MODE"; echo g9q > "$M/nv2/runs/r1/MODE"; date > "$M/nv2/runs/g9r/G9R_STARTED"
+    lineage "$K/G9r" G9r-mirror '12 01:44' 00001000000 00002000000; echo P3 > "$K/G9r/pool/frozen/P3-g9-s2.pt"; rm -f "$K/G9r/pool/frozen/P1-g9h-dmg-s2.pt"
+    echo 15356 > "$M/gpu_mib-810367"
+  }
+  g9targs() {  # g9targs C LAMBDA WORKERS JOB OPP RESUME: the G9t TRAIN_ARGS pattern after --batch-size 4096
+    local fl=0.5 cx=""; if [ "$1" = g9r ]; then fl=0.35; cx=" --lr-schedule power --lr-horizon 300000000"; fi
+    echo "--lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min $fl --guard-ptop-max 0.6 --kl-anchor $P3 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P3 --p-frozen 0.67 --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers $3 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $T/ws-netv2-$4/run/G9t --pool-dir $T/ws-netv2-$4/run/G9t/pool $5$cx --gae-lambda $2 --resume $6"
+  }
+  flip() { printf 'echo g9t > runs/%s/MODE\ntouch runs/%s/restart  # mock only\n' "$2" "$2" > "$M/pending-inline-$1"; echo "$M/nv2/runs/$2/INLINE_CMD" > "$M/pending-inline-$1.dest"; }
+  if [ -z "${MOCK_SKIP_G9T:-}" ]; then
+  echo "== S14: 810367 (A16, G9r) is flipped to MODE g9t by an INLINE_CMD (RECIPE 'g9r 0.5'): G9t's first start from P3, then its restart in place"
+  g9ttree; echo "g9r 0.5" > "$M/nv2/runs/g9t/RECIPE"; flip 810367 g9
+  job g9 810367 10 a16 ws-netv2-g9 restart > "$M/s-g9.txt"; c2=$(grep "ws-netv2-810367/" "$M/calls.log"); sed 's/^/    /' <<< "$c2" | cut -c1-260
+  expect "S14 first: G9r (its mirrored file), the ff32b71 wrapper" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9r .* ps=$NOV $PP9R" "$(sed -n 1p <<< "$c2")"
+  expect "S14 relaunch = G9t's first start from P3: G9t dirs, P1 eval anchor, November sets, the ff32b71 wrapper" "^call resume=$P3 \[P3\] run_dir=$T/ws-netv2-810367/run/G9t pool_dir=$T/ws-netv2-810367/run/G9t/pool .*anchor=$P1 ps=$NOV $PP9R" "$(sed -n 2p <<< "$c2")"
+  expect "S14 G9t restart in place: its own save" "^call resume=$T/ws-netv2-810367/run/G9t/final_model.pt \[trained-from:P3\] run_dir=$T/ws-netv2-810367/run/G9t .* ps=$NOV $PP9R" "$(sed -n 3p <<< "$c2")"
+  expect "S14 G9t args (first start)" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9r 0.5 8 810367 "--snapshot-cache 72 --snapshot-cache-cpu 200" "$P3")'" "$(cat "$M/job-810367.out")"
+  expect "S14 G9t args (restart in place)" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9r 0.5 8 810367 "--snapshot-cache 72 --snapshot-cache-cpu 200" "$T/ws-netv2-810367/run/G9t/final_model.pt")'" "$(cat "$M/job-810367.out")"
+  expect "S14 G9T_STARTED records the recipe and the run; G9r's save left as it was; MODE g9t; 3 trainer calls" "^[0-9T:-]+ g9r 0.5 g9 810367 trained-from:G9r-mirror-final g9t 3$" "$(cat "$M/nv2/runs/g9t/G9T_STARTED" 2>/dev/null) $(cat "$G"/*-810367/G9r/final_model.pt 2>/dev/null) $(cat "$G/MODE") $(grep -c . <<< "$c2")"
+  echo "== S14b: the same flip without runs/g9t/RECIPE: G9t refused, G9r continues from its own save"
+  g9ttree; flip 810367 g9
+  job g9 810367 10 a16 ws-netv2-g9 restart > "$M/s-g9.txt"; c2=$(grep "ws-netv2-810367/" "$M/calls.log"); sed 's/^/    /' <<< "$c2" | cut -c1-260
+  expect "S14b relaunch: G9r from its own save, no G9t" "^call resume=$T/ws-netv2-810367/run/G9r/final_model.pt \[trained-from:G9r-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9r .* ps=$NOV $PP9R" "$(sed -n 2p <<< "$c2")"
+  expect "S14b refusal logged, no G9T_STARTED, MODE file kept" "MODE g9t refused: no runs/g9t/RECIPE: G9r continues .* n g9t$" "$(cat "$G"/*-810367/train.log 2>/dev/null | tr '\n' ' ') $([ -e "$M/nv2/runs/g9t/G9T_STARTED" ] && echo y || echo n) $(cat "$G/MODE")"
+  if grep -q -E "gae-lambda|/G9t" "$M/job-810367.out"; then bad "S14b G9t args after a refusal"; else ok "S14b no G9t args"; fi
+  echo "== S14c: a fresh successor (1100002, a16 / a40) after G9t started (record 'g9q 0.6 g9'): the newest MIRRORED G9t file"
+  for g in a16 a40; do
+    g9ttree; echo g9t > "$G/MODE"; echo "g9q 0.6" > "$M/nv2/runs/g9t/RECIPE"; echo "2026-11-13T09:00:00 g9q 0.6 g9 810367" > "$M/nv2/runs/g9t/G9T_STARTED"
+    K2=$G/20261112-015035-810367; lineage "$K2/G9t" G9t-mirror '13 11:00' 00001000000 00002000000 00003000000; echo P3 > "$K2/G9t/pool/frozen/P3-g9-s2.pt"; rm -f "$K2/G9t/pool/frozen/P1-g9h-dmg-s2.pt"
+    at '13 12:00' "$K/G9r/final_model.pt"; for d in "$M/nv2/runs/g9r-parked" "$M/nv2/runs/g9t-parked"; do mkdir -p "$d/pool"; echo parked > "$d/final_model.pt"; at '13 12:30' "$d/final_model.pt"; done
+    echo $([ $g = a16 ] && echo 15356 || echo 46068) > "$M/gpu_mib-1100002"; job g9 1100002 10 $g ws-netv2-g9 restart > /dev/null; calls
+    expect "S14c 1100002 ($g): the mirrored G9t save with its pool / frozen / best / ema, wrapper, November sets" "^call resume=$K2/G9t/final_model.pt \[G9t-mirror-final\] run_dir=$T/ws-netv2-1100002/run/G9t pool_dir=$T/ws-netv2-1100002/run/G9t/pool pool=3 frozen=2 best=y ema=y anchor=$P1 ps=$NOV $PP9R" "$(sed -n 1p <<< "$c")"
+    expect "S14c 1100002 ($g) restart in place: its own save" "^call resume=$T/ws-netv2-1100002/run/G9t/final_model.pt \[trained-from:G9t-mirror-final\] .*$PP9R" "$(sed -n 2p <<< "$c")"
+    x="--snapshot-cache 72 --snapshot-cache-cpu 200"; [ $g = a40 ] && x="--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200"
+    expect "S14c 1100002 ($g) args: $x --gae-lambda 0.6" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9q 0.6 8 1100002 "$x" "$T/ws-netv2-1100002/run/G9t/final_model.pt")'" "$(cat "$M/job-1100002.out")"
+  done
+  echo "== S14d: the A30 (a fresh r1 job 1100003, r1 MODE g9t, RECIPE 'g9q 0.5'): G9t's first start from P3, then its restart in place"
+  g9ttree; echo g9t > "$M/nv2/runs/r1/MODE"; echo "g9q 0.5" > "$M/nv2/runs/g9t/RECIPE"; echo 24576 > "$M/gpu_mib-1100003"
+  job r1 1100003 30 a30 ws-netv2-r1 restart > /dev/null; calls
+  expect "S14d first start from P3 in the G9t dirs, wrapper, November sets" "^call resume=$P3 \[P3\] run_dir=$T/ws-netv2-1100003/run/G9t pool_dir=$T/ws-netv2-1100003/run/G9t/pool .*anchor=$P1 ps=$NOV $PP9R" "$(sed -n 1p <<< "$c")"
+  expect "S14d restart in place: its own save" "^call resume=$T/ws-netv2-1100003/run/G9t/final_model.pt \[trained-from:P3\] .*$PP9R" "$(sed -n 2p <<< "$c")"
+  expect "S14d args: 28 workers, cache 192 + stacked-opp + cpu 400, --gae-lambda 0.5" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9q 0.5 28 1100003 "--snapshot-cache 192 --stacked-opp --snapshot-cache-cpu 400" "$T/ws-netv2-1100003/run/G9t/final_model.pt")'" "$(cat "$M/job-1100003.out")"
+  expect "S14d G9T_STARTED records run r1" "^[0-9T:-]+ g9q 0.5 r1 1100003$" "$(cat "$M/nv2/runs/g9t/G9T_STARTED" 2>/dev/null)"
+  fi
+  # S15 (v12, 2026-11-12, orchestrator-approved): the successor watchdog through the real job script (ids >= 1135476;
+  # $MOCK/squeue.txt switches the sbatch / squeue / scontrol stubs to scripts/netv2_wd_stubs). Tree: g9ttree (the
+  # 2026-11-12 state, G9r on the A16, MODE g9r, mirrored). S15a: a fresh g9 job queues ONE successor (afterany, its
+  # resources), restarts in place without a second one, and chain_left 2 -> 0 stops the end-of-job chain. S15b: /tmp <
+  # 20 GB at the start: exit 1 before any trainer call, resubmitted with --exclude=<node>, MODE kept; the resubmitted
+  # job resumes the same lineage. S15c: the /tmp watcher (< 3 GB): mirror, the pending successor excludes the node,
+  # restart flag removed, SIGINT; the trainer's final save is mirrored before the job ends; no relaunch. S15d: HOLD ->
+  # exit 0 without training or chaining (HOLD kept). S15e: another job of the name is RUNNING (started earlier) -> exit 0.
+  HN=$(hostname -s); WQ=$M/squeue.txt
+  cnt() { local n; n=$(grep -c -- "$1" "$2" 2> /dev/null); echo "${n:-0}"; }
+  echo "== S15a: a fresh g9 job (1200010, A16) queues one successor, restarts in place, chain_left 2 -> 0 (no end-of-job chain)"
+  g9ttree; rm -f "$WQ"*; : > "$WQ"; echo 2 > "$G/chain_left"; echo 15356 > "$M/gpu_mib-1200010"; job g9 1200010 10 a16 ws-netv2-g9 restart > /dev/null; calls
+  expect "S15a trainer: the mirrored G9r save, then its restart in place" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-1200010/run/G9r .*call resume=$T/ws-netv2-1200010/run/G9r/final_model.pt " "$(tr '\n' ' ' <<< "$c")"
+  expect "S15a exactly one sbatch: the successor afterany:1200010 with this job's resources" "^sbatch --job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 --dependency=afterany:1200010 scripts/slurm_train_v2.sbatch g9 1$" "$(cat "$M/sbatch.log") $(grep -c . "$M/sbatch.log")"
+  expect "S15a queued 1300001 (id parsed past the banner), JOBSTARTS, chain_left 0" "queued successor 1300001 \(afterany:1200010\).* 1 0$" "$(tr '\n' ' ' < "$G/WATCHDOG.log") $(grep -c 1200010 "$G/JOBSTARTS") $(cat "$G/chain_left")"
+  expect "S15a the job's mirrored train.log has the watchdog lines" "watchdog: queued successor 1300001" "$(cat "$G"/*-1200010/train.log 2>/dev/null)"
+  echo "== S15b: /tmp has 10 GB at the start of 1200011: exit 1 before training, resubmitted excluding $HN; the resubmitted job resumes G9r"
+  g9ttree; rm -f "$WQ"*; : > "$WQ"; echo $((10 * 1048576)) > "$WQ.df"; echo 15356 > "$M/gpu_mib-1200011"; job g9 1200011 10 a16 ws-netv2-g9 restart > /dev/null; calls
+  expect "S15b no trainer call, exit 1" "^0 exit 1$" "$(cnt ws-netv2-1200011 "$M/calls.log") $(grep -o 'exit [0-9]*' <<< "$(job_rc 1200011)")"
+  expect "S15b resubmitted with --exclude=$HN, no dependency; MODE g9r kept" "^sbatch --job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 --exclude=$HN scripts/slurm_train_v2.sbatch g9 g9r$" "$(cat "$M/sbatch.log") $(cat "$G/MODE")"
+  expect "S15b WATCHDOG.log + TMP_ALERT" "/tmp has 10 GB < 20 GB: resubmitted as 1300001 excluding $HN; exit before training \(MODE stays g9r\).*y$" "$(tr '\n' ' ' < "$G/WATCHDOG.log") $([ -f "$G/TMP_ALERT" ] && echo y)"
+  echo $((60 * 1048576)) > "$WQ.df"; echo 15356 > "$M/gpu_mib-1300001"; job g9 1300001 10 a16 ws-netv2-g9 > /dev/null; calls
+  expect "S15b the resubmitted 1300001: the same lineage (G9r's mirror), its own successor 1300002" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-1300001/run/G9r .*queued successor 1300002 \(afterany:1300001\)" "$(grep ws-netv2-1300001 <<< "$c" | tr '\n' ' ')$(tr '\n' ' ' < "$G/WATCHDOG.log")"
+  echo "== S15c: the /tmp watcher in 1200012: 50 GB at the start, then 2 GB: mirror, exclude $HN, no restart, SIGINT, final save mirrored"
+  g9ttree; rm -f "$WQ"*; : > "$WQ"; printf '%s\n%s\n%s\n' $((50 * 1048576)) $((50 * 1048576)) $((2 * 1048576)) > "$WQ.df"; echo 15356 > "$M/gpu_mib-1200012"
+  MOCK_POLL=1 MOCK_WAIT=1 job g9 1200012 10 a16 ws-netv2-g9 restart > /dev/null; calls
+  w=$(tr '\n' ' ' < "$G/WATCHDOG.log")
+  expect "S15c one trainer call (no relaunch), which got SIGINT" "^call resume=$K/G9r/final_model.pt .* trainer: got SIGINT $" "$(tr '\n' ' ' <<< "$c")"
+  expect "S15c order: /tmp low -> mirror done -> the successor excludes $HN -> restart flag removed -> SIGINT" "/tmp has 2048 MB left .*mirror to $G/[0-9-]+-1200012 done .*pending 1300001: ExcNodeList=$HN .*restart flag removed, stopping the trainer .*SIGINT [0-9]+" "$w"
+  expect "S15c scontrol update on the pending successor; runs/g9/restart gone; TMP_ALERT" "scontrol update jobid=1300001 ExcNodeList=$HN n y$" "$(cat "$WQ.scontrol" 2>/dev/null | tr '\n' ' ')$([ -e "$G/restart" ] && echo y || echo n) $([ -f "$G/TMP_ALERT" ] && echo y)"
+  expect "S15c the final save (after SIGINT) is in the job's mirror, LOCAL removed" "^trained-from:G9r-mirror-final n$" "$(cat "$G"/*-1200012/G9r/final_model.pt 2>/dev/null) $([ -d "$T/ws-netv2-1200012" ] && echo y || echo n)"
+  echo "== S15d: runs/g9/HOLD at the start of 1200013: exit 0, no training, no successor, HOLD kept"
+  g9ttree; rm -f "$WQ"*; : > "$WQ"; touch "$G/HOLD"; echo 15356 > "$M/gpu_mib-1200013"; job g9 1200013 10 a16 ws-netv2-g9 restart > /dev/null; calls
+  expect "S15d no trainer call, no sbatch, exit 0, HOLD kept, reason logged" "^0 0 exit 0 y .*exit without training or chaining: runs/g9/HOLD exists" "$(cnt ws-netv2-1200013 "$M/calls.log") $(cnt . "$M/sbatch.log") $(grep -o 'exit [0-9]*' <<< "$(job_rc 1200013)") $([ -f "$G/HOLD" ] && echo y) $(tr '\n' ' ' < "$G/WATCHDOG.log")"
+  echo "== S15e: 1200001 (ws-netv2-g9) is RUNNING since earlier: 1200014 exits 0 without training; 1300005 is its successor already"
+  g9ttree; rm -f "$WQ"*; printf '1200001 ws-netv2-g9 RUNNING 2026-11-12T00:00:00 (null)\n1300005 ws-netv2-g9 PENDING N/A afterany:1200001\n' > "$WQ"; echo 15356 > "$M/gpu_mib-1200014"
+  job g9 1200014 10 a16 ws-netv2-g9 restart > /dev/null; calls
+  expect "S15e no trainer call, no sbatch, reason logged" "^0 0 .*job 1200001 of run g9 is already running \(started 2026-11-12T00:00:00\); pending: 1300005" "$(cnt ws-netv2-1200014 "$M/calls.log") $(cnt . "$M/sbatch.log") $(tr '\n' ' ' < "$G/WATCHDOG.log")"
+  rm -f "$WQ"*
+  # S16 (v14, 2026-11-12; G9t takes the A16, G9r PARKED resumable; skipped with MOCK_SKIP_V14=1 or MOCK_SKIP_G9T=1):
+  # S16: 810367 (G9r) gets the park INLINE_CMD (scripts/netv2_g9t/inline-a16-park-g9r-start-g9t.sh, queued during its
+  # trainer's run, + a mock-only `touch restart`): G9r parked whole in runs/g9r-parked, MODE g9t, the relaunch = G9t's
+  # first start from P3 (G9q's recipe + --gae-lambda 0.5), then its restart in place. S16b: the pending successor 1137377
+  # (watchdog on) starts fresh after it: not blocked by the park, one successor queued, G9t's newest MIRRORED file.
+  # S16c: MODE g9t refused with G9r parked (RECIPE removed, G9T_STARTED corrupted) in a fresh job -> HOLD rounds (mock
+  # cap MOCK_HOLD_ROUNDS), no trainer call, never G9r. S16d: refused without a park -> G9r continues (v13). S16e: the park
+  # refuses (RECIPE 'g9q 0.6'): MODE g9r, no park dir, G9r relaunches from its own save.
+  if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_V14:-}" ]; then
+  t16tree() {  # g9ttree + RECIPE "g9q 0.5" + a read-only runs/g9t/PREREG.txt (the park's preconditions)
+    g9ttree; rm -f "$WQ"* "$M/sbatch.log"; echo "${1:-g9q 0.5}" > "$M/nv2/runs/g9t/RECIPE"; echo prereg > "$M/nv2/runs/g9t/PREREG.txt"; chmod 444 "$M/nv2/runs/g9t/PREREG.txt"
+  }
+  Z=$M/nv2/runs/g9r-parked; A16X="--snapshot-cache 72 --snapshot-cache-cpu 200"
+  echo "== S16: 810367 (A16, G9r) parks G9r through the INLINE_CMD and relaunches as G9t (first start from P3, 'g9q 0.5'), then restarts G9t in place"
+  t16tree; queue 810367 g9 ../netv2_g9t/inline-a16-park-g9r-start-g9t.sh
+  job g9 810367 10 a16 ws-netv2-g9 restart > "$M/s-g9.txt"; c2=$(grep "ws-netv2-810367/" "$M/calls.log"); sed 's/^/    /' <<< "$c2" | cut -c1-260
+  expect "S16 first: G9r (its mirrored file), the ff32b71 wrapper, November sets" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9r .* ps=$NOV $PP9R" "$(sed -n 1p <<< "$c2")"
+  expect "S16 relaunch = G9t's first start from P3: G9t dirs, P1 eval anchor, November sets, the ff32b71 wrapper" "^call resume=$P3 \[P3\] run_dir=$T/ws-netv2-810367/run/G9t pool_dir=$T/ws-netv2-810367/run/G9t/pool .*anchor=$P1 ps=$NOV $PP9R" "$(sed -n 2p <<< "$c2")"
+  expect "S16 G9t restart in place: its own save" "^call resume=$T/ws-netv2-810367/run/G9t/final_model.pt \[trained-from:P3\] run_dir=$T/ws-netv2-810367/run/G9t .* ps=$NOV $PP9R" "$(sed -n 3p <<< "$c2")"
+  expect "S16 G9t args (first start): G9q's recipe + --gae-lambda 0.5, 8 workers, cache 72 + cpu 200" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9q 0.5 8 810367 "$A16X" "$P3")'" "$(cat "$M/job-810367.out")"
+  expect "S16 G9t args (restart in place)" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9q 0.5 8 810367 "$A16X" "$T/ws-netv2-810367/run/G9t/final_model.pt")'" "$(cat "$M/job-810367.out")"
+  expect "S16 G9r parked with its last save (+ 2 pool, 2 frozen, best, ema, checksums), MODE g9t, G9T_STARTED, no runs/g9/PARKED, 3 calls" "^trained-from:G9r-mirror-final 2 2 G9r-mirror-best G9r-mirror-ema y g9t [0-9T:-]+ g9q 0.5 g9 810367 n 3$" "$(cat "$Z/final_model.pt" 2>/dev/null) $(ls "$Z/pool" 2>/dev/null | grep -c pt$) $(ls "$Z/pool/frozen" 2>/dev/null | grep -c pt$) $(cat "$Z/best_model.pt" 2>/dev/null) $(cat "$Z/ema_model.pt" 2>/dev/null) $(cd "$Z" 2>/dev/null && md5sum -c --quiet MD5SUMS > /dev/null 2>&1 && echo y) $(cat "$G/MODE") $(cat "$M/nv2/runs/g9t/G9T_STARTED" 2>/dev/null) $([ -e "$G/PARKED" ] && echo y || echo n) $(grep -c . <<< "$c2")"
+  expect "S16 PARKED.txt: steps, job, source; park.log DONE" "^G9r PARKED .* in job 810367 .*MODE g9r -> g9t.*steps: 99000000 .*source: $T/ws-netv2-810367/run/G9r .*counters: \{'steps': 99000000.* DONE: G9r parked in $Z at 99000000 steps" "$(cat "$Z/PARKED.txt" "$M/nv2/runs/g9t/park.log" 2>/dev/null | tr '\n' ' ')"
+  echo "== S16b: the pending successor 1137377 (fresh, watchdog on) after S16: G9t's newest mirrored file, one successor, not blocked by runs/g9r-parked"
+  printf '1137377 ws-netv2-g9 RUNNING 2026-11-15T01:46:00 (null)\n' > "$WQ"; rm -f "$M/sbatch.log"; echo 15356 > "$M/gpu_mib-1137377"
+  job g9 1137377 10 a16 ws-netv2-g9 restart > /dev/null; c3=$(grep "ws-netv2-1137377/" "$M/calls.log"); sed 's/^/    /' <<< "$c3" | cut -c1-260
+  expect "S16b first: G9t's mirrored save from 810367 (never a G9r file or the parked dir), pool / frozen / best / ema, wrapper, November sets" "^call resume=$G/[0-9]+-[0-9]+-810367/G9t/final_model.pt \[trained-from:trained-from:P3\] run_dir=$T/ws-netv2-1137377/run/G9t pool_dir=$T/ws-netv2-1137377/run/G9t/pool .*anchor=$P1 ps=$NOV $PP9R" "$(sed -n 1p <<< "$c3")"  # (the stub trainer leaves no G9t pool / best to re-seed: S14c checks that)
+  expect "S16b restart in place: its own save" "^call resume=$T/ws-netv2-1137377/run/G9t/final_model.pt \[trained-from:trained-from:trained-from:P3\] .*$PP9R" "$(sed -n 2p <<< "$c3")"
+  expect "S16b args (restart in place): G9q's recipe + --gae-lambda 0.5" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(g9targs g9q 0.5 8 1137377 "$A16X" "$T/ws-netv2-1137377/run/G9t/final_model.pt")'" "$(cat "$M/job-1137377.out")"
+  expect "S16b exactly one sbatch: its successor afterany:1137377 (a16, 10 CPUs, 64G)" "^sbatch --job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 --dependency=afterany:1137377 scripts/slurm_train_v2.sbatch g9 1$" "$(cat "$M/sbatch.log") $(grep -c . "$M/sbatch.log")"
+  expect "S16b WATCHDOG.log: first start (MODE g9t), queued 1300001; never blocked; no G9r call" "MODE g9: g9t .*queued successor 1300001 \(afterany:1137377\) +n 0$" "$(tr '\n' ' ' < "$G/WATCHDOG.log") $(grep -q 'exit without training' "$G/WATCHDOG.log" && echo y || echo n) $(grep -c '/G9r ' <<< "$c3")"
+  echo "== S16c: a fresh g9 job 1137379 with G9r parked and MODE g9t refused (RECIPE removed, G9T_STARTED corrupt): HOLD rounds, no trainer call, never G9r"
+  rm -f "$M/nv2/runs/g9t/RECIPE"; echo corrupt > "$M/nv2/runs/g9t/G9T_STARTED"; printf '1137379 ws-netv2-g9 RUNNING 2026-11-15T03:00:00 (null)\n' > "$WQ"; rm -f "$M/sbatch.log"; echo 15356 > "$M/gpu_mib-1137379"
+  MOCK_HOLD_ROUNDS=2 job g9 1137379 10 a16 ws-netv2-g9 > /dev/null; l=$(cat "$T/ws-netv2-1137379/run/train.log" 2>/dev/null)
+  expect "S16c no trainer call, exit 3 (the mock cap), HOLD, MODE g9t, record untouched" "^0 exit 3 y g9t corrupt$" "$(cnt ws-netv2-1137379 "$M/calls.log") $(grep -o 'exit [0-9]*' <<< "$(job_rc 1137379)") $([ -f "$G/HOLD" ] && echo y) $(cat "$G/MODE") $(cat "$M/nv2/runs/g9t/G9T_STARTED")"
+  expect "S16c train.log: refused (G9T_STARTED unreadable) with G9r parked -> HOLD rounds 1, 2, then the mock cap; never 'G9r continues'" "MODE g9t refused: runs/g9t/G9T_STARTED unreadable .*HOLD: G9r is parked .*\(round 1\): HOLD .*\(round 2\): HOLD .*held 2 rounds \(mock cap\): exit +n$" "$(tr '\n' ' ' <<< "$l") $(grep -q 'G9r continues' <<< "$l" && echo y || echo n)"
+  rm -f "$G/HOLD"
+  echo "== S16d: a fresh g9 job 1137380, MODE g9t refused (no RECIPE, no record) and G9r NOT parked: G9r continues (v13)"
+  t16tree; rm -f "$M/nv2/runs/g9t/RECIPE"; echo g9t > "$G/MODE"; printf '1137380 ws-netv2-g9 RUNNING 2026-11-15T03:00:00 (null)\n' > "$WQ"; echo 15356 > "$M/gpu_mib-1137380"
+  job g9 1137380 10 a16 ws-netv2-g9 > /dev/null; c4=$(grep "ws-netv2-1137380/" "$M/calls.log")
+  expect "S16d G9r's mirrored save, wrapper, November sets; refusal logged; no HOLD" "^call resume=$K/G9r/final_model.pt \[G9r-mirror-final\] run_dir=$T/ws-netv2-1137380/run/G9r .*ps=$NOV ${PP9R%$} MODE g9t refused: no runs/g9t/RECIPE: G9r continues n$" "$(sed -n 1p <<< "$c4") $(grep -h 'MODE g9t refused' "$G"/*-1137380/train.log 2>/dev/null | cut -d' ' -f2-) $([ -f "$G/HOLD" ] && echo y || echo n)"
+  echo "== S16e: the park refuses in 810367 (RECIPE 'g9q 0.6'): MODE g9r, no park dir, G9r relaunches from its own save"
+  t16tree "g9q 0.6"; queue 810367 g9 ../netv2_g9t/inline-a16-park-g9r-start-g9t.sh
+  job g9 810367 10 a16 ws-netv2-g9 restart > /dev/null; c2=$(grep "ws-netv2-810367/" "$M/calls.log")
+  expect "S16e relaunch: G9r from its own save" "^call resume=$T/ws-netv2-810367/run/G9r/final_model.pt \[trained-from:G9r-mirror-final\] run_dir=$T/ws-netv2-810367/run/G9r .*$PP9R" "$(sed -n 2p <<< "$c2")"
+  expect "S16e MODE g9r, no park dir, no G9T_STARTED, FAIL logged" "^g9r n n y$" "$(cat "$G/MODE") $([ -e "$Z" ] && echo y || echo n) $([ -e "$M/nv2/runs/g9t/G9T_STARTED" ] && echo y || echo n) $(grep -q "park-g9r FAIL (MODE untouched: g9r): runs/g9t/RECIPE is not exactly 'g9q 0.5'" "$M/nv2/runs/g9t/park.log" 2>/dev/null && echo y)"
+  if grep -q -E "gae-lambda|/G9t" "$M/job-810367.out"; then bad "S16e G9t args after a refused park"; else ok "S16e no G9t args"; fi
+  chmod -R u+w "$M/nv2/runs/g9t" 2>/dev/null; rm -f "$WQ"*
+  fi
+fi
+# S17 (v15, 2026-11-15; USER decision ~14:05, runs/g9q2/PREREG.txt; skipped with MOCK_SKIP_G9Q2=1 or MOCK_SKIP_G9T=1):
+# the fresh A16 job (watchdog on) with g9 MODE g9q2 after G9t's park (runs/g9/HOLD + runs/g9/PARKED removed at deploy):
+# S17: G9q2's first start from P3 = G9q's recipe + --seed 7272027, the 24c633f wrapper, November sets, cache 72 + cpu
+# 200, one successor queued; its restart in place: its own save, no --seed. S17b: the successor: G9q2's newest mirrored
+# file (never G9q's / G9t's / G9r's), no --seed. S17c: runs/g9/PARKED still there -> exit 0, no trainer call, no sbatch.
+if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+  q2args() {  # q2args JOB EXTRA RESUME: the G9q2 TRAIN_ARGS pattern after --batch-size 4096
+    echo "--lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 --kl-anchor $P3 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P3 --p-frozen 0.67 --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $T/ws-netv2-$1/run/G9q2 --pool-dir $T/ws-netv2-$1/run/G9q2/pool --snapshot-cache 72 --snapshot-cache-cpu 200$2 --resume $3"
+  }
+  q2tree17() {
+    g9ttree; wrapper; rm -f "$WQ"* "$M/sbatch.log"; : > "$WQ"; echo g9q2 > "$G/MODE"
+    mkdir -p "$M/nv2/runs/g9t-parked"; echo parked > "$M/nv2/runs/g9t-parked/PARKED.txt"; echo "2026-11-13T09:11:25 g9q 0.5 parked 810367" > "$M/nv2/runs/g9t/G9T_STARTED"
+    lineage "$G/20261112-015035-810367/G9t" G9t-mirror '14 18:39' 00055000000; lineage "$K/G9q" G9q-mirror '17 12:00' 00025038951
+    echo 15356 > "$M/gpu_mib-1300100"; echo 15356 > "$M/gpu_mib-1300101"
+  }
+  PP24="pp=$M/nv2/src-24c633f:$M/nv2/src$"
+  echo "== S17: a fresh A16 job 1300100 with MODE g9q2: G9q2's first start from P3 (+ --seed), then its restart in place (no --seed)"
+  q2tree17; job g9 1300100 10 a16 ws-netv2-g9 restart > /dev/null; c5=$(grep "ws-netv2-1300100/" "$M/calls.log"); sed 's/^/    /' <<< "$c5" | cut -c1-260
+  expect "S17 first start: P3, G9q2 dirs, P1 eval anchor, November sets, the 24c633f wrapper" "^call resume=$P3 \[P3\] run_dir=$T/ws-netv2-1300100/run/G9q2 pool_dir=$T/ws-netv2-1300100/run/G9q2/pool .*anchor=$P1 ps=$NOV $PP24" "$(sed -n 1p <<< "$c5")"
+  expect "S17 restart in place: its own save" "^call resume=$T/ws-netv2-1300100/run/G9q2/final_model.pt \[trained-from:P3\] run_dir=$T/ws-netv2-1300100/run/G9q2 .*ps=$NOV $PP24" "$(sed -n 2p <<< "$c5")"
+  expect "S17 args (first start, the trainer's argv): G9q's recipe + --seed 7272027" "^1300100 -u -m porygon.v2.train .* --max-hours 70.5 --no-bf16 --n-epochs 3 --batch-size 4096 $(q2args 1300100 " --seed 7272027" "$P3")$" "$(grep '^1300100 ' "$M/argv.log" | sed -n 1p)"
+  expect "S17 restart argv: no --seed" "^1300100 .* --snapshot-cache-cpu 200 --resume $T/ws-netv2-1300100/run/G9q2/final_model.pt$" "$(grep '^1300100 ' "$M/argv.log" | sed -n 2p)"
+  expect "S17 args (restart in place): no --seed" "with TRAIN_ARGS='--no-bf16 --n-epochs 3 --batch-size 4096 $(q2args 1300100 "" "$T/ws-netv2-1300100/run/G9q2/final_model.pt")'" "$(cat "$M/job-1300100.out")"
+  expect "S17 G9Q2_STARTED, MODE g9q2, 2 calls, exactly one sbatch (afterany:1300100, a16, 10 CPUs, 64G)" "^[0-9T:-]+ seed 7272027 g9 1300100 g9q2 2 sbatch --job-name=ws-netv2-g9 --partition=a16 --gres=gpu:1 --cpus-per-task=10 --mem=65536M --time=72:00:00 --dependency=afterany:1300100 scripts/slurm_train_v2.sbatch g9 1$" "$(cat "$M/nv2/runs/g9q2/G9Q2_STARTED" 2>/dev/null) $(cat "$G/MODE") $(grep -c . <<< "$c5") $(cat "$M/sbatch.log") $(grep -c . "$M/sbatch.log")"
+  echo "== S17b: the successor 1300101 (fresh): G9q2's newest mirrored save, no --seed"
+  rm -f "$M/sbatch.log"; : > "$WQ"; job g9 1300101 10 a16 ws-netv2-g9 > /dev/null; c6=$(grep "ws-netv2-1300101/" "$M/calls.log"); sed 's/^/    /' <<< "$c6" | cut -c1-260
+  expect "S17b G9q2's mirrored save from 1300100 (not the newer G9q mirror), wrapper, November sets" "^call resume=$G/[0-9]+-[0-9]+-1300100/G9q2/final_model.pt \[trained-from:trained-from:P3\] run_dir=$T/ws-netv2-1300101/run/G9q2 .*ps=$NOV $PP24" "$(sed -n 1p <<< "$c6")"
+  if grep -q -- "--seed" "$M/job-1300101.out"; then bad "S17b --seed in a later start"; else ok "S17b no --seed"; fi
+  echo "== S17c: runs/g9/PARKED left in place (deploy step skipped): the fresh job exits 0 without training or chaining"
+  q2tree17; touch "$G/PARKED"; job g9 1300100 10 a16 ws-netv2-g9 > /dev/null
+  expect "S17c no trainer call, exit 0, no sbatch, no G9Q2_STARTED" "^0 exit 0 0 n$" "$(cnt ws-netv2-1300100 "$M/calls.log") $(job_rc 1300100) $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0) $([ -e "$M/nv2/runs/g9q2/G9Q2_STARTED" ] && echo y || echo n)"
 fi
 rm -f "$M"/pending-inline* "$M"/gpu_mib-* "$M"/break-*
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"

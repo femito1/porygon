@@ -1,0 +1,30 @@
+G9q-cd@605M 1000-GAME CONFIRMATIONS (raw net vs our pure gen9 search; raw net vs Foul Play gen9) — PRE-REGISTRATION, FINAL
+(netv2, 2026-11-15 ~14:07 UTC; USER DECISION 2026-11-15 ~14:05 relayed by the orchestrator; written before any game).
+Trigger: runs/rawfp/RESULTS.txt (d) G9q-cd@605M vs pure gen9 search 57.0% +- 4.5% (400 g) >= 50% => the standing
+1000-game confirmation; (b) vs Foul Play gen9 57.5% +- 4.4% (400 g) gets a 1000-game measurement too. Fixed n, no looks.
+
+NET (both stages): runs/g9q-cd600/final/00605037107.pt (md5 7c28fac8, sha256 b7957be4...; = rawfp's net), raw, sampling
+T 0.5, duplicate pairs (teams swapped), 95% interval from the pair means (the harnesses' result.txt line).
+
+ONE slot job (24 CPUs, `training`, --time 10:00:00; scripts/netv2_conf605/conf605.sbatch; ledger CLAIM; RELEASE line
+to $C/LEDGER-OUTBOX.md). Order (i) -> (ii). Stages are independent: a failed stage writes runs/conf605/FAILED-<stage>
+and the job goes on. After it: the held gen4 prior test #2 (1172540) runs afterany on this job (released from hold
+once this job is submitted). ETA ~2.4 h (i) + ~1.7 h (ii).
+
+(i) vs OUR PURE GEN9 SEARCH, 1000 games (500 pairs): scripts/netv2_vs_search.sbatch (md5 7d74e0ad = rawfp (d)'s harness)
+    `NET,temperature=0.5 1000 --gen 9 --seed 738201` = the team pairs of G9p-cd's 1000-game confirmation (job 864111,
+    43.4% +- 2.8%), so the two pair.
+    READING (the standing milestone rule): CONFIRMED (raw net >= our search) iff the lower 95% bound > 50%;
+    else NOT CONFIRMED (stated with the point estimate and interval). The 400-game (d) result is not pooled in.
+    Info only: paired difference vs 864111 over the pair ids present in both (G9q-cd@605M - G9p-cd@104.7M, points).
+(ii) vs FOUL PLAY GEN9, 1000 games (500 pairs): data's fp9 harness /vol/bitbucket/fr1226/porygon-ws-data/code/scripts/
+    netv2_foulplay_fp9.sbatch (md5 7476be8b = rawfp (b)'s harness; K = 20 Foul Play instances x 50 games, 1 s per
+    state, parallelism 1) `NET 1000 --gen 9 --seed 5150417 --temperature 0.5`. Seed 5150417 is NEW: grep-checked
+    2026-11-15 ~14:05 against every manifest.txt seed under runs/ (depth <= 3) of porygon-ws-{netv2,data,fastenv,wsp}
+    and gloria, the PREREG / notes .txt files, scripts and plans of the stream dirs, and .orchestra/: no hit.
+    READING: "the raw net beats Foul Play gen9" CONFIRMED iff the lower 95% bound > 50%; else NOT CONFIRMED. The
+    1000-game number is the headline for this net vs Foul Play; the 400-game (b) result is not pooled in.
+
+Outputs: runs/conf605/{STATUS, RESULTS.txt (r--), FAILED-<stage>}; run dirs runs/vs-search-<date>-<job>/,
+runs/foulplay-net-<date>-<job>/. Measurements only: no decision is taken by the job; the readings go to the
+orchestrator.
