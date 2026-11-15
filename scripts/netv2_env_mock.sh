@@ -955,6 +955,13 @@ q2tree; mv "$N/bin/py-src-24c633f" "$N/bin/off"; W=$ROOTM/wd-1300100; o=$(q2src 
 yes_ 57d '[ -f "$N/runs/g9/HOLD" ]'; check 57d2 "MODE g9q2 but no $N/bin/py-src-24c633f \(G9q2's src\): HOLD" "$(cat "$W/run/train.log")"
 # 57e: a >= 40 GB GPU: 512 + --stacked-opp (G9q's A16-branch rule; the a16 job never gets one)
 q2tree; W=$ROOTM/wd-1300100; o=$(WD_GPU=46068 q2src 1300100); check 57e "--pool-dir $W/run/G9q2/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --seed 7272027 --resume $P3$" "$o"
+# 57e2 (orchestrator 11-15 16:4x: G9q's A16 TRAIN_ARGS on whatever GPU, at least until 50M; only speed-only,
+# logits-equivalent options may differ): on an A40 (46068) / A100 (40960, 81920) the first-start args equal the A16's
+# with "--snapshot-cache 72" replaced by "--snapshot-cache 512 --stacked-opp" and nothing else; 8 workers everywhere
+q2tree; W=$ROOTM/wd-1300100; a16=$(WD_GPU=15356 q2src 1300100)
+for g in 46068 40960 81920; do q2tree; o=$(WD_GPU=$g q2src 1300100)
+  yes_ "57e2-$g" '[ "${o#*TRAIN_ARGS=}" = "$(sed "s# --snapshot-cache 72 # --snapshot-cache 512 --stacked-opp #" <<< "${a16#*TRAIN_ARGS=}")" ] && [ "${o%%|TRAIN_ARGS=*}" = "${a16%%|TRAIN_ARGS=*}" ]'
+  check "57e3-$g" "--fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 " "$o"; done
 # 57f: guard trips: collapse -> KL x3 from the trip state (state runs/g9q2 only); then a second trip -> HOLD
 q2tree; W=$ROOTM/wd-1300100; q2src 1300100 > /dev/null; echo g9q2-final > "$W/run/G9q2/final_model.pt"; echo "collapse: entropy 0.4 < 0.5" > "$W/run/G9q2/GUARD_TRIPPED"
 o=$(q2src 1300100); check 57f "--kl-anchor-coef 0.3 .*--run-dir $W/run/G9q2 .*--resume $W/run/G9q2/final_model.pt$" "$o"
