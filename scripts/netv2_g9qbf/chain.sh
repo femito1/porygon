@@ -1,6 +1,6 @@
 #!/bin/bash
 # netv2 2026-11-15: the bf16 A/B chain (runs/g9qbf/PREREG.txt; orchestrator decision ~20:05, item 3), a step of the A40
-# job 1173274: OVERALL.txt -> deploy netv2.env v17 (no job in nv2_pause) -> INLINE #1 (park G9q2, fork point, staged pool,
+# job 1173274: OVERALL.txt -> deploy netv2.env v18 (= v17 + MODE g9qent; no job in nv2_pause) -> INLINE #1 (park G9q2, fork point, staged pool,
 # microbench, GO => MODE g9qbf) -> verify the fork's first start -> R+25 / R+50 (cmp_step, seq-gain; STOP if "fp32 >
 # bf16" succeeds) -> park the fork (INLINE #2) -> runs/g9qbf/VERDICT.txt. Status runs/g9qbf-chain/STATUS; FAILED there.
 #   setsid nohup srun --jobid=1173274 --overlap --ntasks=1 -c 4 --gres=gpu:1 --mem=12G -J nv2-qbf env JOBPP=<job script pid> \
@@ -8,7 +8,7 @@
 set -uo pipefail
 C=/vol/bitbucket/fr1226/porygon-ws-netv2; K=$C/runs/g9qbf-chain; F=$C/runs/g9qbf; B=$C/runs/g9qbf-bench; R=$C/runs/g9
 J=${SLURM_JOB_ID:?}; JOBPP=${JOBPP:?set JOBPP = the job script pid}; LQ=/tmp/ws-netv2-$J/run
-PRE_MD5=a77115fe; ENV_PRED=2a7aaea1; ENV17=$C/netv2.env.v17-g9qbf; ENV17_MD5=0f951c39
+PRE_MD5=a77115fe; ENV_PRED=2a7aaea1; ENV17=$C/netv2.env.v18-g9qent; ENV17_MD5=553bfec9  # v18 = v17 + MODE g9qent (the entropy arm, runs/g9qent/PREREG.txt), deployed in v17's place (orchestrator 11-15 ~22:20)
 I1_MD5=f261fc81; PK_MD5=ed1062b9; CMP_MD5=a80c7da2
 PAT='^/vol/bitbucket/fr1226/gloria/.venv/bin/python -u -m porygon.v2.train( |$)'
 mkdir -p "$K" "$F" "$B"
@@ -87,7 +87,7 @@ until [ -f "$C/runs/g9q2/cmp/OVERALL.txt" ] && [ ! -w "$C/runs/g9q2/cmp/OVERALL.
 done
 st "OVERALL present: $(sed -n 2p "$C/runs/g9q2/cmp/OVERALL.txt" | cut -c1-150)"
 # ---- 1. deploy netv2.env v17 (no job in nv2_pause) ----
-if [ "$(md5of "$C/netv2.env")" = "$ENV17_MD5" ]; then st "netv2.env is v17 already ($ENV17_MD5)"
+if [ "$(md5of "$C/netv2.env")" = "$ENV17_MD5" ]; then st "netv2.env is v18 already ($ENV17_MD5)"
 else
   [ "$(md5of "$C/netv2.env")" = "$ENV_PRED" ] || fail "live netv2.env md5 $(md5of "$C/netv2.env") is not the pinned predecessor $ENV_PRED: no deploy"
   t1=$(date +%s)
@@ -101,7 +101,7 @@ else
   cp "$ENV17" "$C/netv2.env.new" && [ "$(md5of "$C/netv2.env.new")" = "$ENV17_MD5" ] && bash -n "$C/netv2.env.new" || fail "staging netv2.env.new failed"
   mv -f "$C/netv2.env.new" "$C/netv2.env" || fail "mv netv2.env.new failed"
   [ "$(md5of "$C/netv2.env")" = "$ENV17_MD5" ] || fail "after the deploy netv2.env md5 is $(md5of "$C/netv2.env")"
-  st "DEPLOYED netv2.env v17 ($ENV17_MD5); backup $bk ($(md5of "$bk"))"
+  st "DEPLOYED netv2.env v18 (= v17 + MODE g9qent; $ENV17_MD5); backup $bk ($(md5of "$bk"))"
 fi
 # ---- 2-4. INLINE #1: park G9q2 + fork point + staged pool + microbench ----
 cat > "$K/inline1.txt" <<INL

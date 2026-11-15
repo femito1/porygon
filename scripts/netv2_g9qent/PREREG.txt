@@ -1,0 +1,50 @@
+ENTROPY-SCHEDULE ARM G9qent ON THE A40 (job 1173274 after the bf16 A/B) — PRE-REGISTRATION, FINAL (netv2, 2026-11-15
+~22:15 UTC; ORCHESTRATOR DECISION 2026-11-15 ~21:55 (main, under the user's delegation): the A40's next use, the
+untried runner-up recipe lever of PLAN; written before the trigger, any fork and any game; read-only copy
+runs/g9qent/PREREG.txt). The arm changes G9q's recipe in ONE way: the entropy coefficient follows a schedule.
+
+TRIGGER (one cluster-side chain, scripts/netv2_g9qent/chain-e.sh, a step of job 1173274; no agent): whichever comes
+  first: runs/g9qbf/SKIP.txt (bf16 not faster; the A40 HOLDs with G9q2 parked), or runs/g9qbf/VERDICT.txt together
+  with runs/g9qbf-parked/PARKED.txt (the bf16 fork parked). Waits <= 60 h. Needs the live netv2.env = v18 (md5 pinned;
+  = v17 + MODE g9qent; the bf16 chain deploys v18 in place of v17 after G9q2's OVERALL, since the env must not change
+  while the A40 then HOLDs) and the A40 in the park HOLD; else FAILED, nothing started.
+START (one INLINE_CMD in runs/g9, installed during the park HOLD; the chain then lifts runs/g9/HOLD so it runs):
+  FORK POINT = G9q's newest mirrored checkpoint at that time (newest runs/r1/*/G9q/checkpoints/ckpt_<S0>.pt), copied r--
+  to runs/g9qent/fork-point-<S0>.pt (md5 in runs/g9qent/FORK_POINT); its pool (snapshots <= S0, frozen P3 + best-* <= S0,
+  best / ema) staged in $LOCAL/run/G9qent; runs/g9/MODE = g9qent.
+THE ARM G9qent (netv2.env v18 MODE g9qent; laptop env mock 61): G9q's live recipe on this A40 exactly as G9q2 ran it
+  (fp32 --no-bf16, 8 workers, --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200, wsd lr 7e-5, P3 frozen +
+  --frozen-best, eval anchor P1, November sets), unseeded, from the fork point (steps S0, optimizer + counters), through
+  $C/bin/py-src-8892762 (read-only src-8892762 = ws/netv2 8892762 = ff32b71's src + the schedule; its default path is
+  G9q's: ent coef constant 0.01), with ONE change: --ent-schedule linear --ent-final 0.001 --ent-start S0 --ent-horizon
+  50000000 (entropy coefficient 0.01 at S0, linearly to 0.001 at S0 + 50M, flat after), plus what the schedule forces:
+  --guard-entropy-min 0.35 in place of 0.5 (lower entropy is the intended effect; 0.35 = the cooldown branches' and
+  G9r's floor). Guard trips: no fallback: any trip => runs/g9qent/TRIPPED + HOLD => the arm ends as FAIL.
+  The chain checks the first-start argv (--ent-* flags with S0, the 0.35 floor, --no-bf16, the fork point) and re-arms
+  runs/g9/restart. Length: until the arm's first checkpoint >= S0 + 50,000,000.
+READING (cooled vs cooled, as G9r / G9t rule 2), at the arm's first checkpoint Sa >= S0 + 50M: ONE INLINE_CMD (the
+  arm's trainer stopped by ONE SIGINT outside an async eval) runs, one after the other on the A40, two cooldown branches
+  of the same recipe as G9q-cd@605M / @800M (5M steps, --cooldown-start S --total-steps S + 5M --final-lr-frac 0.1,
+  cosine 7e-5 -> 7e-6, --guard-entropy-min 0.35, own run / pool dirs, pool snapshots and frozen bests > S moved out,
+  limit 2 h each), both through py-src-8892762 with the arm's recorded argv:
+    arm-cd   = from the arm's checkpoint Sa (its schedule included: coefficient 0.001 there);
+    G9q-cd   = from G9q's first mirrored checkpoint Sq >= S0 + 50M (runs/r1/*/G9q/checkpoints), the arm's argv minus the
+               eight --ent-* tokens (= G9q's recipe, ent coef 0.01), its pool = that mirrored G9q dir's pool <= Sq.
+  then parks the arm (scripts/netv2_g9qbf/park.sh -> runs/g9qent-parked/, PARKED.txt + MD5SUMS; v18 then HOLDs the A40).
+  Finals: runs/g9qent-cd/final/<step>.pt, runs/g9qent-g9qcd/final/<step>.pt (r--; md5s in runs/g9qent-chain/STATUS).
+  H2H: in-process, scripts/netv2_cmp_step.sh (md5 a80c7da2, unmodified; STEP 0; A = arm-cd ("G9s"), B = G9q-cd ("G9p"));
+  both raw T 0.5; duplicate pairs; wsp's sequential design runs/cmp/seq-gain.json (f12fec7c: theta0 50 -> theta1 52%,
+  alpha 0.025 per one-sided test, power 0.8, looks every 100 pairs, n_max 2400); both directions on the same pairs;
+  nested pair-id order = record; 7 workers (the A40 is idle then); seed 5005001.
+  VERDICT (runs/g9qent/VERDICT.txt, r--):
+    SUCCESS of "arm-cd > G9q-cd" => PASS: the entropy schedule improves the cooled net at +50M => G9q's recipe may adopt
+      it (the orchestrator's decision; the ONLY outcome that changes G9q's recipe);
+    SUCCESS of "G9q-cd > arm-cd" => FAIL (the schedule hurts);
+    both FUTILITY => NO GAIN (G9q unchanged); else INCONCLUSIVE (G9q unchanged).
+    A guard trip of the arm => FAIL (no reading). The env md5 at the fork and at the reading are recorded; if they
+    differ (e.g. G9q's recipe changed meanwhile), the VERDICT says so and the orchestrator judges it.
+Seed 5005001, NEW: grep-checked 2026-11-15 ~22:06 UTC (the R800 / conf800 scope, 640 record files under porygon-ws-*,
+  gloria/runs manifests, the laptop's .orchestra/ and worktree scripts/docs): no hit.
+Outputs: runs/g9qent-chain/{STATUS, FAILED}, runs/g9qent/{FORK_POINT, fork-point-<S0>.pt, G9QENT_STARTED, TRIPPED,
+  first-argv.txt, VERDICT.txt}, runs/g9qent-cd/, runs/g9qent-g9qcd/, runs/g9qent-h2h/{RESULT.txt, READING.txt},
+  runs/g9qent-parked/. Every result goes to the orchestrator, numbers re-read from the files.

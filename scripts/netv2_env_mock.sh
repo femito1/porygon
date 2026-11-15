@@ -1065,6 +1065,32 @@ o=$(WD_GPU=46068 q2src 1300210); check 60h "^RC=0\|PY=$N/bin/py-src-24c633f\|.*T
 checkno 60h2 "no-bf16|--seed" "$o"
 rm -rf "$N/runs/g9qbf" "$N/runs/g9qbf-parked" "$N/runs/g9q2-parked"; echo g9q2 > "$N/runs/g9/MODE"; rm -f "$N/runs/g9/HOLD"
 fi
+if [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 61 (v18, 2026-11-15; runs/g9qent/PREREG.txt): the entropy-schedule arm G9qent on the A40. From the parked-G9q2 HOLD
+# (after SKIP / the bf16 park) an INLINE_CMD stages it and writes MODE g9qent => first start = G9q2's restart args
+# (fp32 kept) with the G9qent dirs, --guard-entropy-min 0.35, + --ent-schedule linear --ent-final 0.001 --ent-start S0
+# --ent-horizon 50000000, resume = the fork point, PY = py-src-8892762; restarts / a fresh job; trip => TRIPPED + HOLD.
+qetree() { qbtree; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-8892762"; chmod +x "$N/bin/py-src-8892762"
+  EP=$N/runs/g9qent/fork-point-00880050000.pt; mkdir -p "$N/runs/g9qent" "$N/runs/g9q2-parked"; echo fp880 > "$EP"; echo parked > "$N/runs/g9q2-parked/PARKED.txt"; }
+epok() { echo "$EP 880050000 $(md5sum < "$EP" | cut -c1-8)" > "$N/runs/g9qent/FORK_POINT"; mkdir -p "$W/run/G9qent/pool"; touch "$W/run/G9qent/.staged-880050000"; }
+qetree; epok; echo "echo g9qent > $N/runs/g9/MODE" > "$N/runs/g9/INLINE_CMD"; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2//$W\/run\/G9q2/$W/run/G9qent}"; ex="${ex/ --guard-entropy-min 0.5 / --guard-entropy-min 0.35 }"
+ex="${ex/--snapshot-cache-cpu 200 --resume*/--snapshot-cache-cpu 200 --ent-schedule linear --ent-final 0.001 --ent-start 880050000 --ent-horizon 50000000 --resume $EP}"
+ex="${ex/PY=$N\/bin\/py-src-24c633f/PY=$N/bin/py-src-8892762}"
+yes_ 61a '[ "$o" = "$ex" ]'; yes_ 61a2 'grep -q " 880050000 g9 1300200" "$N/runs/g9qent/G9QENT_STARTED" && [ "$(cat "$N/runs/g9/MODE")" = g9qent ] && [ ! -e "$N/runs/g9/HOLD" ]'
+check 61a3 "TRAIN_ARGS=--no-bf16 " "$o"; checkno 61a4 "--seed|G9q2|G9qbf|guard-entropy-min 0.5" "${o#*TRAIN_ARGS=}"; check 61a5 "G9qent first start: the fork of G9q at 880050000" "$(cat "$W/run/train.log")"
+echo qe-final > "$W/run/G9qent/final_model.pt"; o=$(WD_GPU=46068 q2src 1300200); yes_ 61b '[ "$o" = "${ex%--resume *}--resume $W/run/G9qent/final_model.pt" ]'
+echo "eval score 40% < best 82.5% - 15% for 2 evals" > "$W/run/G9qent/GUARD_TRIPPED"; o2=$(WD_GPU=46068 q2src 1300200)
+yes_ 61c '[ "$o2" = "$o" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q "for 2 evals" "$N/runs/g9qent/TRIPPED" && [ ! -e "$N/runs/g9qent/FU.started" ] && ls "$W"/run/G9qent/GUARD_TRIPPED.ab-* > /dev/null 2>&1'
+rm -f "$N/runs/g9/HOLD"; mkdir -p "$N/runs/g9qent-parked"; echo parked > "$N/runs/g9qent-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 61d "^RC=3\|$" "$o"; check 61d2 "MODE g9qent is parked" "$(cat "$W/run/train.log")"
+qetree; echo g9qent > "$N/runs/g9/MODE"; epok; echo "$EP 880050000 deadbeef" > "$N/runs/g9qent/FORK_POINT"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 61e "^RC=3\|$" "$o"; yes_ 61e2 '[ ! -e "$N/runs/g9qent/G9QENT_STARTED" ] && grep -q "MODE g9qent: no valid first start" "$W/run/train.log"'
+qetree; echo g9qent > "$N/runs/g9/MODE"; echo "2026-11-16T04:00:00 880050000 g9 1300200" > "$N/runs/g9qent/G9QENT_STARTED"; epok
+MQ=$N/runs/g9/20261116-040000-1300200/G9qent; mkdir -p "$MQ/pool"; echo mq > "$MQ/final_model.pt"; W2=$ROOTM/wd-1300220
+o=$(WD_GPU=46068 q2src 1300220); check 61f "^RC=0\|PY=$N/bin/py-src-8892762\|.*TRAIN_ARGS=--no-bf16 .*--guard-entropy-min 0.35 .*--run-dir $W2/run/G9qent .*--ent-schedule linear --ent-final 0.001 --ent-start 880050000 --ent-horizon 50000000 --resume $MQ/final_model.pt$" "$o"
+rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf"; rm -f "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
