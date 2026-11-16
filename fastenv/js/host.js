@@ -26,6 +26,15 @@
 //   decides alone (a forced switch): its current observation (mask = action 0, as poke-env's wait step) and the
 //   reward since its previous row, i.e. exactly what poke-env's SinglesEnv returns to the waiting agent (verified by
 //   scripts/fastenv/parity_v1.py wait points). For fastenv_vec.FastVecEnv's poke-env lockstep semantics.
+// --dump-states PATH: append one JSON line per decision row (needs_action) with the simulator's full battle state
+//   (fastenv/js/dump.js: {t:'S', game, slot, side, turn, idx, e, state}) and one per finished battle
+//   ({t:'G', game, winner, turns, truncated, crashed, inputlog[, streams]}). game = "<seed>:<battle>:<k>" (worker
+//   seed, battle position, k-th battle there); idx = the side's decision counter in that game; e = index of the
+//   side's last client message (its stream) when the row was emitted = data_replay's Decision.msg. inputlog =
+//   Showdown's own input log (seed, packed teams, every committed choice: replayable by Showdown's tools).
+//   PATH may be a FIFO (a consumer converting on the fly). porygon.nnue.convert_full turns a state into a pe.State.
+// --dump-streams 1 (with --dump-states): G lines also carry each side's first-person client stream (log chunks,
+//   '|request|JSON', '|error|...': what a server would send that player), i.e. an F2 record's `stream` (parity).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -39,14 +48,14 @@ const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 function parseArgs(argv) {
   const a = {format: 'gen9randombattle', battles: 64, seed: 1, encoder: 'v1', fdIn: 0, fdOut: 1,
     shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0, bots: '',
-    waitRows: 0};
+    waitRows: 0, dumpStates: '', dumpStreams: 0};
   for (let i = 2; i < argv.length; i += 2) {
     const k = argv[i].replace(/^--/, '').replace(/-(.)/g, (_, c) => c.toUpperCase());
     a[k] = argv[i + 1];
   }
   a.battles = +a.battles; a.seed = +a.seed; a.fdIn = +a.fdIn; a.fdOut = +a.fdOut;
   a.victory = +a.victory; a.maxTurns = +a.maxTurns; a.duplicate = +a.duplicate; a.botBattles = +a.botBattles;
-  a.waitRows = +a.waitRows;
+  a.waitRows = +a.waitRows; a.dumpStreams = +a.dumpStreams;
   const [f, h, s] = String(a.shaping).split(',').map(Number);
   a.shapingW = {fainted: f, hp: h, status: s, victory: a.victory};
   return a;
@@ -59,6 +68,15 @@ const {SideTracker} = require(args.encoder === 'stub' ? './encoder_stub' : './tr
 const GEN = +args.format.match(/^gen(\d)/)[1];
 const D = E.OBS_DIM, A = E.nActions(GEN);
 const prng = new PRNG([args.seed & 0xffff, (args.seed >>> 16) & 0xffff, 0x5eed, 0xfa57]);
+const DUMP = args.dumpStates ? require('./dump') : null;
+const dumpFd = DUMP ? fs.openSync(args.dumpStates, 'a') : null;
+function dumpLine(obj) {
+  const b = Buffer.from(JSON.stringify(obj) + '\n');
+  let off = 0;
+  while (off < b.length) {
+    try { off += fs.writeSync(dumpFd, b, off, b.length - off); } catch (e) { if (e.code !== 'EAGAIN') throw e; }
+  }
+}
 
 // --- battles ---------------------------------------------------------------------------------------
 class Slot {  // one battle position: the current battle, its trackers and per-side bookkeeping
@@ -92,15 +110,23 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
     this.dynBot = null;        // a --bots bot Python handed side two of this battle to (action -2-k)
     this.oppPrev = [[-1, 0, 0, 0], [-1, 0, 0, 0]];
     this.auxTeams = [aux.teamIds(teams[0], GEN), aux.teamIds(teams[1], GEN)];
+    // --dump-states: per-side client message counts (row e), streams (--dump-streams), decision counters
+    this.gameId = `${args.seed}:${this.i}:${this.games}`;
+    this.nmsg = [0, 0];
+    this.streams = DUMP && args.dumpStreams ? [[], []] : null;
+    this.didx = [0, 0];
+    const keep = this.streams !== null;
+    const msg = (n, text) => { this.nmsg[n]++; if (keep) this.streams[n].push(text); };
     this.battle = new SimBattle(args.format, battleSeed, teams.map(t => JSON.parse(JSON.stringify(t))), {
-      keepRequestJSON: false,
-      onLog: (n, text) => this.trackers[n].onLog(text),
-      onRequest: (n, req) => this.trackers[n].onRequest(req),
-      onError: (n, text) => this.trackers[n].onError(text),
+      keepRequestJSON: keep,
+      onLog: (n, text) => { msg(n, text); this.trackers[n].onLog(text); },
+      onRequest: (n, req, json) => { msg(n, `|request|${json}`); this.trackers[n].onRequest(req); },
+      onError: (n, text) => { msg(n, text); this.trackers[n].onError(text); },
     });
     this.games++;
     try {
       this.battle.start();
+      if (DUMP) this.order = DUMP.initialOrder(this.battle.battle);
     } catch (e) {  // tracker (PokeEnvError) or simulator failure at battle start: void battle
       stats.crashed++;
       this.crashed = true;
@@ -160,6 +186,10 @@ function row(slot, side, needsAction, done, wait = false) {
   if (slot.first[side] && needsAction) { f |= 4; slot.first[side] = false; }
   if (slot.rejected[side]) { f |= 8; slot.rejected[side] = false; }
   V.flags[n] = f;
+  if (DUMP && needsAction && !slot.crashed) {
+    dumpLine({t: 'S', game: slot.gameId, slot: slot.i * 2 + side, side, turn: slot.battle.turn, idx: slot.didx[side]++,
+      e: slot.nmsg[side] - 1, state: DUMP.battleState(slot.battle.battle, side, slot.order)});
+  }
   V.turn[n] = Math.min(slot.battle.turn, 65535);
   const w = slot.battle.winner;
   V.win[n] = !done || slot.crashed ? 0 : w === (side ? 'p2' : 'p1') ? 1 : w === (side ? 'p1' : 'p2') ? -1 : 0;
@@ -224,6 +254,12 @@ function emitSlot(slot) {
     stats.truncated++;
   }
   if (b.ended || slot.crashed) {
+    if (DUMP) {
+      const g = {t: 'G', game: slot.gameId, winner: b.winner ?? null, turns: b.turn, truncated: b.turn >= args.maxTurns,
+        crashed: slot.crashed, inputlog: b.battle.inputLog};
+      if (slot.streams) g.streams = slot.streams;
+      dumpLine(g);
+    }
     stats.games++;
     stats.turns += b.turn;
     row(slot, 0, false, true);
@@ -362,6 +398,7 @@ for (;;) {
 finish();
 
 function finish() {
+  if (dumpFd !== null) fs.closeSync(dumpFd);
   if (process.env.PORYGON_FASTENV_VERBOSE) process.stderr.write(`host done: ${JSON.stringify(stats)}\n`);
   process.exit(0);
 }
