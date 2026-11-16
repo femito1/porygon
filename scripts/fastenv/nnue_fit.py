@@ -96,8 +96,8 @@ def main() -> int:
     for ep in range(a.epochs):
         te = time.time()
         perm = tr[rng.permutation(len(tr))]
-        tot, n = 0.0, 0
-        for i in range(0, len(perm), a.batch):
+        tot, n = torch.zeros((), device=dev), 0
+        for j, i in enumerate(range(0, len(perm), a.batch)):
             idx = np.sort(perm[i:i + a.batch])  # sorted gathers are faster; order inside a batch is irrelevant
             ids, mon, side, field, yy = batch(idx)
             loss = torch.nn.functional.binary_cross_entropy_with_logits(net(ids, mon, side, field), yy)
@@ -105,14 +105,15 @@ def main() -> int:
             loss.backward()
             opt.step()
             sched.step()
-            tot += float(loss) * len(idx)
+            tot += loss.detach() * len(idx)  # no per-step GPU sync
             n += len(idx)
-            if not math.isfinite(tot):
+            if (j % 500 == 499 or i + a.batch >= len(perm)) and not math.isfinite(float(tot)):
                 log["diverged"] = {"epoch": ep, "step": i // a.batch}
                 (out / "fit.json").write_text(json.dumps(log, indent=1))
                 print(f"diverged at epoch {ep}", file=sys.stderr)
                 return 3
         vl = val_loss()
+        tot = float(tot)
         log["epochs"].append({"epoch": ep, "train_bce": tot / n, "val_bce": vl, "seconds": time.time() - te,
                               "lr": sched.get_last_lr()[0]})
         print(f"epoch {ep}: train {tot / n:.5f} val {vl:.5f} ({time.time() - te:.0f} s)", flush=True)
