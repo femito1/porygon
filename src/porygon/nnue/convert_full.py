@@ -106,6 +106,10 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
     mons = (mons + [pe.Pokemon.create_fainted() for _ in range(6)])[:6]
     vol = {k: v for k, v in (act["volatiles"] if act else {}).items() if k not in SKIP}
     names = {k.upper() for k in vol if known_volatile(k.upper())}
+    for k in ("protosynthesis", "quarkdrive"):  # the engine names the boosted stat (QUARKDRIVEATK, ...)
+        stat = (vol.get(k) or {}).get("bestStat")
+        if stat and known_volatile(f"{k.upper()}{stat.upper()}"):
+            names.add(f"{k.upper()}{stat.upper()}")
     if act is not None and not act["terastallized"] and act["species"] in search.GEN.pokedex \
             and _types(act) != search.dex_types(act["species"]) and known_volatile("TYPECHANGE"):
         names.add("TYPECHANGE")  # the simulator changes types in place (Soak, Burn Up, ...); poke-env's effect
