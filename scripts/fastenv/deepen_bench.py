@@ -12,6 +12,10 @@ position at T 0.5 and the margin gate applied with --margin.
       $PY scripts/fastenv/deepen_bench.py run --records "$SL" --source 6771931 --rows $I/s2-sl-ARP.jsonl \\
         --net NET --out DIR --positions 120 --workers 10 --concurrency 3
     ... deepen_bench.py report DIR          (pure: summary.json + summary.txt)
+    ... deepen_bench.py delta --records ... --rows ROWS --net NET --out OUT.jsonl --budget B [--ref-worlds 32
+        --ref-scale 4]    the lookahead2 δ rule (lookahead2_study.analyze_bench) for deepen at budget B: per position
+        A = deepen(K 8, B) and judge R = deepen(K 32, 4B) on fresh worlds, both with the same a_net (the net's T 0.5
+        draw, seeded per position); the row's "probs" is that draw one-hot, so the analysis is over the played draw.
 """
 import argparse
 import asyncio
@@ -131,6 +135,73 @@ async def run(a) -> int:
     return 0 if all(p["failed"] <= 0.02 * len(pos) for p in passes.values()) else 1
 
 
+async def delta(a) -> int:
+    import netsearch_study as ST
+    NS, S, R = ST.setup(a.format)
+    import lookahead2_study as LS
+    import torch
+    from porygon import deepen as D
+    torch.set_num_threads(1)
+    net = ST.load_net(a.net, "cpu")
+    leaf = ST.load_net(a.net, a.leaf_device)
+    rows = [json.loads(x) for x in open(a.rows) if x.strip()]
+    want: dict[tuple, set] = {}
+    for r in rows:
+        want.setdefault((r["rec"], r.get("side")), set()).add(r["idx"])
+    recs = [r for r in ST.records(a.records, a.source, a.seed) if (r["id"], r.get("side")) in want]
+    pool = D.DeepenPool(a.workers)
+    out = open(a.out, "a")
+    sem = asyncio.Semaphore(a.concurrency)
+    done = {"n": 0, "fail": 0}
+    t_start = time.time()
+    runs = [("A", a.worlds, a.budget), ("R", a.ref_worlds, a.budget * a.ref_scale)]
+
+    async def one(rec):
+        async with sem:
+            key = (rec["id"], rec.get("side"))
+            async for d, battle, first, logged in ST.replay_targets(rec, R, NS, 9, want[key]):
+                if done["n"] >= a.positions:
+                    return
+                probs, mask, win = NS.net_forward(net, battle)
+                if mask.sum() < 2:
+                    continue
+                name = f"{rec['id']}:{rec.get('side')}:{d.msg}"
+                p = NS.sharpen(probs, 0.5)
+                a_net = int(np.random.default_rng(int(hashlib.sha1(name.encode()).hexdigest()[:8], 16))
+                            .choice(len(p), p=p / p.sum()))
+                onehot = [0.0] * len(probs)
+                onehot[a_net] = 1.0
+                row = {"rec": rec["id"], "side": rec.get("side"), "idx": d.msg, "turn": d.turn, "n_legal": int(mask.sum()),
+                       "probs": onehot, "probs_net": [round(float(x), 6) for x in probs], "a_net": a_net,
+                       "win": round(win, 5), "budget": a.budget}
+                try:
+                    for nm, k, b in runs:
+                        rng = random.Random(f"{a.seed}:{rec['id']}:{rec.get('side')}:{d.msg}:{nm}")
+                        t0 = time.perf_counter()
+                        res = await D.deepen(pool, leaf, battle, first, rng, mask, probs, a_net, worlds=k,
+                                             cfg=D.Config(budget=b))
+                        row[nm] = LS.run_row(res, time.perf_counter() - t0)
+                        row[nm].update(extra_leaves=res.extra_leaves, depth=res.depth)
+                except Exception as e:
+                    done["fail"] += 1
+                    row["error"] = f"{type(e).__name__}: {e}"
+                out.write(json.dumps(row) + "\n")
+                out.flush()
+                done["n"] += 1
+                if done["n"] % 25 == 0:
+                    print(f"{done['n']} positions ({done['fail']} failed), {time.time() - t_start:.0f}s", flush=True)
+
+    await asyncio.gather(*(one(r) for r in recs))
+    out.close()
+    await pool.close()
+    s = LS.analyze_bench(a.out)
+    Path(a.out + ".json").write_text(json.dumps(s, indent=1))
+    txt = LS.format_bench(s)
+    Path(a.out + ".txt").write_text(txt + "\n")
+    print(txt)
+    return 0 if done["n"] and done["fail"] <= 0.02 * done["n"] else 1
+
+
 def report(out: Path) -> str:
     out = Path(out)
     rows = [json.loads(x) for x in open(out / "rows.jsonl") if x.strip()]
@@ -236,10 +307,28 @@ def main() -> int:
     r.add_argument("--seed", type=int, default=11)
     p = sub.add_parser("report")
     p.add_argument("out")
+    d = sub.add_parser("delta")
+    d.add_argument("--records", nargs="+", required=True)
+    d.add_argument("--source", default=None)
+    d.add_argument("--rows", required=True)
+    d.add_argument("--net", required=True)
+    d.add_argument("--out", required=True)
+    d.add_argument("--format", default="gen9randombattle")
+    d.add_argument("--budget", type=int, required=True)
+    d.add_argument("--worlds", type=int, default=8)
+    d.add_argument("--ref-worlds", type=int, default=32)
+    d.add_argument("--ref-scale", type=int, default=4)
+    d.add_argument("--positions", type=int, default=100000)
+    d.add_argument("--workers", type=int, default=10)
+    d.add_argument("--concurrency", type=int, default=3)
+    d.add_argument("--leaf-device", default="cuda")
+    d.add_argument("--seed", type=int, default=11)
     a = ap.parse_args()
     if a.cmd == "report":
         print(report(Path(a.out)))
         return 0
+    if a.cmd == "delta":
+        return asyncio.run(delta(a))
     return asyncio.run(run(a))
 
 
