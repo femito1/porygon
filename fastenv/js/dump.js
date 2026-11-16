@@ -12,6 +12,7 @@
 //            status_state, boosts, volatiles: {id: effect}, last_move, active_turns, fainted, active, trapped (incl. by a hidden ability), weightkg,
 //            transformed, illusion (species shown | null)}
 //   field = {weather, weather_state, terrain, terrain_state, pseudo: {id: effect}}
+//   the opponent's mons (of the side to move) also carry seen_hp: the HP fraction its tracker has seen (null: never)
 // A mon's volatiles also carry _start (the turn it most likely started: the first dump that saw it is at the start
 // of turn T => T - 1; at a forced switch within turn T => T) and _time0 (its `time` then, e.g. confusion's attempts
 // left): elapsed counts as poke-env (turn - _start) / search.convert pass them to the engine.
@@ -94,9 +95,12 @@ function initialOrder(battle) {
   return battle.sides.map(s => s.pokemon.slice());
 }
 
-function battleState(battle, side, order) {
+/** `tracker`: the side-to-move's poke-env tracker; the opponent's mons then carry seen_hp = the HP fraction that side
+ *  has seen (poke-env's current_hp_fraction; 0 fainted, null never seen): what a client-side converter knows (a silent
+ *  Regenerator heal is not seen). */
+function battleState(battle, side, order, tracker = null) {
   const f = battle.field;
-  return {
+  const st = {
     turn: battle.turn, gen: battle.gen, side,
     sides: battle.sides.map((s, i) => ({
       n: i, active: s.active[0] ? order[i].indexOf(s.active[0]) : -1,
@@ -108,6 +112,14 @@ function battleState(battle, side, order) {
     field: {weather: f.weather || '', weather_state: effect(f.weatherState, battle), terrain: f.terrain || '',
       terrain_state: effect(f.terrainState, battle), pseudo: effects(f.pseudoWeather, battle)},
   };
+  if (tracker) {
+    const o = battle.sides[1 - side];
+    st.sides[1 - side].mons.forEach((m, j) => {
+      const t = tracker.oppTeam.get(`${o.id}: ${order[1 - side][j].name}`.trim());
+      m.seen_hp = t ? (t.fainted ? 0 : t.hpFraction) : null;
+    });
+  }
+  return st;
 }
 
 module.exports = {battleState, initialOrder};

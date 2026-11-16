@@ -73,10 +73,14 @@ def _status(m: dict[str, Any], side: int) -> tuple[str, int, int]:
     return status, turns, max(1, 3 - turns) if rest else 0
 
 
-def make_mon(m: dict[str, Any], disabled: set[str], side: int) -> pe.Pokemon:
-    """One mon; `disabled`: its moves the side's request disables (the active of a side not force-switching)."""
+def make_mon(m: dict[str, Any], disabled: set[str], side: int, seen_hp: bool = False) -> pe.Pokemon:
+    """One mon; `disabled`: its moves the side's request disables (the active of a side not force-switching);
+    `seen_hp`: the HP the opponent has seen (dump seen_hp, rebuilt as search.convert does), when it has seen it."""
     mv = [(search.norm(engine_move(x["id"], m["hp_type"])), x["pp"], x["id"] in disabled) for x in m["moves"][:4]]
     hp = 0 if m["fainted"] else m["hp"]
+    if seen_hp and hp > 0 and m.get("seen_hp") is not None:
+        frac = float(m["seen_hp"])
+        hp = 0 if frac <= 0 else max(1, round(frac * (m["maxhp"] or 1)))
     tera = m["tera"] if search.GEN_NUM >= 9 else ""
     return search.make_mon(m["species"], m["level"], _types(m), hp, m["maxhp"] or 1, m["stats"], m["ability"] or "none",
                            m["item"] or "none", mv, *_status(m, side), m["weightkg"], tera or ("typeless" if search.GEN_NUM >= 9
@@ -91,7 +95,7 @@ def _last_move(m: dict[str, Any] | None) -> int | None:
     return ids.index(m["last_move"]) if m["last_move"] in ids else None
 
 
-def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) -> pe.Side:
+def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool, seen_hp: bool = False) -> pe.Side:
     req = s["request"] or {}
     force = bool(req.get("forceSwitch")) if to_move else False
     idx = max(s["active"], 0)
@@ -102,7 +106,7 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
         allowed = req.get("moves")
         if allowed is not None:  # a locked mon's request lists only the move it must use (Outrage, Ice Ball, ...)
             off |= {x["id"] for x in act["moves"] if x["id"] not in allowed}
-    mons = [make_mon(m, off if i == idx and m["active"] else set(), s["n"]) for i, m in enumerate(s["mons"])]
+    mons = [make_mon(m, off if i == idx and m["active"] else set(), s["n"], seen_hp) for i, m in enumerate(s["mons"])]
     mons = (mons + [pe.Pokemon.create_fainted() for _ in range(6)])[:6]
     vol = {k: v for k, v in (act["volatiles"] if act else {}).items() if k not in SKIP}
     names = {k.upper() for k in vol if known_volatile(k.upper())}
@@ -171,8 +175,10 @@ def _weather(st: dict[str, Any]) -> tuple[str, int]:
     return WEATHER[w], max(1, int(dur))
 
 
-def convert_full(st: dict[str, Any]) -> pe.State:
-    """A dump.js battle state -> the poke-engine State of the true position (side one = st['side'])."""
+def convert_full(st: dict[str, Any], seen_hp: bool = False) -> pe.State:
+    """A dump.js battle state -> the poke-engine State of the true position (side one = st['side']).
+    seen_hp: side two's HP = what side one has seen (the dump's seen_hp, host.js 2026-11-16+), rebuilt as
+    search.convert does (max(1, round(fraction * max HP))); the NNUE student's training view (features.py)."""
     me, opp = st["sides"][st["side"]], st["sides"][1 - st["side"]]
     turn = st["turn"]
     weather, wturns = _weather(st)
@@ -181,7 +187,7 @@ def convert_full(st: dict[str, Any]) -> pe.State:
     tturns = max(1, int(f["terrain_state"].get("duration") or 1)) if terrain != "none" else 0
     tr = "trickroom" in f["pseudo"]
     trturns = max(1, int(f["pseudo"]["trickroom"].get("duration") or 1)) if tr else 0
-    return pe.State(side_one=_side(me, opp, turn, True), side_two=_side(opp, me, turn, False), weather=weather,
+    return pe.State(side_one=_side(me, opp, turn, True), side_two=_side(opp, me, turn, False, seen_hp), weather=weather,
                     weather_turns_remaining=wturns, terrain=terrain, terrain_turns_remaining=tturns, trick_room=tr,
                     trick_room_turns_remaining=trturns)
 

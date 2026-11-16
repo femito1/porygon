@@ -5,7 +5,8 @@ games are played.
            optional retest B (K fresh worlds) and judge R (K_R fresh worlds): rows, x, Q, value, leaves, timing.
            Positions = a study rows file (--rows: the same (record, side, decision) as netsearch_study) or sampled.
   outcome  Step 2: at consecutive decision pairs (t, t+1) of held-out records, the net's P(win) and poke-engine's
-           stock evaluate() (mean over K determinizations, porygon.search.convert) with the game's result.
+           stock evaluate() (mean over K determinizations, porygon.search.convert) with the game's result;
+           --student S.npz adds the NNUE gate-1 student's P(win), mean over the same determinizations.
   analyze-bench / analyze-outcome   summaries of those JSONL files (pure; laptop or cluster).
 
     cd $C && PORYGON_GEN=9 PYTHONPATH=$G/.engine-gen9:$C/src NETV2_SRC=$C/frozen/netv2-fba02fb-20261110/src \\
@@ -306,6 +307,11 @@ async def outcome(a) -> int:
     torch.set_num_threads(1)
     pe.set_eval(None, 0.0125, 1.0)  # the stock evaluate(), as the gen9 benchmark search scores leaves
     net = ST.load_net(a.net, a.device)
+    student = None
+    if a.student:  # NNUE gate 1 set H: the student's P(win), mean over the same K determinizations as evaluate()
+        from porygon.nnue.features import features
+        from porygon.nnue.student import NumpyStudent
+        student = NumpyStudent.load(a.student)
     recs = ST.records(a.records, a.source, a.seed)
     out = open(a.out, "w")
     n = fails = 0
@@ -321,12 +327,17 @@ async def outcome(a) -> int:
                 probs, mask, win = NS.net_forward(net, battle)
                 hist = S.History(battle)
                 rng = random.Random(f"{a.seed}:{rec['id']}:{d.msg}")
-                evals = []
+                evals, studs = [], []
                 for _ in range(a.dets):
                     conv = S.convert(battle, rng, first, hist)
-                    evals.append(float(pe.evaluate(pe.State.from_string(conv.state_str))))
+                    st = pe.State.from_string(conv.state_str)
+                    evals.append(float(pe.evaluate(st)))
+                    if student is not None:
+                        studs.append(student.p_win(features(st)))
                 got[d.msg] = {"turn": d.turn, "win": win, "eval": float(np.mean(evals)), "eval_sd": float(np.std(evals)),
                               "n_legal": int(mask.sum())}
+                if student is not None:
+                    got[d.msg].update(student=float(np.mean(studs)), student_sd=float(np.std(studs)))
         except Exception as e:  # a record that fails to replay or convert
             fails += 1
             print(f"record {rec['id']}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -533,6 +544,7 @@ def main() -> int:
         else:
             b.add_argument("--pairs", type=int, default=1000)
             b.add_argument("--dets", type=int, default=4)
+            b.add_argument("--student", help="NNUE gate 1: also score a student (student.npz) on the same dets")
     for name in ("analyze-bench", "analyze-outcome"):
         b = sub.add_parser(name)
         b.add_argument("path")

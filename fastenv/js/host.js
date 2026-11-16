@@ -69,6 +69,7 @@ const GEN = +args.format.match(/^gen(\d)/)[1];
 const D = E.OBS_DIM, A = E.nActions(GEN);
 const prng = new PRNG([args.seed & 0xffff, (args.seed >>> 16) & 0xffff, 0x5eed, 0xfa57]);
 const DUMP = args.dumpStates ? require('./dump') : null;
+const SeenTracker = DUMP && args.encoder === 'stub' ? require('./tracker').SideTracker : null;
 const dumpFd = DUMP ? fs.openSync(args.dumpStates, 'a') : null;
 function dumpLine(obj) {
   const b = Buffer.from(JSON.stringify(obj) + '\n');
@@ -100,6 +101,14 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
       this.pairSeed = battleSeed;
     }
     this.trackers = [new SideTracker({format: args.format, side: 0}), new SideTracker({format: args.format, side: 1})];
+    // --dump-states: the poke-env trackers whose seen HP the dump reports (stub encoder: separate real trackers fed the
+    // same messages, so the stub's masks and hence the games stay as without them; a tracker error only voids seen_hp)
+    this.seen = DUMP && SeenTracker ? [0, 1].map(side => new SeenTracker({format: args.format, side})) : this.trackers;
+    this.seenOk = [true, true];
+    const seenFeed = (n, f) => {
+      if (this.seen === this.trackers || !this.seenOk[n]) return;
+      try { f(this.seen[n]); } catch (e) { this.seenOk[n] = false; }
+    };
     this.value = [0, 0];       // last state value per side (reward = difference, as poke-env's helper)
     this.lastAction = [-1, -1];
     this.choice = [null, null];
@@ -119,9 +128,11 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
     const msg = (n, text) => { this.nmsg[n]++; if (keep) this.streams[n].push(text); };
     this.battle = new SimBattle(args.format, battleSeed, teams.map(t => JSON.parse(JSON.stringify(t))), {
       keepRequestJSON: keep,
-      onLog: (n, text) => { msg(n, text); this.trackers[n].onLog(text); },
-      onRequest: (n, req, json) => { msg(n, `|request|${json}`); this.trackers[n].onRequest(req); },
-      onError: (n, text) => { msg(n, text); this.trackers[n].onError(text); },
+      onLog: (n, text) => { msg(n, text); this.trackers[n].onLog(text); seenFeed(n, t => t.onLog(text)); },
+      onRequest: (n, req, json) => {
+        msg(n, `|request|${json}`); this.trackers[n].onRequest(req); seenFeed(n, t => t.onRequest(req));
+      },
+      onError: (n, text) => { msg(n, text); this.trackers[n].onError(text); seenFeed(n, t => t.onError(text)); },
     });
     this.games++;
     try {
@@ -188,7 +199,7 @@ function row(slot, side, needsAction, done, wait = false) {
   V.flags[n] = f;
   if (DUMP && needsAction && !slot.crashed) {
     dumpLine({t: 'S', game: slot.gameId, slot: slot.i * 2 + side, side, turn: slot.battle.turn, idx: slot.didx[side]++,
-      e: slot.nmsg[side] - 1, state: DUMP.battleState(slot.battle.battle, side, slot.order)});
+      e: slot.nmsg[side] - 1, state: DUMP.battleState(slot.battle.battle, side, slot.order, slot.seenOk[side] ? slot.seen[side] : null)});
   }
   V.turn[n] = Math.min(slot.battle.turn, 65535);
   const w = slot.battle.winner;
