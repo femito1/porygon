@@ -33,7 +33,7 @@ _load_player = E.load_player
 def load_player(spec: str, **kwargs):
     """The harness's load_player, plus `netsearch:` specs. The harness passes device / workers / deterministic /
     temperature defaults as keyword arguments; for a netsearch spec its own options win (as in load_player)."""
-    if not spec.startswith(("netsearch:", "lookahead:")):
+    if not spec.startswith(("netsearch:", "lookahead:", "deepen:")):
         return _load_player(spec, **kwargs)
     from porygon import netsearch as NS
     extra = []
@@ -46,6 +46,9 @@ def load_player(spec: str, **kwargs):
     if spec.startswith("lookahead:"):
         from porygon import lookahead2
         return lookahead2.load_spec(",".join([spec] + extra), **kwargs)
+    if spec.startswith("deepen:"):
+        from porygon import deepen
+        return deepen.load_spec(",".join([spec] + extra), **kwargs)
     return NS.load_spec(",".join([spec] + extra), **kwargs)
 
 

@@ -139,7 +139,7 @@ def read_plan(run: Path) -> dict:
 
 def spec_margin(spec: str) -> float:
     """The arm's margin: netsearch / lookahead specs carry margin=M; any other player (a raw net) is margin +inf."""
-    if not spec.startswith(("netsearch:", "lookahead:")):
+    if not spec.startswith(("netsearch:", "lookahead:", "deepen:")):
         return math.inf
     m = re.search(r",margin=([^,]+)", spec)
     return float(m.group(1)) if m else 0.03  # NetSearchPlayer's and LookaheadPlayer's default
