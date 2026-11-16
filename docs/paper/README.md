@@ -45,13 +45,18 @@ could be claimed as new; every item below needs its own pre-registered tests bef
    - P3 is also all ≥ 1900-rated, so it is "more and better data". U7 separates the two at the BC level: as many
      decisions as P3 but rated ≥ 1500, it lost 47.2% ± 1.2% to P3 (quality matters at equal size; confound: U7's
      games are older, median 2026-06-11 vs 07-05); no RL run starts from U7;
-   - one RL seed per arm: the claim needs the second G9q seed's step-matched 25M / 50M readings (G9q2, running);
-     the KL anchor to each init lasts until 50M;
+   - seed variance is now bounded: a second G9q seed (G9q2) matched G9q within ~2 points at 25M / 50M (50.2% ± 1.7%,
+     50.7% ± 2.2%), so a 58–61% gap is not seed noise; the KL anchor to each init lasts until 50M;
    - it may not persist: G9q@112.5M vs G9p@338.6M is 49.4% ± 2.0%, and later step-matched points are not tested.
    Do not claim that human data is necessary (Jaxcalibur and MissingNo.Zero use none) or that the gap persists.
 3. **Inputlog re-simulation.** The technique is not novel (Showdown's owner described it in 2022; Metagross and
    Pokecritic re-simulate random-battle inputlogs at the pinned commit). What may be new: a documented, validated,
    released dataset of exact first-person gen9 random-battle trajectories (170k games, ~9.6M decisions, both sides),
    and using it to measure the error of spectator-view inference. Never claim "first to use inputlogs".
-4. **Benchmarks.** Foul Play stays the opponent. Metagross cannot serve: no released weights, no licence, and 44.0%
+4. **Network-valued one-ply lookahead (gen9).** lookahead2 (every joint action for one turn, exact chance outcomes,
+   leaves scored by the v2 net, a matrix game over sampled worlds, margin-gated over the raw net) beat its own raw
+   net 53.2% [50.6, 55.7] (internal sequential test, `docs/netsearch/LA2-BET1-PREREG.md`). Net values in a
+   Pokémon search are not new (Wang 2024, Jaxcalibur); any claim needs the fixed-n tests against Foul Play and the
+   benchmark hybrid (LA2-FP / LA2-H) and would be about the measured gain of this cheap one-ply form.
+5. **Benchmarks.** Foul Play stays the opponent. Metagross cannot serve: no released weights, no licence, and 44.0%
    [37.3, 50.9] against plain Foul Play in its author's own head-to-head.
