@@ -2,6 +2,8 @@
 more player spec: `netsearch:NET[,margin=M][,temperature=T][,c_puct=C][,prior_weight=W][,ms=MS][,samples=K]
 [,workers=N][,seed=S][,device=D][,log=PATH]` = porygon.netsearch's margin-rule hybrid (`load_spec`). Every other spec
 (search:none, nets, baselines) goes to the harness's own load_player, so both sides play exactly as in netv2's runs.
+`lookahead:NET[,margin=M][,temperature=T][,worlds=K][,workers=N][,min_prob=P][,leaf_device=D][,log=PATH]...` =
+porygon.lookahead2's one-turn lookahead with net-valued leaves, gated on the raw net (`lookahead2.load_spec`).
 
     PORYGON_GEN=9 PYTHONPATH=$G/.engine-gen9:$C/src $PY scripts/fastenv/netsearch_h2h.py \
         'netsearch:NET.pt,margin=0.015,ms=1000,samples=4,workers=11,log=OUT/gate.jsonl' \
@@ -31,7 +33,7 @@ _load_player = E.load_player
 def load_player(spec: str, **kwargs):
     """The harness's load_player, plus `netsearch:` specs. The harness passes device / workers / deterministic /
     temperature defaults as keyword arguments; for a netsearch spec its own options win (as in load_player)."""
-    if not spec.startswith("netsearch:"):
+    if not spec.startswith(("netsearch:", "lookahead:")):
         return _load_player(spec, **kwargs)
     from porygon import netsearch as NS
     extra = []
@@ -41,6 +43,9 @@ def load_player(spec: str, **kwargs):
             extra.append(f"{key}={value}")
     kwargs.pop("deterministic", None)
     kwargs.pop("temperature", None)
+    if spec.startswith("lookahead:"):
+        from porygon import lookahead2
+        return lookahead2.load_spec(",".join([spec] + extra), **kwargs)
     return NS.load_spec(",".join([spec] + extra), **kwargs)
 
 
@@ -51,7 +56,10 @@ if __name__ == "__main__":
         fmt = f"gen{os.environ.get('PORYGON_GEN', '4')}randombattle"
         p = load_player(sys.argv[2], battle_format=fmt, start_listening=False)
         print(type(p).__name__, {k: getattr(p, k, None) for k in ("margin", "temperature", "deterministic", "c_puct",
-                                                                   "net_prior_weight", "ms", "samples", "eval_config")})
+                                                                   "net_prior_weight", "ms", "samples", "eval_config",
+                                                                   "worlds", "min_prob", "iters")})
+        if hasattr(p, "leaf_net"):
+            print("leaf net device", next(p.leaf_net.parameters()).device, "lookahead workers", p.la_pool.n)
         print("net gen", getattr(getattr(p, "net", None) or getattr(p, "model", None), "gen", None),
               "pool workers", getattr(getattr(p, "pool", None), "n", None))  # (a raw-net player has no pool)
         sys.exit(0)

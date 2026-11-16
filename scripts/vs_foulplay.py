@@ -26,9 +26,10 @@ Then:
     NETV2_SRC=... python scripts/vs_foulplay.py SPEC --player spec --opponents fp0 fp1 fp2 --total 200 \
         --name-prefix paTAG --summary OUT/summary.json --results OUT/results.jsonl
     (--player spec: MODEL is a player spec of scripts/fastenv/netsearch_h2h.py, i.e. netv2's porygon.v2.evaluate
-    specs plus `netsearch:` ones, e.g. 'netsearch:NET,margin=M,...,workers=11' or 'search:none,...,workers=11'. One
-    player per opponent, all on ONE engine pool, so the K players together are the one player of a netv2 h2h at
-    --concurrency K. --total N: N battles over all opponents (a shared budget) instead of --n per opponent.)
+    specs plus `netsearch:` / `lookahead:` ones, e.g. 'netsearch:NET,margin=M,...,workers=11' or
+    'search:none,...,workers=11'. One player per opponent, all on ONE engine pool (lookahead2: one lookahead pool and
+    one copy of each net), so the K players together are the one player of a netv2 h2h at --concurrency K.
+    --total N: N battles over all opponents (a shared budget) instead of --n per opponent.)
 """
 
 import argparse
@@ -259,6 +260,10 @@ def spec_players(spec: str, names: list[str], common: dict, search_timeout: floa
         for pl in players[1:]:
             pl.pool = pool
         guard_pool(pool, search_timeout)
+    la_pool = getattr(players[0], "la_pool", None)
+    if la_pool is not None:  # lookahead2 players: one set of lookahead workers and one copy of each net, as the engine pool
+        for pl in players[1:]:
+            pl.la_pool, pl.net, pl.leaf_net = la_pool, players[0].net, players[0].leaf_net
     return players
 
 

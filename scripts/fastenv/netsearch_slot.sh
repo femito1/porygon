@@ -10,6 +10,9 @@
 # copy, so syncs during the run cannot change it. OUT default: $C/runs/netsearch-NAME-<date>-<job>.
 # PLAN.env (bash, sourced): NAME GEN TAG OPP ARMS=(spec ...) BLOCK_PAIRS BLOCKS CONC FUTILITY MIN_CPUS
 #   [NETV2_DIR (a frozen copy of netv2's tree to take src/porygon from; default its live cluster dir)]
+#   [SEQ_DESIGN (a wsp seq_design.py JSON: after each block, vendor/seq_monitor.py on the arm's blocks in block order
+#   (--order sequential --final); SUCCESS / FUTILITY stops the arm: arm-K/STOPPED + arm-K/SEQ_DECISION, looks in
+#   arm-K/seq-look-J.txt)]
 #   [BLOCK_TIMEOUT_MIN (default 240)] [DRY_P=(p ...): NS_DRY=1 writes synthetic games with these win rates instead
 #   of playing (laptop dry runs of the control flow)].
 # A block plays in a node-local directory (NS_LOCAL, default ${TMPDIR:-/tmp}/ws-fastenv-ns-<job>), copied to OUT at its
@@ -121,9 +124,10 @@ fi
     fi
   fi
   echo "format: $FORMAT  seed tag: $TAG (block j: server seed ${TAG}b<j>)  block: $BLOCK_PAIRS pairs x $BLOCKS blocks, $CONC concurrent  futility: ${FUTILITY:-none (fixed n)}"
+  [ -z "${SEQ_DESIGN:-}" ] || echo "sequential design: $SEQ_DESIGN md5 $(md5sum < "$SEQ_DESIGN" | cut -c1-32)"
   for spec in "$OPP" "${ARMS[@]}"; do
     echo "spec: $spec"
-    base=${spec%%,*}; base=${base#netsearch:}; base=${base#search:}
+    base=${spec%%,*}; base=${base#netsearch:}; base=${base#lookahead:}; base=${base#search:}
     [ ! -f "$base" ] || echo "  file: $(readlink -f "$base") $(stat -L -c '%s bytes, mtime %y' "$base") sha256 $(sha256sum "$base" | cut -c1-64)"
     [ "$DRY" = 1 ] || [ "$spec$FP_MODE" = "${OPP}1" ] || echo "  check: $("$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" --check "$spec" 2>&1 | tail -2 | tr '\n' ' ')"
   done
@@ -194,9 +198,9 @@ play_block() {  # K J: arm K's block J (node-local, then copied to OUT/arm-K/blo
   local k=$1 j=$2 spec=${ARMS[$(($1 - 1))]} dir=$LOCAL/arm-$1/block-$2 seed=${TAG}b$2 rc waited=0
   local n=$((2 * BLOCK_PAIRS)) tag=${JOB}a$1b$2
   rm -rf "$dir"; mkdir -p "$dir" "$OUT/arm-$k"
-  case "$spec" in netsearch:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
-  local opp=$OPP  # a netsearch: opponent (re-freeze R) logs its own gate decisions too
-  case "$opp" in netsearch:*) opp="$opp,log=$dir/gate-opp.jsonl" ;; esac
+  case "$spec" in netsearch:*|lookahead:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
+  local opp=$OPP  # a netsearch: / lookahead: opponent (re-freeze R) logs its own gate decisions too
+  case "$opp" in netsearch:*|lookahead:*) opp="$opp,log=$dir/gate-opp.jsonl" ;; esac
   if [ "$DRY" = 1 ]; then
     $SLOT fake "$dir" --games "$n" --p "${DRY_P[$(($1 - 1))]}" --a "pa$tag" --seed "$seed" > "$dir/evaluate.log" 2>&1
     rc=$?
@@ -282,6 +286,19 @@ for ((j = 1; j <= BLOCKS; j++)); do
     fi
     $SLOT look "$OUT" "$k" --blocks-max "$BLOCKS" ${FUTILITY:+--futility "$FUTILITY"} | tee -a "$OUT/run.log"
     [ "${PIPESTATUS[0]}" != 20 ] || { touch "$OUT/arm-$k/STOPPED"; log "arm $k: FUTILITY stop after block $j"; }
+    if [ -n "${SEQ_DESIGN:-}" ]; then  # wsp's group-sequential look on the arm's blocks so far, in block order
+      seqf=()
+      for ((b = 1; b <= j; b++)); do [ ! -f "$OUT/arm-$k/block-$b/battles.jsonl" ] || seqf+=("$OUT/arm-$k/block-$b/battles.jsonl"); done
+      "$PY" "$CODE/scripts/fastenv/vendor/seq_monitor.py" "${seqf[@]}" --design "$SEQ_DESIGN" --a-prefix pa --order sequential \
+        --final --json --stop-file "$OUT/arm-$k/SEQ_DECISION" > "$OUT/arm-$k/seq-look-$j.txt" 2>&1
+      src=$?
+      log "arm $k seq look after block $j (rc $src): $(grep -E '^DECISION' "$OUT/arm-$k/seq-look-$j.txt" | head -1)"
+      case $src in
+        0) ;;
+        10|20) touch "$OUT/arm-$k/STOPPED"; log "arm $k: sequential $( [ "$src" = 10 ] && echo SUCCESS || echo FUTILITY ) stop after block $j" ;;
+        *) touch "$OUT/HARNESS_FAIL"; log "HARNESS FAILURE: seq_monitor.py exit $src on arm $k (void)"; break 2 ;;
+      esac
+    fi
   done
 done
 $SLOT report "$OUT" --json "$OUT/result.json" | tee "$OUT/result.txt"

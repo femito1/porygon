@@ -1,2 +1,4 @@
 Read-only copies of other streams' modules, byte-identical to their source (never edited here):
 - data_replay.py = ws/data src/porygon/replay.py at 4ff8d71 (md5 3714b925bbda1aa26f07bbf59cdda97f, same as $D/code on 2026-11-09).
+- seq_design.py = main scripts/wsp/seq_design.py (wsp, last changed f330b22; md5 8867253b3fb5bf6b51177bd27fa2f77e, main 174d3c2 on 2026-11-15).
+- seq_monitor.py = main scripts/wsp/seq_monitor.py (wsp, last changed f330b22; md5 1987e6fc92bedc10b02831e5ea4a5d6b, main 174d3c2 on 2026-11-15).

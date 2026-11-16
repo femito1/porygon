@@ -505,6 +505,20 @@ class Converted:
         return 6 + self.move_ids.index(choice) if choice in self.move_ids else None
 
 
+def _true_keys(true_sets: dict[str, Any]):
+    """Oracle runs: poke-env's species -> the key of its true set. inference.set_species first; when that misses
+    (a forme the library lists apart from the set's species: Zamazenta-Crowned, Minior-Meteor, ...), the true set
+    with the same base species. Without truth this is inference.set_species."""
+    def base(s: str) -> str:
+        return norm(GEN.pokedex.get(s, {}).get("baseSpecies", s))
+    by_base = {base(k): k for k in true_sets}
+
+    def key(species: str) -> str:
+        k = inference.set_species(species)
+        return k if k in true_sets or not true_sets else by_base.get(base(species), k)
+    return key
+
+
 def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
             hist: History | None = None, truth: list[dict[str, Any]] | None = None,
             oracle_all: bool = False) -> Converted:
@@ -537,13 +551,14 @@ def convert(battle: Battle, rng: random.Random, weather_seen: int | None = None,
     opp_keys = list(battle.opponent_team)
     opp = list(battle.opponent_team.values())
     n_unrevealed = max(0, min(6, battle.max_team_size or 6) - len(opp))
+    tkey = _true_keys(true_sets)
     if oracle_all and true_sets:
-        unrevealed = [s for s in true_sets if s not in {inference.set_species(m.species) for m in opp}][:n_unrevealed]
+        unrevealed = [s for s in true_sets if s not in {tkey(m.species) for m in opp}][:n_unrevealed]
     else:
         unrevealed = sample_species([m.species for m in opp], n_unrevealed, rng)
     theirs, opp_moves = [], []
     for key, m in zip(opp_keys, opp):
-        mon, moves = opp_mon(m, m.species, rng, hist, key, true_sets.get(inference.set_species(m.species)))
+        mon, moves = opp_mon(m, m.species, rng, hist, key, true_sets.get(tkey(m.species)))
         theirs.append(mon)
         opp_moves.append(moves)
     theirs += [opp_mon(None, s, rng, truth=true_sets.get(s) if oracle_all else None)[0] for s in unrevealed]

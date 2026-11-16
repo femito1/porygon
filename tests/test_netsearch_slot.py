@@ -102,6 +102,19 @@ def test_spec_margin():
     assert SL.spec_margin("netsearch:n.pt,margin=inf") == math.inf
     assert SL.spec_margin("netsearch:n.pt,margin=-inf") == -math.inf
     assert SL.spec_margin("runs/net.pt,temperature=0.5") == math.inf
+    assert SL.spec_margin("lookahead:n.pt,margin=0.012,worlds=8") == 0.012
+    assert SL.spec_margin("lookahead:n.pt,worlds=8") == 0.03
+
+
+def test_report_sequential_stop(tmp_path):
+    (tmp_path / "plan.env").write_text("NAME=t\nTAG=x\nOPP='n.pt'\nFUTILITY=\nARMS=('a')\n")
+    (tmp_path / "arms.txt").write_text("lookahead:n.pt,margin=0.01\n")
+    block(tmp_path, 1, 1, [(1, 1)] * 8 + [(1, 0)] * 2)
+    (tmp_path / "arm-1" / "STOPPED").touch()
+    (tmp_path / "arm-1" / "SEQ_DECISION").write_text("DECISION SUCCESS at look 1 (100 pairs, 200 games): claim\n")
+    r = SL.report(tmp_path, go=0.515, tie=0.01, void_fallbacks=0.02)
+    assert r["arms"][0]["seq_decision"].startswith("DECISION SUCCESS") and "selection" not in r
+    assert "STOPPED (sequential: DECISION SUCCESS" in SL.format_report(r)
 
 
 def test_report(tmp_path):
