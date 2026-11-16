@@ -96,7 +96,12 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
     force = bool(req.get("forceSwitch")) if to_move else False
     idx = max(s["active"], 0)
     act = s["mons"][idx] if s["active"] >= 0 else None
-    off = set(req.get("disabled") or []) if not req.get("forceSwitch") else set()
+    off: set[str] = set()
+    if not req.get("forceSwitch") and act is not None:
+        off = set(req.get("disabled") or [])
+        allowed = req.get("moves")
+        if allowed is not None:  # a locked mon's request lists only the move it must use (Outrage, Ice Ball, ...)
+            off |= {x["id"] for x in act["moves"] if x["id"] not in allowed}
     mons = [make_mon(m, off if i == idx and m["active"] else set(), s["n"]) for i, m in enumerate(s["mons"])]
     mons = (mons + [pe.Pokemon.create_fainted() for _ in range(6)])[:6]
     vol = {k: v for k, v in (act["volatiles"] if act else {}).items() if k not in SKIP}

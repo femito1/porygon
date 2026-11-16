@@ -78,6 +78,17 @@ KNOWN = {
         "which also traps by a hidden ability (request maybeTrapped). Student: not an input (engine-only flag).",
     "side_two.pokemon.maxhp": "gen4: convert recomputes stats from the true set's EVs/IVs with its own formula; "
         "convert_full = the simulator's stats. Student: stats / 100 from the State.",
+    "side_one.pokemon.id": "forme changes (Morpeko-Hangry, Minior-Meteor, ...): convert_full = the simulator's "
+        "current forme, convert = poke-env's name. Student: species embedded by base species (+ the State's stats).",
+    "side_one.pokemon.weight_kg": "follows the forme (Minior-Meteor 40 kg vs Core 0.3 kg). Student: not an input.",
+    "side_two.active": "follows side_two.pokemon.id (formes).",
+    "side_two.pokemon.id": "formes as side one; and convert's oracle drops or mis-keys a true mon after a forme "
+        "change (its revealed-species / unrevealed bookkeeping uses poke-env's forme names). Student: base species.",
+    "side_two.pokemon.ability": "follows side_two.pokemon.id: when convert's oracle misses a mon it samples a set.",
+    "side_two.pokemon.moves": "as side_two.pokemon.ability (sampled set for a missed mon).",
+    "side_two.pokemon.item": "as side_two.pokemon.ability.",
+    "side_one.aurora_veil": "Light Clay (8 turns): convert assumes 5. Student: screen turns scalar.",
+    "side_two.aurora_veil": "as side_one.aurora_veil.",
     "side_two.pokemon.status": "rare: an end-of-turn status (Flame Orb / Toxic Orb) poke-env has not applied yet.",
 }
 
@@ -115,11 +126,15 @@ def load(paths: list[str]):
 
 
 def records(game: dict, states: dict, fmt: str):
+    """F2-style records; the true sets' speciesId follows search.convert's oracle lookup (inference.set_species:
+    the generator's cosmetic formes, e.g. Sawsbuck-Summer, are keyed by the library species)."""
+    from porygon import inference
+    teams = [[dict(t, speciesId=inference.set_species(t["speciesId"])) for t in team] for team in game["teams"]]
     for side in (0, 1):
         dec = [{"idx": e} for (g, s, e) in states if g == game["game"] and s == side]
         yield side, {"id": f"{game['game']}-p{side + 1}", "battle": game["game"].replace(":", "-"), "format": fmt,
                      "side": side, "player": f"p{side + 1}", "stream": game["streams"][side],
-                     "true_team": game["teams"][1 - side], "decisions": sorted(dec, key=lambda d: d["idx"])}
+                     "true_team": teams[1 - side], "decisions": sorted(dec, key=lambda d: d["idx"])}
 
 
 # fields of a side that belong to its active mon: when that mon has fainted (a forced switch is pending) the engine

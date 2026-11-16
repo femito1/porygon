@@ -5,7 +5,8 @@
 // state = {turn, gen, side (the side to move, 0/1), sides: [p1, p2], field}
 //   side  = {n (0 = p1, 1 = p2), active (index into mons, -1 none), mons: [mon x team size, in the team's initial order (= poke-env's
 //            battle.team order)], conditions: {id: effect}, slot: {id: effect} (active slot: wish, futuremove, ...),
-//            request: {forceSwitch, wait, trapped, maybeTrapped, canTera, disabled: [move id]} | null, totalFainted}
+//            request: {forceSwitch, wait, trapped, maybeTrapped, canTera, disabled: [move id], moves: [move id] | null}
+//            | null, totalFainted}
 //   mon   = {species, base, level, types, added, tera, terastallized, hp, maxhp, stats {atk, def, spa, spd, spe},
 //            item, ability, base_ability, moves: [{id, pp, maxpp, disabled}], base_moves: [id], hp_type, status,
 //            status_state, boosts, volatiles: {id: effect}, last_move, active_turns, fainted, active, trapped (incl. by a hidden ability), weightkg,
@@ -84,6 +85,7 @@ function request(side) {
     forceSwitch: !!(r.forceSwitch && r.forceSwitch[0]), wait: !!r.wait,
     trapped: !!(a && a.trapped), maybeTrapped: !!(a && a.maybeTrapped), canTera: !!(a && a.canTerastallize),
     disabled: a && a.moves ? a.moves.filter(m => m.disabled).map(m => m.id) : [],
+    moves: a && a.moves ? a.moves.map(m => m.id) : null,  // one move when locked (Outrage, ...)
   };
 }
 
