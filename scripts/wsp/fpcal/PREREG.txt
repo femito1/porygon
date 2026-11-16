@@ -1,0 +1,35 @@
+fpcal PREREG (wsp, written 2026-11-16 ~23:20Z, before any game of this design)
+
+Question. How sensitive is the raw net's win rate vs Foul Play gen9 to Foul Play's search budget? MissingNo.Zero's raw
+gen9 net reports 66.7% ± 1.7 vs Foul Play fixed to the iterations it completes on the author's laptop (Apple M4 Pro);
+ours is 57.8% ± 2.8 (job 1173380) with Foul Play on wall-clock 1000 ms per state on a loaded dove node. Is part of
+the 9-point gap the yardstick?
+
+Measured budget of the current setting (job 1173380's fp0.log, 50 games of one Foul Play instance, 1941 decisions,
+4204 states): 1000 ms states (1780 decisions x 2 states) median 211,000 iterations (p10 167k, p90 650k, mean 413k);
+500 ms early states (161 x 4) median 104,000; over all states median 210 iterations per ms (p10 168, p90 397);
+per decision median 418,000 iterations in total. Call T = 210,000 per 1000 ms state.
+
+Arms (fixed n, no early stopping). Same net G9q-cd@805M (runs/g9q-cd800/final/00805029873.pt, sha256 e93ac3f8...b11f),
+temperature 0.5, sampling; Foul Play 8f541f8, K = 20 instances, fp-parallelism 1, the fp9 harness (data,
+md5 7476be8b) copied as $WSP/fpcal/code/fp9_iters.sbatch with ONE change: every Foul Play MCTS call runs a FIXED
+iteration count, N per 1000 ms of nominal budget (2 states x N; early 4 x N/2), through fp_fixed_iters.py
+(poke-engine's own `iterations` argument; our code, no Foul Play code copied). 1000 games = 500 duplicate pairs each,
+duplicate-server seed 8800222 = the SAME team pairs (and battle seeds) as job 1173380, on purpose (common random
+numbers for the paired differences; not a new confirmation).
+  L: N = 50,000 (0.24 T)     H: N = 800,000 (3.8 T)     reference T: job 1173380 (time-based, not re-run).
+Order L then H, one ledger-claimed slot job, afterany:1173672 (LA2-H). Expected ~1 h (L) + ~4 h (H).
+A background check voids an arm if any logged per-state iteration count differs from N or N/2.
+
+Reading (READING.txt from fpcal_read.py). Per arm: pair-mean win rate, 95% interval. Paired differences L - T,
+H - T, L - H over pairs whose teams match (95% intervals from pair differences). Slope b in points per 4x Foul Play
+budget (weighted least squares over L, T, H on log4 N).
+  - SENSITIVE if the L - H interval excludes 0: our headline number depends on Foul Play's budget by about b per 4x;
+    then (proposal to main, not automatic) headline Foul Play benchmarks move to a fixed iteration count, and the
+    MissingNo.Zero comparison is read at the budget an M4 Pro core reaches (unknown to us; speculation: at or above
+    T, since dove cores are older and shared by 20 Foul Play instances).
+  - INSENSITIVE if the L - H interval includes 0 and its half-width <= 4 points: a 16x budget range moves us by less
+    than the noise, so the 9-point gap is mostly real strength, not the yardstick.
+  - else INCONCLUSIVE (report the numbers; no follow-up without a new prereg).
+Nothing about training or adoption depends on this; it calibrates the yardstick only. General strength only: no
+Foul Play-specific changes follow from it.

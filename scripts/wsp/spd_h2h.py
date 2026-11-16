@@ -282,6 +282,9 @@ def run(a) -> None:
                "--pairs", f"{first + w},{workers_n},{end}", "--pair-seed", str(a.seed), "--max-turns", str(a.max_turns)]
         if bot:
             cmd += ["--bot", bot, "--bot-battles", str(a.battles)]
+        if a.game_log:
+            Path(a.game_log).mkdir(parents=True, exist_ok=True)
+            cmd += ["--game-log", str(Path(a.game_log) / f"games-{a.shard:04d}-w{w:02d}.jsonl")]
         workers.append(Worker(w, cmd))
     meta = {"exp": exp, "a": a.a, "b": a.b, "a_resolved": parse_spec(a.a), "b_resolved": parse_spec(a.b),
             "format": a.format, "seed": a.seed, "shard": a.shard, "first": first, "end": end, "pairs": a.pairs,
@@ -492,6 +495,8 @@ def main() -> None:
     r.add_argument("--stall-timeout", type=float, default=600)
     r.add_argument("--progress", type=float, default=60, help="seconds between progress lines (0: none)")
     r.add_argument("--overwrite", action="store_true")
+    r.add_argument("--game-log", help="DIR: every worker appends its finished games (omniscient log, choices, true-state "
+                   "snapshots per decision; spd_host.js --game-log) to DIR/games-SHARD-wW.jsonl")
     m = sub.add_parser("merge", help="pool shard files of one experiment")
     m.add_argument("dirs", nargs="+")
     m.add_argument("--partial", action="store_true", help="include .part.jsonl files (biased toward short pairs)")
