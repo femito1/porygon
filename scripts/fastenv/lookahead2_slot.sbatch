@@ -1,13 +1,16 @@
 #!/bin/bash
-# Bet 1 follow-ups on the benchmark slot (DRAFT chains for a GO; each needs its own signed-off PREREG and a ledger
-# CLAIM before submission). One cluster-side job: checks -> smoke -> main (fixed n) -> verdict -> ledger RELEASE line.
-#   MODE fp : arm 1 = lookahead2(0.01, K 8), arm 2 = the raw G9q-cd@605M, both vs Foul Play gen9 (Stage 3b harness),
-#             500 pairs each on tag la2fp20261116; Q = arm 1's rate (headline) and the paired arm 1 - arm 2.
-#   MODE h  : lookahead2(0.01, K 8) vs the benchmark bot H(0.0212) + G9p-cd@104.71M, 500 pairs on tag la2h20261116;
+# Bet 1 GO follow-ups on the benchmark slot (docs/netsearch/LA2-FP-PREREG.md, LA2-H-PREREG.md), on G9q-cd@805.03M
+# with δ* from runs/la2-delta800/DELTA (LA2-DELTA800-PREREG.md; the chain waits up to 3 h for it, then FAILED).
+# One cluster-side job: checks -> smoke -> main (fixed n) -> verdict -> ledger RELEASE line.
+#   MODE fp : arm 1 = lookahead2(δ*, K 8), arm 2 = the raw G9q-cd@805.03M, both vs Foul Play gen9 (Stage 3b harness),
+#             500 pairs each on tag la2fp20261116; Q = arm 1's rate (headline) and the paired arm 1 - arm 2. The smoke
+#             (2 pairs per arm = 4 games over the 3 Foul Play instances) exercises the shared lookahead pool.
+#   MODE h  : lookahead2(δ*, K 8) vs the benchmark bot H(0.0212) + G9p-cd@104.71M, 500 pairs on tag la2h20261116;
 #             ADOPTED iff the lower 95% bound > 50%.
-# Stage dir runs/la2-<MODE>/ (PREREG.txt r-- + PREREG.md5 = the signed-off md5, written by hand before submission):
-# STATUS, SMOKE.txt, VERDICT.txt (r--), RESULT, FAILED; the RELEASE line goes to $C/LEDGER-OUTBOX.md.
-#   cd /vol/bitbucket/fr1226/porygon-ws-fastenv && sbatch scripts/fastenv/lookahead2_slot.sbatch fp
+# Stage dir runs/la2-<MODE>/ prepared before submission: PREREG.txt r-- + PREREG.md5, and code/ (src + scripts +
+# COMMIT frozen at submission, so later syncs of $C cannot change the run). Stage files: STATUS, SMOKE.txt,
+# VERDICT.txt (r--), RESULT, FAILED; the RELEASE line goes to $C/LEDGER-OUTBOX.md.
+#   cd /vol/bitbucket/fr1226/porygon-ws-fastenv && sbatch --dependency=afterany:PREV scripts/fastenv/lookahead2_slot.sbatch fp
 #SBATCH --job-name=ws-fastenv-la2slot
 #SBATCH --partition=training
 #SBATCH --gres=gpu:1
@@ -33,25 +36,30 @@ fail() {
 }
 case $MODE in fp|h) ;; *) echo "unknown mode $MODE" >&2; exit 2 ;; esac
 mkdir -p "$S"
-[ ! -e "$S/VERDICT.txt" ] && [ ! -e "$S/FAILED" ] && [ ! -e "$S/code" ] || { echo "$S already holds a chain" >&2; exit 1; }
+[ ! -e "$S/VERDICT.txt" ] && [ ! -e "$S/FAILED" ] && [ ! -e "$S/main-run" ] && [ ! -e "$S/smoke-run" ] || { echo "$S already holds a chain" >&2; exit 1; }
 trap 'fail signal "TERM/INT (time limit or scancel)"' TERM INT
-NET=$C/nets/g9q-cd-605.04M.pt; NET_SHA=b7957be4c74dd37fc41892706c250d47f6a110558621e7f813e0ad9a9124001b
+NET=$C/nets/g9q-cd-805.03M.pt; NET_SHA=e93ac3f8a73590d905b150976287b261243f7861ce347f0c94baaf445b34b11f
+DSTAGE=$C/runs/la2-delta800
 OLD=$C/nets/g9p-cd-104.71M.pt; OLD_SHA=35cd1007bb90bdf939cedf877f5fcdd89ef640628f77007b3b6638d5add4ad1c
 FROZEN=$C/frozen/netv2-fba02fb-20261110
-A="lookahead:$NET,margin=0.01,temperature=0.5,worlds=8,workers=11,leaf_device=cuda"
 RAW="$NET,temperature=0.5"
 H="netsearch:$OLD,margin=0.0212,temperature=0.5,ms=1000,samples=4,workers=11"
 md5of() { md5sum < "$1" | cut -c1-32; }
 st "chain $MODE start: job $J on $(hostname), SLURM_CPUS_ON_NODE ${SLURM_CPUS_ON_NODE:-?}"
 [ -f "$S/PREREG.txt" ] && [ ! -w "$S/PREREG.txt" ] || fail checks "PREREG.txt missing or writable"
 [ -s "$S/PREREG.md5" ] && [ "$(md5of "$S/PREREG.txt")" = "$(cut -c1-32 "$S/PREREG.md5")" ] || fail checks "PREREG md5 != PREREG.md5"
-[ "$(sha256sum "$NET" | cut -c1-64)" = "$NET_SHA" ] || fail checks "G9q-cd@605M sha256"
+[ "$(sha256sum "$NET" | cut -c1-64)" = "$NET_SHA" ] || fail checks "G9q-cd@805.03M sha256"
 [ "$MODE" != h ] || [ "$(sha256sum "$OLD" | cut -c1-64)" = "$OLD_SHA" ] || fail checks "G9p-cd sha256"
 [ "${SLURM_CPUS_ON_NODE:-0}" -ge 24 ] || fail checks "only ${SLURM_CPUS_ON_NODE:-?} CPUs (want 24)"
 nvidia-smi -L > /dev/null 2>&1 || fail checks "no GPU"
-mkdir -p "$S/code" && rsync -a --exclude __pycache__ src scripts "$S/code/" && cp COMMIT "$S/code/COMMIT" || fail checks "code freeze"
+[ -s "$S/code/COMMIT" ] && [ -f "$S/code/scripts/fastenv/netsearch_slot.sh" ] || fail checks "frozen code $S/code missing"
 CODE=$S/code
-st "checks OK (PREREG md5 $(md5of "$S/PREREG.txt"), code $(cat "$CODE/COMMIT"))"
+for ((w = 0; w < 36; w++)); do [ -s "$DSTAGE/DELTA" ] || [ -e "$DSTAGE/FAILED" ] && break; st "waiting for $DSTAGE/DELTA"; sleep 300; done
+[ -s "$DSTAGE/DELTA" ] && [ ! -e "$DSTAGE/FAILED" ] || fail checks "no δ* ($DSTAGE/DELTA missing or the δ chain FAILED)"
+MARGIN=$(head -1 "$DSTAGE/DELTA")
+[[ "$MARGIN" =~ ^[0-9]+\.?[0-9]*$ ]] || fail checks "δ* not a number: $MARGIN"
+A="lookahead:$NET,margin=$MARGIN,temperature=0.5,worlds=8,workers=11,leaf_device=cuda"
+st "checks OK (PREREG md5 $(md5of "$S/PREREG.txt"), code $(cat "$CODE/COMMIT"), δ* $MARGIN from $DSTAGE/DELTA)"
 
 plan() {  # NAME TAG PAIRS BLOCKS
   if [ "$MODE" = fp ]; then opp='foulplay:ms=1000,parallelism=1'; arms="('$A' '$RAW')"; else opp=$H; arms="('$A')"; fi
@@ -71,8 +79,8 @@ BLOCK_TIMEOUT_MIN=300
 EOF
 }
 
-# ---- smoke (mechanical): 1 pair per arm (fp) / 2 pairs (h)
-if [ "$MODE" = fp ]; then plan la2fpsmoke la2fpsmoke20261116 1 1; SMP=la2fpsmoke; NG=2; else plan la2hsmoke la2hsmoke20261116 2 1; SMP=la2hsmoke; NG=4; fi
+# ---- smoke (mechanical): 2 pairs per arm (fp: 4 games over the 3 Foul Play instances, the shared lookahead pool) / 2 pairs (h)
+if [ "$MODE" = fp ]; then plan la2fpsmoke la2fpsmoke20261116 2 1; SMP=la2fpsmoke; NG=4; else plan la2hsmoke la2hsmoke20261116 2 1; SMP=la2hsmoke; NG=4; fi
 SM=$S/smoke-run
 bash "$CODE/scripts/fastenv/netsearch_slot.sh" "$S/$SMP.env" "$SM" > "$S/smoke.log" 2>&1 &
 wait $!; rc=$?
@@ -90,6 +98,8 @@ for a in r["arms"]:
     checks[f"arm {k} no Traceback"] = "Traceback" not in ev
     if a["spec"].startswith("lookahead:"):
         checks[f"arm {k} searched/leaves > 0"] = sa.get("searched", 0) > 0 and sa.get("leaves", 0) > 0
+        checks[f"arm {k} gate rows"] = a["gate"]["decisions"] > 0
+        checks[f"arm {k} failed worlds 0"] = sa.get("failed_worlds", 0) == 0
         checks[f"arm {k} fallbacks <= max(2, 2%)"] = sa.get("fallbacks", 0) <= max(2, 0.02 * sa.get("decisions", 0))
 checks["no HARNESS_FAIL"] = not (run / "HARNESS_FAIL").exists()
 ok = all(checks.values())
