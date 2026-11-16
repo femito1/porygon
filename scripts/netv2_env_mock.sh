@@ -1091,6 +1091,46 @@ MQ=$N/runs/g9/20261116-040000-1300200/G9qent; mkdir -p "$MQ/pool"; echo mq > "$M
 o=$(WD_GPU=46068 q2src 1300220); check 61f "^RC=0\|PY=$N/bin/py-src-8892762\|.*TRAIN_ARGS=--no-bf16 .*--guard-entropy-min 0.35 .*--run-dir $W2/run/G9qent .*--ent-schedule linear --ent-final 0.001 --ent-start 880050000 --ent-horizon 50000000 --resume $MQ/final_model.pt$" "$o"
 rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf"; rm -f "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
+if [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 62 (v19, 2026-11-16; runs/p4/PREREG.txt): MODE g9p4 = G9-P4 on the A40 = G9q2's restart args on this GPU with the
+# BC net P4 in all three roles (kl-anchor, frozen, first --resume), lineage G9P4, no --seed, first start only from a
+# read-only BC-P4 whose md5 = runs/g9p4/P4.md5; the bridge state (G9qbf started and saved, then MODE g9p4) -> first
+# start; restarts / a fresh job; park guard; refusals => HOLD rounds; G9q's guard fallbacks with state runs/g9p4.
+p4tree() {  # qetree + the 11-16 state (G9qent parked, MODE g9qent) + BC-P4 r-- with its md5 in runs/g9p4/P4.md5
+  qetree; echo g9qent > "$N/runs/g9/MODE"; mkdir -p "$N/runs/g9qent-parked" "$N/runs/g9p4"; echo parked > "$N/runs/g9qent-parked/PARKED.txt"
+  P4=$N/runs/pretrain/P4-g9-s2.pt; rm -f "$P4"; echo p4net > "$P4"; chmod a-w "$P4"; md5sum < "$P4" | cut -c1-8 > "$N/runs/g9p4/P4.md5"; }
+p4bridge() {  # what the bridge leaves: G9qbf started and saved in this job, MODE g9p4 (written by the chain)
+  mkdir -p "$W/run/G9qbf/pool"; echo qbf-bridge-final > "$W/run/G9qbf/final_model.pt"; echo "2026-11-17T04:00:00 820017467 g9 1300200" > "$N/runs/g9qbf/G9QBF_STARTED"; echo g9p4 > "$N/runs/g9/MODE"; }
+p4tree; p4bridge; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2//$W\/run\/G9q2/$W/run/G9P4}"; ex="${ex//$P3/$P4}"; ex="${ex%--resume *}--resume $P4"
+yes_ 62a '[ "$o" = "$ex" ]'; yes_ 62a2 'grep -q "^20[0-9T:-]* $(cat "$N/runs/g9p4/P4.md5") g9 1300200$" "$N/runs/g9p4/G9P4_STARTED" && [ "$(cat "$N/runs/g9/MODE")" = g9p4 ] && [ ! -e "$N/runs/g9/HOLD" ]'
+check 62a3 "TRAIN_ARGS=--no-bf16 .*--kl-anchor $P4 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P4 --p-frozen 0.67 .*--fastenv-workers 8 .*--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $P4$" "$o"
+check 62a4 "^RC=0\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|child=$NOV\|" "$o"; checkno 62a5 "P3-g9-s2|--seed|G9q2|G9qbf|G9qent|ent-schedule|lr-schedule|gae-lambda|actor-stream" "${o#*TRAIN_ARGS=}"
+check 62a6 "G9-P4 first start: from BC-P4 $P4 \(md5 $(cat "$N/runs/g9p4/P4.md5"); steps 0\)" "$(cat "$W/run/train.log")"
+echo p4-final > "$W/run/G9P4/final_model.pt"; o=$(WD_GPU=46068 q2src 1300200); yes_ 62b '[ "$o" = "${ex%--resume *}--resume $W/run/G9P4/final_model.pt" ]'
+yes_ 62b2 '[ "$(grep -c "G9-P4 first start" "$W/run/train.log")" = 1 ]'
+MQ=$N/runs/g9/20261117-040000-1300200/G9P4; mkdir -p "$MQ/pool"; echo mq > "$MQ/final_model.pt"; W2=$ROOTM/wd-1300230
+o=$(WD_GPU=46068 q2src 1300230); check 62c "^RC=0\|PY=$N/bin/py-src-24c633f\|.*TRAIN_ARGS=--no-bf16 .*--kl-anchor $P4 .*--frozen $P4 .*--run-dir $W2/run/G9P4 --pool-dir $W2/run/G9P4/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $MQ/final_model.pt$" "$o"; checkno 62c2 "--seed|P3-g9-s2" "$o"
+# a first trip: collapse -> KL x3 (state runs/g9p4 only), then a second trip -> HOLD (G9q's rules)
+p4tree; p4bridge; WD_GPU=46068 q2src 1300200 > /dev/null; echo p4-final > "$W/run/G9P4/final_model.pt"; echo "collapse: entropy 0.4 < 0.5" > "$W/run/G9P4/GUARD_TRIPPED"
+o=$(WD_GPU=46068 q2src 1300200); check 62d "--kl-anchor $P4 --kl-anchor-coef 0.3 .*--run-dir $W/run/G9P4 .*--resume $W/run/G9P4/final_model.pt$" "$o"
+yes_ 62d2 'grep -q "^1 " "$N/runs/g9p4/FU.started" && grep -q collapse "$N/runs/g9p4/FU.reason" && [ ! -e "$N/runs/g9q2/FU.started" ] && [ ! -e "$N/runs/g9q/FU.started" ]'
+echo "eval score 40% < best 60% - 15%" > "$W/run/G9P4/GUARD_TRIPPED"; o=$(WD_GPU=46068 q2src 1300200); yes_ 62d3 '[ -f "$N/runs/g9/HOLD" ] && ls "$W"/run/G9P4/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+# the park guard: MODE g9p4 + runs/g9p4-parked/PARKED.txt => HOLD rounds
+rm -f "$N/runs/g9/HOLD"; mkdir -p "$N/runs/g9p4-parked"; echo parked > "$N/runs/g9p4-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 62e "^RC=3\|$" "$o"; check 62e2 "MODE g9p4 is parked" "$(cat "$W/run/train.log")"
+# refusals at the first start (P4 missing / writable / md5 mismatch / no P4.md5) => HOLD rounds, no G9P4_STARTED
+for bad in missing writable md5 nomd5; do
+  p4tree; p4bridge
+  case $bad in missing) rm -f "$P4" ;; writable) chmod u+w "$P4" ;; md5) echo deadbeef > "$N/runs/g9p4/P4.md5" ;; nomd5) rm -f "$N/runs/g9p4/P4.md5" ;; esac
+  o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check "62f-$bad" "^RC=3\|$" "$o"
+  yes_ "62f2-$bad" '[ ! -e "$N/runs/g9p4/G9P4_STARTED" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q "MODE g9p4: no valid BC-P4" "$W/run/train.log"'; done
+# v19 keeps v18's park HOLD of the 11-16 state (MODE g9qent parked), and the bridge itself (MODE g9qbf, v18's 60c path)
+p4tree; o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 62g "^RC=3\|$" "$o"; check 62g2 "MODE g9qent is parked" "$(cat "$W/run/train.log")"
+p4tree; FP=$N/runs/g9qbf/fork-point-00830040000.pt; fpok; echo g9qbf > "$N/runs/g9/MODE"; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2/--no-bf16 /}"; ex="${ex//$W\/run\/G9q2/$W/run/G9qbf}"; ex="${ex%--resume *}--resume $FP"; yes_ 62h '[ "$o" = "$ex" ]'
+chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
