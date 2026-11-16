@@ -12,10 +12,11 @@ spends an extra leaf budget, in waves, on the leaves that matter most to the dec
      forced opponent switch passes its reach to the switch-in worst for us;
   3. priority = reach * 4 v (1 - v) (v the leaf's P(win): settled leaves are not refined);
   4. expand the highest-priority leaves (until the wave's leaf estimate is met) for one more turn: our options kept by
-     the net's policy (top until `us_mass` of probability, at most `us_cap`), theirs by the opponent-action head (top
-     until `opp_mass`, at most `opp_cap`, at least `opp_min`); every pair simulated with generate_instructions,
-     branches below `deep_min_prob` dropped and renormalised; new leaves scored by the net in one batched forward
-     (their policy and opponent-action logits come from the same forward and are the priors of a later expansion);
+     the net's policy at that state (top until `us_mass` of probability, at most `us_cap`; the logits come from the
+     leaf's own forward), theirs by the net's opponent-action head (top until `opp_mass`, at most `opp_cap`, at least
+     `opp_min`; computed in one small aux forward of the picked leaves only); every pair simulated with
+     generate_instructions, branches below `deep_min_prob` dropped and renormalised; new leaves scored by the net in
+     one batched forward;
   5. identical states (same world, same depth, same engine state string) share one leaf (a DAG; the forward is
      skipped for a repeated state).
 The loop stops when the extra leaves reach `budget` (or nothing is left to expand); the final solve uses the
@@ -60,6 +61,7 @@ class Config:
     mid_iters: int = 200  # regret-matching iterations of the solves between waves (selection only)
     node_iters: int = 300  # inner nodes' final solve
     branch_guess: float = 2.5  # leaves per expanded cell (selection's estimate) before any is measured
+    nash: float = 0.0  # inner-node backup: (1 - nash) * the net's priors' expected value + nash * the Nash value
 
 
 # ---------------------------------------------------------------- priors and option selection (pure)
@@ -184,11 +186,9 @@ def remap(ref: tuple, ids: list[int]) -> tuple:
 class Node:
     item: int  # the item this node expands
     turns: int  # turns since the root of the node's state (its children are at turns + 1)
-    rows: list[int]  # indices into the item's our-options
-    cols: list[int]  # indices into the item's their-options
-    cells: list  # [rows][cols] -> [(p, ref)] or None
-    pi: np.ndarray  # the net's policy over the kept rows (renormalised)
-    q: np.ndarray  # the opponent head over the kept cols (renormalised)
+    cells: list  # [our kept options][their kept options] -> [(p, ref)] or None
+    pi: np.ndarray  # the net's policy over our kept options (renormalised)
+    q: np.ndarray  # the opponent head over their kept options (renormalised)
     x: np.ndarray | None = None
     y: np.ndarray | None = None
     keep: np.ndarray | None = None  # columns kept by cell_matrix
@@ -205,7 +205,9 @@ class World:
 
 class Tree:
     """Items are leaves (the net's value) or expanded nodes (a matrix game over their children); refs are
-    lookahead2's ("L", item) / ("T", value) / ("S", subs)."""
+    lookahead2's ("L", item) / ("T", value) / ("S", subs). Per leaf the tree keeps its engine state string, the net's
+    policy logits (our options' prior) and a handle on its observation (the opponent-action head is computed only
+    for the leaves picked for expansion)."""
 
     def __init__(self, n_worlds: int):
         self.worlds: list[World] = []
@@ -214,27 +216,22 @@ class Tree:
         self.world: list[int] = []
         self.turns: list[int] = []
         self.state: list[str] = []
-        self.ours: list[tuple] = []  # (choices, actions)
-        self.theirs: list[tuple] = []  # (choices, classes)
-        self.pi: list[np.ndarray] = []
-        self.qo: list[np.ndarray] = []
+        self.pol: list[np.ndarray] = []  # policy logits (illegal = float32 min)
+        self.obs: list[tuple] = []  # (stacked observation dict, row)
         self.node_of: list[int] = []  # node index, -1 = leaf, -2 = expansion failed (stays a leaf)
         self.key: dict[tuple, int] = {}
         self.nodes: list[Node] = []
         self.n_worlds = n_worlds
 
-    def add_leaf(self, world: int, turns: int, meta: tuple, v: float, pol: np.ndarray, opp: np.ndarray) -> int:
-        state, oc, oa, tc, tcl = meta
+    def add_leaf(self, world: int, turns: int, state: str, v: float, pol: np.ndarray, obs: tuple = (None, 0)) -> int:
         g = len(self.val)
         self.val.append(float(v))
         self.leaf_v.append(float(v))
         self.world.append(world)
         self.turns.append(turns)
         self.state.append(state)
-        self.ours.append((oc, oa))
-        self.theirs.append((tc, tcl))
-        self.pi.append(our_prior(pol, oa))
-        self.qo.append(opp_prior(opp, tcl))
+        self.pol.append(pol)
+        self.obs.append(obs)
         self.node_of.append(-1)
         self.key.setdefault((world, turns, state), g)
         return g
@@ -243,8 +240,10 @@ class Tree:
         return self.key.get((world, turns, state))
 
     # -- values
-    def evaluate(self, iters: int) -> None:
-        """Inner nodes bottom-up (deepest turns first), each level's games solved in one batch."""
+    def evaluate(self, iters: int, nash: float = 1.0) -> None:
+        """Inner nodes bottom-up (deepest turns first). A node's value is (1 - nash) * pi' M q (both sides playing the
+        net's priors over the kept options) + nash * the Nash value of M (each level's games solved in one batch);
+        its strategies (for the reach) mix the same way."""
         by: dict[int, list[Node]] = {}
         for nd in self.nodes:
             if not nd.failed:
@@ -262,10 +261,20 @@ class Tree:
                 nd.keep = keep
                 todo.append(nd)
                 mats.append(M)
-            xs, ys, vs = solve_games(mats, iters)
-            for nd, x, y, v in zip(todo, xs, ys, vs):
-                nd.x, nd.y = x, y
-                self.val[nd.item] = float(v)
+            if nash > 0:
+                xs, ys, vs = solve_games(mats, iters)
+            else:
+                xs = ys = vs = [None] * len(todo)
+            for nd, M, x, y, v in zip(todo, mats, xs, ys, vs):
+                qk = nd.q[nd.keep]
+                qk = qk / qk.sum() if qk.sum() > 0 else np.full(len(nd.keep), 1.0 / len(nd.keep))
+                vp = float(nd.pi @ M @ qk)
+                if nash > 0:
+                    nd.x, nd.y = (1 - nash) * nd.pi + nash * x, (1 - nash) * qk + nash * y
+                    self.val[nd.item] = (1 - nash) * vp + nash * float(v)
+                else:
+                    nd.x, nd.y = nd.pi.copy(), qk
+                    self.val[nd.item] = vp
 
     def root_solve(self, iters: int):
         """lookahead2.combine on the current values -> (common rows, Solution, used world indices, per used world
@@ -332,7 +341,7 @@ class Tree:
             qk = nd.q[nd.keep]
             qk = qk / qk.sum() if qk.sum() > 0 else np.full(len(nd.keep), 1.0 / len(nd.keep))
             cw = 0.5 * (nd.y + qk)
-            for i in range(len(nd.rows)):
+            for i in range(len(nd.cells)):
                 for jj, j in enumerate(nd.keep):
                     cell = nd.cells[i][j]
                     if cell is None:
@@ -341,35 +350,32 @@ class Tree:
                         self._push(ref, m * rw[i] * cw[jj] * p, r)
         return r
 
-    def kept(self, g: int, cfg: Config) -> tuple[list[int], list[int]]:
-        rows = keep_by_mass(self.pi[g], cfg.us_mass, cfg.us_cap, 1)
-        cols = keep_by_mass(self.qo[g], cfg.opp_mass, cfg.opp_cap, cfg.opp_min)
-        return rows, cols
+    def est_rows(self, g: int, cfg: Config) -> int:
+        """Our options an expansion of leaf g keeps (from its policy logits; 1 when it has no legal action)."""
+        z = np.asarray(self.pol[g], float)
+        legal = z > -1e30
+        if legal.sum() <= 1:
+            return 1
+        return len(keep_by_mass(_softmax(z[legal]), cfg.us_mass, cfg.us_cap, 1))
 
-    def select(self, r: np.ndarray, target: float, cfg: Config, branches: float) -> list[tuple[int, list, list]]:
+    def select(self, r: np.ndarray, target: float, cfg: Config, per_row: float) -> list[int]:
         """Leaves to expand this wave: highest reach * 4v(1-v) first (ties: lower id), until the estimated new
-        leaves (kept rows x kept cols x branches per cell) reach `target`."""
+        leaves (kept rows x `per_row` new leaves per kept row) reach `target`."""
         v = np.asarray(self.val)
         pr = r * 4.0 * v * (1.0 - v)
-        cand = [g for g in np.flatnonzero(pr > 1e-12)
-                if self.node_of[g] == -1 and self.turns[g] < cfg.max_turns and self.ours[g][0] and self.theirs[g][0]]
+        cand = [int(g) for g in np.flatnonzero(pr > 1e-12) if self.node_of[g] == -1 and self.turns[g] < cfg.max_turns]
         cand.sort(key=lambda g: (-pr[g], g))
         out, est = [], 0.0
         for g in cand:
             if est >= target:
                 break
-            rows, cols = self.kept(int(g), cfg)
-            out.append((int(g), rows, cols))
-            est += len(rows) * len(cols) * branches
+            out.append(g)
+            est += self.est_rows(g, cfg) * per_row
         return out
 
-    def add_node(self, g: int, rows: list[int], cols: list[int], cells: list) -> None:
-        pi = self.pi[g][rows]
-        q = self.qo[g][cols]
-        nd = Node(g, self.turns[g], rows, cols, cells, pi / pi.sum() if pi.sum() > 0 else np.full(len(rows), 1 / len(rows)),
-                  q / q.sum() if q.sum() > 0 else np.full(len(cols), 1 / len(cols)))
+    def add_node(self, g: int, cells: list, pi: np.ndarray, q: np.ndarray) -> None:
         self.node_of[g] = len(self.nodes)
-        self.nodes.append(nd)
+        self.nodes.append(Node(g, self.turns[g], cells, np.asarray(pi, float), np.asarray(q, float)))
 
     def depth(self) -> int:
         return max((self.turns[nd.item] + 1 for nd in self.nodes if not nd.failed), default=1)
@@ -414,9 +420,11 @@ def opp_classes(enc: Any, state: Any, obs: dict, choices: list[str]) -> list[int
     return out
 
 
-def leaf_meta(enc: Any, state: Any, obs: dict) -> tuple:
-    """(state string, our choices, our action indices, their choices, their classes) of a leaf state, in
-    v3leaf.side_options' format."""
+def node_options(enc: Any, state: Any, turns: int, pol: np.ndarray, opp: np.ndarray, widths: dict) -> tuple:
+    """The options an expansion keeps at a leaf state: (our choices, our prior, their choices, their prior, the share
+    of the opponent head's mass kept), in
+    v3leaf.side_options' format; our options by the net's policy (logits `pol`), theirs by its opponent-action head
+    (logits `opp`, classes from the leaf's observation, re-encoded here), each kept by keep_by_mass and renormalised."""
     from porygon import v3leaf as L
     from porygon.v2.spec import FIELD_NUM
     root = enc.root
@@ -424,15 +432,22 @@ def leaf_meta(enc: Any, state: Any, obs: dict) -> tuple:
     tera2 = root.gen >= 9 and root.obs["field_num"][FIELD_NUM.index("opp_used_tera")] == 0
     oc, oa = L.side_options(state.side_one, state.side_two, tera1)
     tc, _ = L.side_options(state.side_two, state.side_one, tera2)
-    return state.to_string(), oc, oa, tc, opp_classes(enc, state, obs, tc)
+    if not oc or not tc:
+        raise ValueError("a side has no option")
+    pi = our_prior(pol, oa)
+    q = opp_prior(opp, opp_classes(enc, state, enc.encode(state, turns=turns), tc))
+    rows = keep_by_mass(pi, widths["us_mass"], widths["us_cap"], 1)
+    cols = keep_by_mass(q, widths["opp_mass"], widths["opp_cap"], widths["opp_min"])
+    return ([oc[i] for i in rows], pi[rows] / pi[rows].sum(), [tc[j] for j in cols], q[cols] / q[cols].sum(),
+            float(q[cols].sum()))
 
 
 def expand_cells(enc: Any, state: Any, ours: list[str], theirs: list[str], turns: int, min_prob: float,
-                 count: dict, obs: list, metas: list) -> list:
+                 count: dict, obs: list, states: list) -> list:
     """cells[i][j] for our engine choices `ours` x their `theirs` from `state`, simulated one turn (lookahead2's
     expand_world rule: chance branches below min_prob dropped and renormalised, a finished battle is a "T" ref, an
     opponent-only forced switch takes their switch-in worst for us, any other state a leaf encoded with `turns`).
-    New leaves are appended to obs / metas; a failed pair is None."""
+    New leaves are appended to obs / states (engine state strings); a failed pair is None."""
     import poke_engine as pe
     from porygon import v3leaf as L
 
@@ -458,9 +473,8 @@ def expand_cells(enc: Any, state: Any, ours: list[str], theirs: list[str], turns
                     for i, m in enumerate(s.side_two.pokemon) if i != a2 and m.hp > 0]
             if subs:
                 return ("S", subs)
-        o = enc.encode(s, turns=turns)
-        obs.append(o)
-        metas.append(leaf_meta(enc, s, o))
+        obs.append(enc.encode(s, turns=turns))
+        states.append(s.to_string())
         return ("L", len(obs) - 1)
 
     cells = []
@@ -483,8 +497,8 @@ def _stack(obs: list) -> dict | None:
 
 
 def op_root(root: Any, conv: Any, legal: np.ndarray, min_prob: float = 0.0) -> dict:
-    """lookahead2.expand_world (same rows, cols, cells, leaf observations) plus leaf metadata and the root columns'
-    opponent-action classes."""
+    """lookahead2.expand_world (same rows, cols, cells, leaf observations) plus the leaves' engine states and the
+    root columns' opponent-action classes."""
     import poke_engine as pe
     from porygon import v3leaf as L
     t0 = time.perf_counter()
@@ -502,42 +516,45 @@ def op_root(root: Any, conv: Any, legal: np.ndarray, min_prob: float = 0.0) -> d
     cols = [o.move_choice for o in r.side_two]
     order = sorted(rows)
     obs: list[dict] = []
-    metas: list[tuple] = []
+    states: list[str] = []
     count = {"branches": 0, "terminal": 0, "switch_expansions": 0, "errors": 0}
     cells = expand_cells(enc, state, [LA.engine_choice(rows[a]) for a in order], [LA.engine_choice(c) for c in cols],
-                         1, min_prob, count, obs, metas)
+                         1, min_prob, count, obs, states)
     col_classes = opp_classes(enc, state, root.obs, ["none" if c == "No Move" else c for c in cols])
-    return {"rows": order, "cols": cols, "cells": cells, "obs": _stack(obs), "n_leaves": len(obs), "metas": metas,
+    return {"rows": order, "cols": cols, "cells": cells, "obs": _stack(obs), "n_leaves": len(obs), "states": states,
             "col_classes": col_classes, "seconds": time.perf_counter() - t0, **count}
 
 
-def op_expand(root: Any, conv: Any, items: list[tuple], min_prob: float) -> dict:
-    """One more turn below each (item id, state string, turns, our choices, their choices): cells per item (None =
-    the item failed), the new leaves' observations and metadata (refs index the request's leaves)."""
+def op_expand(root: Any, conv: Any, items: list[tuple], min_prob: float, widths: dict) -> dict:
+    """One more turn below each (item id, state string, turns, policy logits, opponent-action logits): per item
+    (id, cells, our prior, their prior) with cells over the kept options (None = the item failed), plus the new
+    leaves' observations, engine states and turns (refs index the request's leaves)."""
     import poke_engine as pe
     from porygon import v3leaf as L
     t0 = time.perf_counter()
     enc = L.LeafEncoder(root, conv)
     obs: list[dict] = []
-    metas: list[tuple] = []
-    count = {"branches": 0, "terminal": 0, "switch_expansions": 0, "errors": 0, "cells": 0}
+    states: list[str] = []
+    count = {"branches": 0, "terminal": 0, "switch_expansions": 0, "errors": 0, "cells": 0, "opp_kept": 0.0}
     out, leaf_turns = [], []
-    for g, s, turns, ours, theirs in items:
+    for g, s, turns, pol, opp in items:
         n0 = len(obs)
         try:
             st = pe.State.from_string(s)
+            ours, pi, theirs, q, kept = node_options(enc, st, turns, pol, opp, widths)
+            count["opp_kept"] += kept
             cells = expand_cells(enc, st, [L.engine_choice(c) for c in ours], [L.engine_choice(c) for c in theirs],
-                                 turns + 1, min_prob, count, obs, metas)
+                                 turns + 1, min_prob, count, obs, states)
             count["cells"] += len(ours) * len(theirs)
             leaf_turns += [turns + 1] * (len(obs) - n0)
-            out.append((g, cells))
+            out.append((g, cells, pi, q))
         except BaseException as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
-            del obs[n0:], metas[n0:]
+            del obs[n0:], states[n0:]
             count["errors"] += 1
-            out.append((g, None))
-    return {"items": out, "obs": _stack(obs), "metas": metas, "leaf_turns": leaf_turns, "n_leaves": len(obs),
+            out.append((g, None, None, None))
+    return {"items": out, "obs": _stack(obs), "states": states, "leaf_turns": leaf_turns, "n_leaves": len(obs),
             "seconds": time.perf_counter() - t0, **count}
 
 
@@ -581,9 +598,10 @@ class DeepenPool(LA.LookaheadPool):
 
 # ---------------------------------------------------------------- leaf forward and the decision
 
-def leaf_forward(net: Any, stacked: list[dict], batch: int = 2048, half: bool = False):
-    """(P(win) float64, policy logits, opponent-action logits) of the stacked leaves, in order; seconds of forward.
-    P(win) is lookahead2.leaf_values' (sigmoid of the win logit in float64); `half`: fp16 autocast (I1 parity)."""
+def leaf_forward(net: Any, stacked: list[dict], batch: int = 2048, half: bool = False, aux: bool = False):
+    """(P(win) float64, policy logits, opponent-action logits or None) of the stacked leaves, in order; seconds of
+    forward. P(win) is lookahead2.leaf_values' (sigmoid of the win logit in float64; aux=False there too, so the same
+    kernels); `aux`: also the opponent-action head; `half`: fp16 autocast (I1 parity)."""
     import contextlib
 
     import torch
@@ -599,12 +617,13 @@ def leaf_forward(net: Any, stacked: list[dict], batch: int = 2048, half: bool = 
         t0 = time.perf_counter()
         for i in range(0, n, batch):
             x = batch_to_tensors({k: v[i:i + batch] for k, v in cat.items()}, device)
-            out = net(x, aux=True)
+            out = net(x, aux=aux)
             vs.append(torch.sigmoid(out["win_logit"].double()).cpu().numpy())
             ps.append(out["logits"].float().cpu().numpy())
-            qs.append(out["aux"]["opp_action"].float().cpu().numpy())
+            if aux:
+                qs.append(out["aux"]["opp_action"].float().cpu().numpy())
         t = time.perf_counter() - t0
-    return np.concatenate(vs), np.concatenate(ps), np.concatenate(qs), t
+    return np.concatenate(vs), np.concatenate(ps), (np.concatenate(qs) if aux else None), t
 
 
 @dataclass
@@ -634,6 +653,7 @@ class Result:  # lookahead2.Result's fields (the gate log reads them) plus the d
     dedup: int = 0  # new leaves that repeated a state (no forward)
     cells: int = 0  # expanded cells below the root
     branches: int = 0  # their chance branches
+    opp_kept: float = 0.0  # mean share of the opponent head's mass kept per expansion
     extra: dict = field(default_factory=dict)
 
 
@@ -676,57 +696,76 @@ async def deepen(pool: LA.LookaheadPool, leaf_net: Any, battle: Any, first_seen:
     stacked = [r["obs"] for r in ok if r["obs"] is not None]
     t_fwd = 0.0
     if stacked:
-        v, pol, opp, t = await asyncio.to_thread(leaf_forward, leaf_net, stacked, batch, half)
+        v, pol, _, t = await asyncio.to_thread(leaf_forward, leaf_net, stacked, batch, half)
         t_fwd += t
     else:
-        v, pol, opp = np.zeros(0), np.zeros((0, 1)), np.zeros((0, 1))
-    _, _, q_root, t = await asyncio.to_thread(leaf_forward, leaf_net, [{k: x[None] for k, x in root.obs.items()}],
-                                               batch, half)
-    t_fwd += t
+        v, pol = np.zeros(0), np.zeros((0, 1))
+    q_root = None
+    if cfg.budget > 0:  # the root observation's opponent head (row weights of the root columns)
+        _, _, q_root, t = await asyncio.to_thread(leaf_forward, leaf_net, [{k: x[None] for k, x in root.obs.items()}],
+                                                   batch, half, True)
+        t_fwd += t
     t_score = time.perf_counter() - t1
     tree = Tree(len(ok))
     off = 0
     for k, r in enumerate(ok):
-        ids = [tree.add_leaf(k, 1, r["metas"][i], v[off + i], pol[off + i], opp[off + i]) for i in range(r["n_leaves"])]
+        ids = [tree.add_leaf(k, 1, r["states"][i], v[off + i], pol[off + i], (r["obs"], i)) for i in range(r["n_leaves"])]
         off += r["n_leaves"]
         tree.worlds.append(World(r["rows"], r["cols"], [[None if c is None else [(p, remap(x, ids)) for p, x in c]
                                                           for c in row] for row in r["cells"]],
-                                 opp_prior(q_root[0], r["col_classes"])))
+                                 opp_prior(q_root[0], r["col_classes"]) if q_root is not None
+                                 else np.full(len(r["cols"]), 1.0 / len(r["cols"]))))
     base = len(tree.val)
     stats = {"terminal": int(sum(r["terminal"] for r in ok)), "errors": int(sum(r["errors"] for r in ok)),
              "cpu": float(sum(r["seconds"] for r in ok)), "expansions": 0, "failed": 0, "waves": 0, "dedup": 0,
-             "cells": 0, "branches": 0, "cell_leaves": 0}
+             "cells": 0, "branches": 0, "rows": 0, "opp_kept": 0.0}
+    widths = {"us_mass": cfg.us_mass, "us_cap": cfg.us_cap, "opp_mass": cfg.opp_mass, "opp_cap": cfg.opp_cap,
+              "opp_min": cfg.opp_min}
     t_solve = 0.0
     extra = 0
-    branches = cfg.branch_guess
+    per_row = cfg.branch_guess * min(cfg.opp_cap, 3)  # new leaves per kept row of an expansion (measured below)
     while extra < cfg.budget:
         ts = time.perf_counter()
-        tree.evaluate(cfg.mid_iters)
+        tree.evaluate(cfg.mid_iters, cfg.nash)
         common, sol, used, info = tree.root_solve(cfg.mid_iters)
         pi = probs[common] / probs[common].sum() if probs[common].sum() > 0 else np.full(len(common), 1 / len(common))
         r = tree.reach(common, sol, used, info, pi, a_net)
-        picks = tree.select(r, min(cfg.wave, cfg.budget - extra), cfg, branches)
+        picks = tree.select(r, min(cfg.wave, cfg.budget - extra), cfg, per_row)
         t_solve += time.perf_counter() - ts
         if not picks:
             break
+        tf = time.perf_counter()  # the picked leaves' opponent-action head
+        by_src: dict[int, tuple] = {}
+        for g in picks:
+            src, row = tree.obs[g]
+            by_src.setdefault(id(src), (src, []))[1].append(row)
+        order = [(g, tree.obs[g]) for g in picks]
+        st = [{kk: src[kk][rows] for kk in src} for src, rows in by_src.values()]
+        pos_of = {}
+        n = 0
+        for src, rows in by_src.values():
+            for rr in rows:
+                pos_of[(id(src), rr)] = n
+                n += 1
+        _, _, qa, t = await asyncio.to_thread(leaf_forward, leaf_net, st, batch, half, True)
+        t_fwd += t
+        t_score += time.perf_counter() - tf
+        opp_of = {g: qa[pos_of[(id(src), rr)]] for g, (src, rr) in order}
         by_world: dict[int, list] = {}
-        for g, rows, cols in picks:
-            by_world.setdefault(tree.world[g], []).append(
-                (g, tree.state[g], tree.turns[g], [tree.ours[g][0][i] for i in rows], [tree.theirs[g][0][j] for j in cols]))
+        for g in picks:
+            by_world.setdefault(tree.world[g], []).append((g, tree.state[g], tree.turns[g], tree.pol[g], opp_of[g]))
         reqs = []
-        n_req = max(1, pool.n)
-        total = sum(len(x) for x in by_world.values())
+        total = len(picks)
         for k, items in by_world.items():
-            share = max(1, round(n_req * len(items) / total))
+            share = max(1, round(max(1, pool.n) * len(items) / total))
             for ch in _chunks(items, share):
                 reqs.append((k, ch))
         te = time.perf_counter()
         out = await asyncio.gather(*(pool.expand({"op": "expand", "root": root, "conv": ok_conv[k], "items": ch,
-                                                  "min_prob": cfg.deep_min_prob}) for k, ch in reqs),
-                                   return_exceptions=True)
+                                                  "min_prob": cfg.deep_min_prob, "widths": widths})
+                                     for k, ch in reqs), return_exceptions=True)
         t_expand += time.perf_counter() - te
-        kept = {g: (rows, cols) for g, rows, cols in picks}
-        new_rows: list[tuple] = []  # (world, turns, meta) of each leaf to forward, in order
+        new_rows: list[tuple] = []  # (world, turns, state, source dict, row) of each leaf to forward, in order
         stack: list[dict] = []
         wave_key: dict[tuple, int] = {}
         replies = []
@@ -737,13 +776,16 @@ async def deepen(pool: LA.LookaheadPool, leaf_net: Any, battle: Any, first_seen:
                     tree.node_of[g] = -2
                     stats["failed"] += 1
                 continue
-            for key_ in ("terminal", "errors", "cells", "branches"):
+            for key_ in ("terminal", "errors", "cells", "branches", "opp_kept"):
                 stats[key_] += o[key_]
-            stats["cell_leaves"] += len(o["metas"])
             stats["cpu"] += o["seconds"]
             ids, take = [], []
-            for li, meta in enumerate(o["metas"]):
-                key = (k, o["leaf_turns"][li], meta[0])
+            src = None
+            if o["obs"] is not None and o["n_leaves"]:
+                src = o["obs"]
+            first = len(new_rows)
+            for li, s in enumerate(o["states"]):
+                key = (k, o["leaf_turns"][li], s)
                 g = tree.lookup(*key)
                 if g is not None:
                     ids.append(("old", g))
@@ -752,44 +794,49 @@ async def deepen(pool: LA.LookaheadPool, leaf_net: Any, battle: Any, first_seen:
                 else:
                     wave_key[key] = len(new_rows)
                     ids.append(("new", len(new_rows)))
-                    new_rows.append((k, o["leaf_turns"][li], meta))
+                    new_rows.append((k, o["leaf_turns"][li], s, None, len(take)))
                     take.append(li)
                     continue
                 stats["dedup"] += 1
             if take:
-                stack.append({kk: arr[take] for kk, arr in o["obs"].items()})
+                sub = {kk: arr[take] for kk, arr in src.items()}
+                stack.append(sub)
+                for j in range(first, len(new_rows)):
+                    k_, t_, s_, _, row = new_rows[j]
+                    new_rows[j] = (k_, t_, s_, sub, row)
             replies.append((o, ids))
         tf = time.perf_counter()
         new_ids: list[int] = []
         if new_rows:
-            vv, pp, qq, t = await asyncio.to_thread(leaf_forward, leaf_net, stack, batch, half)
+            vv, pp, _, t = await asyncio.to_thread(leaf_forward, leaf_net, stack, batch, half)
             t_fwd += t
-            new_ids = [tree.add_leaf(k, turns, meta, vv[i], pp[i], qq[i]) for i, (k, turns, meta) in enumerate(new_rows)]
+            new_ids = [tree.add_leaf(k, turns, s, vv[i], pp[i], (sub, row))
+                       for i, (k, turns, s, sub, row) in enumerate(new_rows)]
         t_score += time.perf_counter() - tf
         extra += len(new_rows)
         for o, ids in replies:
             gmap = [j if kind == "old" else new_ids[j] for kind, j in ids]
-            for g, cells in o["items"]:
+            for g, cells, pi_g, q_g in o["items"]:
                 if cells is None:
                     tree.node_of[g] = -2
                     stats["failed"] += 1
                     continue
-                rows, cols = kept[g]
-                tree.add_node(g, rows, cols, [[None if c is None else [(p, remap(x, gmap)) for p, x in c] for c in row]
-                                              for row in cells])
+                tree.add_node(g, [[None if c is None else [(p, remap(x, gmap)) for p, x in c] for c in row]
+                                  for row in cells], pi_g, q_g)
                 stats["expansions"] += 1
+                stats["rows"] += len(cells)
         stats["waves"] += 1
-        if stats["cells"]:
-            branches = max(stats["cell_leaves"] / stats["cells"], 0.5)  # leaves per expanded cell so far
+        if stats["rows"]:
+            per_row = max(extra / stats["rows"], 0.5)  # new (forwarded) leaves per kept row so far
     ts = time.perf_counter()
-    tree.evaluate(cfg.node_iters)
+    tree.evaluate(cfg.node_iters, cfg.nash)
     common, sol, used, _ = tree.root_solve(iters)
     t_solve += time.perf_counter() - ts
     return Result(common, sol.x, sol.q, sol.value, sol.expl, len(used), worlds - len(used), len(tree.val),
                   stats["terminal"], stats["errors"], float(np.mean([len(r["cols"]) for r in ok])), t_expand, t_score,
                   t_fwd, t_solve, stats["cpu"], base, extra, stats["expansions"], stats["failed"], stats["waves"],
-                  tree.depth(), stats["dedup"], stats["cells"], stats["branches"])
-
+                  tree.depth(), stats["dedup"], stats["cells"], stats["branches"],
+                  stats["opp_kept"] / max(stats["expansions"], 1))
 
 
 # ---------------------------------------------------------------- player
@@ -888,7 +935,7 @@ def __getattr__(name: str):
 
 
 CFG_INTS = {"budget", "wave", "us_cap", "opp_cap", "opp_min", "max_turns", "mid_iters", "node_iters"}
-CFG_FLOATS = {"us_mass", "opp_mass", "deep_min_prob", "branch_guess"}
+CFG_FLOATS = {"us_mass", "opp_mass", "deep_min_prob", "branch_guess", "nash"}
 
 
 def parse_spec(spec: str) -> tuple[str, dict[str, Any], dict[str, str], Config, bool]:

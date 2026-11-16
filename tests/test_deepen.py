@@ -10,9 +10,7 @@ import pytest
 from porygon import deepen as D
 from porygon import lookahead2 as LA
 
-META = lambda s="s", oc=("a", "b"), oa=(6, 7), tc=("x", "y"), tcl=(7, 8): (s, list(oc), list(oa), list(tc), list(tcl))  # noqa: E731
 FLAT = np.zeros(26)
-OPP = np.zeros(D_N := 55)
 
 
 def test_keep_by_mass():
@@ -54,7 +52,7 @@ def _tree_one_world():
     """One world, rows 6 / 7, cols a / b; cell (7, b) has two chance branches, (6, a) a forced opponent switch."""
     t = D.Tree(1)
     vals = [0.6, 0.4, 0.5, 0.3, 0.9, 0.2]
-    ids = [t.add_leaf(0, 1, META(f"s{i}"), v, FLAT, OPP) for i, v in enumerate(vals)]
+    ids = [t.add_leaf(0, 1, f"s{i}", v, FLAT) for i, v in enumerate(vals)]
     cells = [[[(1.0, ("S", [[(1.0, ("L", ids[0]))], [(1.0, ("L", ids[5]))]]))], [(1.0, ("L", ids[1]))]],
              [[(1.0, ("L", ids[2]))], [(0.5, ("L", ids[3])), (0.5, ("L", ids[4]))]]]
     t.worlds.append(D.World([6, 7], ["a", "b"], cells, np.array([0.5, 0.5])))
@@ -70,8 +68,8 @@ def test_root_solve_is_lookahead2_combine():
     assert sol.x == pytest.approx(ref.x, abs=0) and sol.q == pytest.approx(ref.q, abs=0)
     # two worlds, one with a failed cell and an extra row
     t2 = D.Tree(2)
-    a = [t2.add_leaf(0, 1, META(f"a{i}"), v, FLAT, OPP) for i, v in enumerate([0.3, 0.6, 0.5])]
-    b = [t2.add_leaf(1, 1, META(f"b{i}"), v, FLAT, OPP) for i, v in enumerate([0.8, 0.1, 0.4, 0.7])]
+    a = [t2.add_leaf(0, 1, f"a{i}", v, FLAT) for i, v in enumerate([0.3, 0.6, 0.5])]
+    b = [t2.add_leaf(1, 1, f"b{i}", v, FLAT) for i, v in enumerate([0.8, 0.1, 0.4, 0.7])]
     c1 = [[[(1.0, ("L", a[0]))], [(1.0, ("L", a[1]))]], [[(1.0, ("L", a[2]))], None]]
     c2 = [[[(1.0, ("L", b[0]))]], [[(1.0, ("L", b[1]))]], [[(1.0, ("L", b[2])), ]]]
     t2.worlds += [D.World([6, 8], ["x", "y"], c1, np.ones(2) / 2), D.World([6, 7, 8], ["z"], c2, np.ones(1))]
@@ -86,17 +84,21 @@ def test_root_solve_is_lookahead2_combine():
 def test_expansion_changes_value_and_failed_node_falls_back():
     t, ids, cells = _tree_one_world()
     g = ids[1]  # cell (6, b), value 0.4
-    kids = [t.add_leaf(0, 2, META(f"k{i}"), v, FLAT, OPP) for i, v in enumerate([0.9, 0.7, 0.8, 0.6])]
-    t.add_node(g, [0, 1], [0, 1], [[[(1.0, ("L", kids[0]))], [(1.0, ("L", kids[1]))]],
-                                    [[(1.0, ("L", kids[2]))], [(1.0, ("L", kids[3]))]]])
+    kids = [t.add_leaf(0, 2, f"k{i}", v, FLAT) for i, v in enumerate([0.9, 0.7, 0.8, 0.6])]
+    t.add_node(g, [[[(1.0, ("L", kids[0]))], [(1.0, ("L", kids[1]))]],
+                   [[(1.0, ("L", kids[2]))], [(1.0, ("L", kids[3]))]]], [0.5, 0.5], [0.5, 0.5])
+    t.evaluate(1000, nash=0.0)  # the priors' expected value: (0.9 + 0.7 + 0.8 + 0.6) / 4
+    assert t.val[g] == pytest.approx(0.75)
+    t.evaluate(1000, nash=0.5)
+    assert t.val[g] == pytest.approx(0.5 * 0.75 + 0.5 * 0.7, abs=0.01)
     t.evaluate(1000)
-    assert t.val[g] == pytest.approx(0.7, abs=0.01)  # row 0 dominates (0.9/0.7 vs 0.8/0.6); col 1 for them
+    assert t.val[g] == pytest.approx(0.7, abs=0.01)  # Nash: row 0 dominates (0.9/0.7 vs 0.8/0.6); col 1 for them
     assert t.leaf_v[g] == pytest.approx(0.4) and t.depth() == 2
     M, keep = D.cell_matrix(t.worlds[0].cells, t.val)
     assert M[0, 1] == pytest.approx(t.val[g]) and M[0, 0] == pytest.approx(0.2)  # the root sees the deeper value
     # a node whose every row failed keeps the leaf value and never expands again
     h = ids[2]
-    t.add_node(h, [0], [0, 1], [[None, None]])
+    t.add_node(h, [[None, None]], [1.0], [0.5, 0.5])
     t.evaluate(100)
     assert t.node_of[h] == -2 and t.val[h] == pytest.approx(0.5)
 
@@ -113,8 +115,8 @@ def test_reach_is_a_distribution_and_flows_down():
     assert r[ids[1]] == pytest.approx(rho6 * ys[1])
     # an expanded leaf passes its reach on
     g = ids[2]
-    kids = [t.add_leaf(0, 2, META(f"k{i}"), 0.5, FLAT, OPP) for i in range(2)]
-    t.add_node(g, [0], [0, 1], [[[(1.0, ("L", kids[0]))], [(0.5, ("L", kids[1])), (0.5, ("T", 1.0))]]])
+    kids = [t.add_leaf(0, 2, f"k{i}", 0.5, FLAT) for i in range(2)]
+    t.add_node(g, [[[(1.0, ("L", kids[0]))], [(0.5, ("L", kids[1])), (0.5, ("T", 1.0))]]], [1.0], [0.5, 0.5])
     t.evaluate(500)
     common, sol, used, info = t.root_solve(1000)
     r = t.reach(common, sol, used, info, np.array([0.5, 0.5]), a_net=None)
@@ -126,24 +128,33 @@ def test_select_priority_target_and_limits():
     t, ids, _ = _tree_one_world()
     common, sol, used, info = t.root_solve(1000)
     r = t.reach(common, sol, used, info, np.array([0.5, 0.5]), a_net=6)
-    cfg = D.Config(budget=100, us_cap=2, opp_cap=2, max_turns=4)
+    cfg = D.Config(budget=100, us_cap=2, max_turns=4)
     v = np.array(t.val)
     pr = r * 4 * v * (1 - v)
-    picks = t.select(r, target=1.0, cfg=cfg, branches=2.0)
-    assert len(picks) == 1 and picks[0][0] == int(np.argmax(pr))
-    allp = t.select(r, target=1e9, cfg=cfg, branches=2.0)
-    assert [g for g, *_ in allp] == sorted((g for g in range(len(v)) if pr[g] > 0), key=lambda g: (-pr[g], g))
-    assert ids[0] not in [g for g, *_ in allp]  # reach 0
-    t.turns[allp[0][0]] = 4  # at max_turns: not expandable
-    assert allp[0][0] not in [g for g, *_ in t.select(r, 1e9, cfg, 2.0)]
+    picks = t.select(r, target=1.0, cfg=cfg, per_row=2.0)
+    assert picks == [int(np.argmax(pr))]
+    allp = t.select(r, target=1e9, cfg=cfg, per_row=2.0)
+    assert allp == sorted((g for g in range(len(v)) if pr[g] > 0), key=lambda g: (-pr[g], g))
+    assert ids[0] not in allp  # reach 0
+    t.turns[allp[0]] = 4  # at max_turns: not expandable
+    assert allp[0] not in t.select(r, 1e9, cfg, 2.0)
     t.val[ids[1]] = 1.0  # settled
-    assert ids[1] not in [g for g, *_ in t.select(r, 1e9, cfg, 2.0)]
+    assert ids[1] not in t.select(r, 1e9, cfg, 2.0)
+    # the wave estimate: kept rows from the policy logits (no legal action -> 1 row)
+    lg = np.full(26, np.finfo(np.float32).min, dtype=np.float32)
+    lg[[6, 7, 8]] = [2.0, 1.0, 0.0]
+    t.pol[ids[2]] = lg
+    assert t.est_rows(ids[2], D.Config(us_mass=0.95, us_cap=3)) == 3
+    assert t.est_rows(ids[2], D.Config(us_mass=0.9, us_cap=3)) == 2
+    assert t.est_rows(ids[2], D.Config(us_mass=0.6, us_cap=3)) == 1
+    t.pol[ids[3]] = np.full(26, np.finfo(np.float32).min, dtype=np.float32)
+    assert t.est_rows(ids[3], cfg) == 1
 
 
 def test_dedup_key():
     t = D.Tree(1)
-    a = t.add_leaf(0, 1, META("same"), 0.5, FLAT, OPP)
-    b = t.add_leaf(0, 1, META("same"), 0.5, FLAT, OPP)
+    a = t.add_leaf(0, 1, "same", 0.5, FLAT)
+    b = t.add_leaf(0, 1, "same", 0.5, FLAT)
     assert t.lookup(0, 1, "same") == a != b
     assert t.lookup(0, 2, "same") is None and t.lookup(1, 1, "same") is None
 

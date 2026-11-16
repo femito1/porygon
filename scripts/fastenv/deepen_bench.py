@@ -71,16 +71,18 @@ async def run(a) -> int:
     print(f"{len(pos)} positions replayed in {time.time() - t0:.0f}s", flush=True)
     budgets = [int(x) for x in a.budgets.split(",") if x]
     halves = [int(x) for x in a.half_budgets.split(",") if x]
-    arms = [("la", None, False)] + [(f"b{b}", b, False) for b in budgets] + [(f"h{b}", b, True) for b in halves]
+    nashes = [int(x) for x in a.nash_budgets.split(",") if x]
+    arms = ([("la", None, False, 0.0)] + [(f"b{b}", b, False, 0.0) for b in budgets]
+            + [(f"n{b}", b, False, 1.0) for b in nashes] + [(f"h{b}", b, True, 0.0) for b in halves])
     la_pool = LA.LookaheadPool(a.workers)
     d_pool = D.DeepenPool(a.workers)
     manifest = {"net": a.net, "positions": len(pos), "workers": a.workers, "concurrency": a.concurrency,
-                "worlds": a.worlds, "margin": a.margin, "arms": [x[0] for x in arms], "cuda": torch.cuda.get_device_name(0)
+                "worlds": a.worlds, "margin": a.margin, "arms": [x[0] for x in arms], "nash_arms": [x[0] for x in arms if x[3] > 0], "cuda": torch.cuda.get_device_name(0)
                 if torch.cuda.is_available() else None, "cfg": D.Config().__dict__}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     passes = {}
     fh = open(out / "rows.jsonl", "w")
-    for arm, b, half in arms:
+    for arm, b, half, nash in arms:
         sem = asyncio.Semaphore(a.concurrency)
         fails = [0]
 
@@ -95,10 +97,11 @@ async def run(a) -> int:
                         extra = {}
                     else:
                         res = await D.deepen(d_pool, leaf, P["battle"], P["first"], rng, P["mask"], P["probs"],
-                                             P["a_net"], worlds=a.worlds, cfg=D.Config(budget=b), half=half)
+                                             P["a_net"], worlds=a.worlds, cfg=D.Config(budget=b, nash=nash),
+                                             half=half)
                         extra = {k: getattr(res, k) for k in ("base_leaves", "extra_leaves", "expansions",
                                                               "failed_expansions", "waves", "depth", "dedup", "cells",
-                                                              "branches")}
+                                                              "branches", "opp_kept")}
                 except Exception as e:
                     fails[0] += 1
                     fh.write(json.dumps({"arm": arm, "pos": P["name"], "error": f"{type(e).__name__}: {e}"}) + "\n")
@@ -160,10 +163,17 @@ def report(out: Path) -> str:
                                                                  for k in sorted(set(g("depth")))},
                      dedup_share=float(np.sum(g("dedup")) / max(np.sum(ex) + np.sum(g("dedup")), 1)),
                      leaves_per_cell=float((np.sum(ex) + np.sum(g("dedup"))) / max(np.sum(g("cells")), 1)),
-                     failed_expansions=int(np.sum(g("failed_expansions"))))
+                     failed_expansions=int(np.sum(g("failed_expansions"))),
+                     opp_kept=float(np.mean([x for x in g("opp_kept") if x > 0])) if any(x > 0 for x in g("opp_kept"))
+                     else None)
         if ref and arm != "la":
             both = [(r, ref[p]) for p, r in by[arm].items() if p in ref and "error" not in r and "error" not in ref[p]]
             s["pick_eq_la"] = float(np.mean([r["pick"] == f["pick"] for r, f in both]))
+            qa = lambda r: r["q"][r["rows"].index(r["a_net"])] if r["a_net"] in r["rows"] else math.nan  # noqa: E731
+            sh = [qa(r) - qa(f) for r, f in both if math.isfinite(qa(r) - qa(f))]
+            s["q_anet_shift_mean"], s["q_anet_shift_median"] = float(np.mean(sh)), float(np.median(sh))
+            ql = lambda r: r["q"][r["rows"].index(r["pick"])]  # noqa: E731
+            s["q_pick_shift_mean"] = float(np.mean([ql(r) - ql(f) for r, f in both]))
             if arm == "b0":
                 dq = [max(abs(a_ - b_) for a_, b_ in zip(r["q"], f["q"])) if r["rows"] == f["rows"] else math.inf
                       for r, f in both]
@@ -189,7 +199,10 @@ def report(out: Path) -> str:
                      f"{s['dedup_share']:.3f}, leaves/cell {s['leaves_per_cell']:.2f}, failed expansions "
                      f"{s['failed_expansions']}")
         if "pick_eq_la" in s:
-            line += f"; pick = la's {s['pick_eq_la']:.3f}"
+            line += (f"; pick = la's {s['pick_eq_la']:.3f}; Q(a_net) - la's: mean {s['q_anet_shift_mean']:+.4f} median "
+                     f"{s['q_anet_shift_median']:+.4f}; Q(own pick) - la's Q(its pick) {s['q_pick_shift_mean']:+.4f}")
+        if s.get("opp_kept") is not None:
+            line += f"; opponent mass kept {s['opp_kept']:.3f}"
         if top and f"pick_eq_{top}" in s and s[f"pick_eq_{top}"] is not None:
             line += f"; pick = {top}'s {s[f'pick_eq_{top}']:.3f}"
         if "parity_b0_vs_la" in s:
@@ -218,6 +231,7 @@ def main() -> int:
     r.add_argument("--margin", type=float, default=0.005)
     r.add_argument("--budgets", default="0,1024,2048,4096,8192")
     r.add_argument("--half-budgets", default="8192")
+    r.add_argument("--nash-budgets", default="2048,8192")
     r.add_argument("--leaf-device", default="cuda")
     r.add_argument("--seed", type=int, default=11)
     p = sub.add_parser("report")

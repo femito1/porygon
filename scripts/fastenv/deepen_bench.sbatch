@@ -4,13 +4,13 @@
 #   R=$C/runs/dbench-<date>; mkdir -p $R/code && rsync -a src scripts $R/code/ && echo <commit> > $R/code/COMMIT
 #   cd $C && sbatch scripts/fastenv/deepen_bench.sbatch $R
 # Stages: smoke (4 positions, budgets 0 and 1024; b0 must equal lookahead2) -> bench (120 positions of S2 + S1,
-# budgets 0 / 1024 / 2048 / 4096 / 8192, fp16 at 8192). Stage files $R/{STATUS,RESULT,FAILED}.
+# budgets 0 / 1024 / 2048 / 4096 / 8192 with the priors backup, the Nash backup at 2048 and 8192, fp16 at 8192). Stage files $R/{STATUS,RESULT,FAILED}.
 #SBATCH --job-name=ws-fastenv-dbench
 #SBATCH --partition=training
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=48G
-#SBATCH --time=04:00:00
+#SBATCH --mem=24G
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/slurm-%j.out
 set -uo pipefail
 R=$1
@@ -38,7 +38,7 @@ SITE=$($PY -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
 ( cd "$SITE" && timeout 1200 find torch triton nvidia -name '*.so*' -size +1M -exec cat {} + > /dev/null ) &
 B=$CODE/scripts/fastenv/deepen_bench.py
 $PY "$B" run --records "$SL" --source 6771931 --rows "$I/s2-sl-ARP.jsonl" --net "$NET" --out "$R/smoke" \
-  --positions 4 --budgets 0,1024 --half-budgets "" --workers "$W" > "$R/smoke.log" 2>&1 || fail smoke "see smoke.log"
+  --positions 4 --budgets 0,1024 --half-budgets "" --nash-budgets 1024 --workers "$W" > "$R/smoke.log" 2>&1 || fail smoke "see smoke.log"
 grep -q "PARITY b0 vs la" "$R/smoke/summary.txt" || fail smoke "no parity line"
 st "smoke OK: $(grep -o 'PARITY.*' "$R/smoke/summary.txt")"
 cat "$I/s2-sl-ARP.jsonl" "$I/s1-sl-AB.jsonl" > "$R/rows.jsonl"
