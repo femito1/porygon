@@ -1,8 +1,10 @@
-# Bet 2 gate 1 (offline): can a small CPU student on poke-engine State features predict as well as G9q's value? Pre-registration (fastenv, 2026-11-16; binding before any training, read-only)
+# Bet 2 gate 1 (offline): can a small CPU student on poke-engine State features predict as well as G9q's value? Pre-registration (fastenv, 2026-11-16; binding before any training, read-only; v2)
 Main's decision (2026-11-16, item B): gate 1 of `NNUE-LEAVES-NOTE.md` is approved; gates 2–4 are NOT. This file fixes
-the data, the student, the metrics and the PASS rule before any data is generated or any student is trained. Records
+the data, the student, the metrics and the decision rule before any data is generated or any student is trained. Records
 and deviations go in `$C/nnue/gate1/NOTES.txt`, never here. Cluster copy `$C/nnue/gate1/PREREG.txt` (r--), md5 in
 `PREREG.md5`.
+Version 2 (main's amendment, 2026-11-16, before any data existed; v1 md5 5fa9a1bd): the single PASS/FAIL rule
+became three levels (PASS / PARTIAL / FAIL) and the note on sets S and H was added. Nothing else changed.
 
 ## Question
 On held-out positions, does a ~50–200k-parameter f32 student whose inputs are built from the poke-engine `State`
@@ -52,12 +54,24 @@ the same way to the student, the teacher and `evaluate()` (the latter on eval / 
   them; `evaluate()` and the student are each averaged over the same K 4 determinizations (for the student the mean
   of P(win)), exactly as `evaluate()` was in Step 2.
 
-## PASS rule (all four, point estimates; otherwise FAIL)
-On BOTH set S and set H:
+## Decision rule (three levels, point estimates; each evaluated on BOTH set S and set H)
+Criteria:
 1. AUC(student) ≥ AUC(teacher) − 0.01 and LL_cal(student) ≤ LL_cal(teacher) + 0.01;
 2. AUC(student) − AUC(evaluate) ≥ 0.015 and LL_cal(evaluate) − LL_cal(student) ≥ 0.017.
+
+Levels:
+- **PASS** = criteria 1 and 2 both met on set S and on set H.
+- **PARTIAL** = criterion 2 met on both sets, and criterion 1 not met on at least one set.
+- **FAIL** = otherwise.
+
+PASS or PARTIAL ⇒ fastenv may propose gate 2 (Rust parity and speed), since gate 3 (engine strength in games) is the
+real decider; FAIL ⇒ stop. The level decides nothing else.
 Reported with game-clustered bootstrap 95% intervals of the differences (1000 resamples), by-turn tables and decile
-calibration (informational). A PASS lets fastenv propose gate 2 (Rust parity and speed); it decides nothing else.
+calibration (informational).
+
+Note on the two sets: on set S the student (and `evaluate()`) score the TRUE full-information State, so there they
+hold information the teacher (a partial-information observation) lacks. Set H (K 4 determinizations, as `evaluate()`
+was scored in Step 2) is the comparison that mirrors search leaves.
 
 ## Also reported (information, not part of the rule)
 - The student's per-leaf CPU cost: a PyTorch-free numpy forward of one State on one core (dove), median over
@@ -67,5 +81,5 @@ calibration (informational). A PASS lets fastenv propose gate 2 (Rust parity and
 
 ## Chain (one cluster-side chain on fastenv's helper job, no agent)
 `scripts/fastenv/nnue_gate1.sh`: checks (PREREG md5, teacher sha256) → parity (above; FAIL stops) → generate →
-fit → set-H re-score → report. Stage files `$C/nnue/gate1/{STATUS,FAILED,VERDICT.txt (r--, line 1 PASS / FAIL:
+fit → set-H re-score → report. Stage files `$C/nnue/gate1/{STATUS,FAILED,VERDICT.txt (r--, line 1 PASS / PARTIAL / FAIL:
 …),RESULT}`.
