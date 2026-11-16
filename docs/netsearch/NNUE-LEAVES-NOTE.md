@@ -1,5 +1,7 @@
-# Net-valued leaves at depth ("NNUE for Pokémon"): design note (fastenv, 2026-11-15; DRAFT, to propose only if Bet 1 is GO)
-Status: a proposal, not approved. It answers the question V3 left open: how to get network values at many search leaves
+# Net-valued leaves at depth ("NNUE for Pokémon"): design note (fastenv, 2026-11-15)
+Status: **gate 1 FAILED** (2026-11-16; `$C/nnue/gate1/VERDICT.txt`, prereg `NNUE-GATE1-PREREG.md` v2 md5 43f045da): on
+determinized human leaves the student (AUC 0.714) is no better than `evaluate()` (0.718; teacher 0.748). Bet 2 as
+designed below is stopped; a redesigned Bet 2b would need its own prereg. The note is kept as the design record. It answers the question V3 left open: how to get network values at many search leaves
 when GPU inference caps a Python or Rust tree at ~2k leaves per decision (V3 I1: about 7.5k leaves/s on the slot T4).
 
 ## Idea
