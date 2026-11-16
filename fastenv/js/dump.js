@@ -3,7 +3,7 @@
 // (Pokemon references become {side, slot}, effects their id).
 //
 // state = {turn, gen, side (the side to move, 0/1), sides: [p1, p2], field}
-//   side  = {active (index into mons, -1 none), mons: [mon x team size, in the team's initial order (= poke-env's
+//   side  = {n (0 = p1, 1 = p2), active (index into mons, -1 none), mons: [mon x team size, in the team's initial order (= poke-env's
 //            battle.team order)], conditions: {id: effect}, slot: {id: effect} (active slot: wish, futuremove, ...),
 //            request: {forceSwitch, wait, trapped, maybeTrapped, canTera, disabled: [move id]} | null, totalFainted}
 //   mon   = {species, base, level, types, added, tera, terastallized, hp, maxhp, stats {atk, def, spa, spd, spe},
@@ -11,6 +11,9 @@
 //            status_state, boosts, volatiles: {id: effect}, last_move, active_turns, fainted, active, weightkg,
 //            transformed, illusion (species shown | null)}
 //   field = {weather, weather_state, terrain, terrain_state, pseudo: {id: effect}}
+// A mon's volatiles also carry _start (the turn it most likely started: the first dump that saw it is at the start
+// of turn T => T - 1; at a forced switch within turn T => T) and _time0 (its `time` then, e.g. confusion's attempts
+// left): elapsed counts as poke-env (turn - _start) / search.convert pass them to the engine.
 'use strict';
 
 function ref(x, battle) {
@@ -35,6 +38,26 @@ function effect(es, battle) {
 }
 
 const effects = (obj, battle) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, effect(v, battle)]));
+const SEEN = new WeakMap();  // volatile EffectState -> {turn, time} at its first dump
+function volatiles(obj, battle) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    let first = SEEN.get(v);
+    if (!first) {
+      const mid = battle.sides.some(s => s.activeRequest && s.activeRequest.forceSwitch);
+      first = {turn: battle.turn - (mid ? 0 : 1), time: v.time};
+      SEEN.set(v, first);
+    }
+    out[k] = {...effect(v, battle), _start: first.turn, _time0: first.time ?? null};
+  }
+  return out;
+}
+
+function statusState(es, battle) {  // + _time0: its `time` at the first dump that saw it (gen4 sleep length)
+  let first = SEEN.get(es);
+  if (!first) { first = {time: es.time}; SEEN.set(es, first); }
+  return {...effect(es, battle), _time0: first.time ?? null};
+}
 
 function mon(p, battle) {
   const st = p.storedStats;
@@ -46,8 +69,8 @@ function mon(p, battle) {
     item: p.item || '', ability: p.ability || '', base_ability: p.baseAbility || '',
     moves: p.moveSlots.map(m => ({id: m.id, pp: m.pp, maxpp: m.maxpp, disabled: !!m.disabled})),
     base_moves: p.baseMoveSlots.map(m => m.id), hp_type: (p.hpType || '').toLowerCase(),
-    status: p.status || '', status_state: effect(p.statusState, battle), boosts: {...p.boosts},
-    volatiles: effects(p.volatiles, battle), last_move: p.lastMove ? p.lastMove.id : '', active_turns: p.activeTurns,
+    status: p.status || '', status_state: statusState(p.statusState, battle), boosts: {...p.boosts},
+    volatiles: volatiles(p.volatiles, battle), last_move: p.lastMove ? p.lastMove.id : '', active_turns: p.activeTurns,
     fainted: !!p.fainted, active: !!p.isActive, weightkg: p.weighthg / 10, transformed: !!p.transformed,
     illusion: p.illusion ? p.illusion.species.id : null,
   };
@@ -74,7 +97,7 @@ function battleState(battle, side, order) {
   return {
     turn: battle.turn, gen: battle.gen, side,
     sides: battle.sides.map((s, i) => ({
-      active: s.active[0] ? order[i].indexOf(s.active[0]) : -1,
+      n: i, active: s.active[0] ? order[i].indexOf(s.active[0]) : -1,
       mons: order[i].map(p => mon(p, battle)),
       conditions: effects(s.sideConditions, battle),
       slot: effects(s.slotConditions[0] || {}, battle),

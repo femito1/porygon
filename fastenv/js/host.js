@@ -28,7 +28,7 @@
 //   scripts/fastenv/parity_v1.py wait points). For fastenv_vec.FastVecEnv's poke-env lockstep semantics.
 // --dump-states PATH: append one JSON line per decision row (needs_action) with the simulator's full battle state
 //   (fastenv/js/dump.js: {t:'S', game, slot, side, turn, idx, e, state}) and one per finished battle
-//   ({t:'G', game, winner, turns, truncated, crashed, inputlog[, streams]}). game = "<seed>:<battle>:<k>" (worker
+//   ({t:'G', game, winner, turns, truncated, crashed, inputlog, teams[, streams]}; teams = the true sets, +speciesId). game = "<seed>:<battle>:<k>" (worker
 //   seed, battle position, k-th battle there); idx = the side's decision counter in that game; e = index of the
 //   side's last client message (its stream) when the row was emitted = data_replay's Decision.msg. inputlog =
 //   Showdown's own input log (seed, packed teams, every committed choice: replayable by Showdown's tools).
@@ -256,7 +256,8 @@ function emitSlot(slot) {
   if (b.ended || slot.crashed) {
     if (DUMP) {
       const g = {t: 'G', game: slot.gameId, winner: b.winner ?? null, turns: b.turn, truncated: b.turn >= args.maxTurns,
-        crashed: slot.crashed, inputlog: b.battle.inputLog};
+        crashed: slot.crashed, inputlog: b.battle.inputLog,
+        teams: b.teams.map(t => t.map(x => ({...x, speciesId: x.species.toLowerCase().replace(/[^a-z0-9]/g, '')})))};
       if (slot.streams) g.streams = slot.streams;
       dumpLine(g);
     }
