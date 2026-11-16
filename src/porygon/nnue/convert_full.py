@@ -106,6 +106,9 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
     mons = (mons + [pe.Pokemon.create_fainted() for _ in range(6)])[:6]
     vol = {k: v for k, v in (act["volatiles"] if act else {}).items() if k not in SKIP}
     names = {k.upper() for k in vol if known_volatile(k.upper())}
+    if act is not None and not act["terastallized"] and act["species"] in search.GEN.pokedex \
+            and _types(act) != search.dex_types(act["species"]) and known_volatile("TYPECHANGE"):
+        names.add("TYPECHANGE")  # the simulator changes types in place (Soak, Burn Up, ...); poke-env's effect
     last = _last_move(act)
     if last is None:
         names.discard("ENCORE")  # the engine panics on encore without a last-used move
@@ -125,6 +128,11 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
         c = vol["confusion"]
         elapsed["confusion"] = min(max(int(c.get("_time0") or 0) - int(c.get("time") or 0), 0), 9)
     wish = s["slot"].get("wish")
+    if wish and not wish.get("duration") and wish.get("startingTurn") is not None:
+        # gen8+ Wish keeps the turn it was used (getOverflowedTurnCount = turn - 1) and heals at the end of the next
+        wish = dict(wish, duration=max(0, 2 - (turn - (int(wish["startingTurn"]) + 1))))
+    if wish and not wish.get("duration"):
+        wish = None
     fs = other["slot"].get("futuremove")  # Future Sight / Doom Desire lands on the target's slot
     fs_src = fs.get("source") if fs else None
     fs_idx = next((i for i, m in enumerate(s["mons"]) if isinstance(fs_src, dict) and fs_src.get("side") is not None

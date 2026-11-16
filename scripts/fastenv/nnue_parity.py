@@ -68,10 +68,11 @@ KNOWN = {
     "side_one.pokemon.pp": "poke-env ignores Pressure (2 PP per use); convert_full = the simulator's PP. "
         "Student: PP is not an input.",
     "side_one.volatile_statuses": "the simulator has volatiles poke-env does not show but the engine knows "
-        "(e.g. UNBURDEN); convert_full keeps every one the engine knows. Student: volatile bits from the State "
+        "(UNBURDEN, LOCKEDMOVE, ...); convert_full keeps every one the engine knows (TYPECHANGE when the types differ from the species'). Student: volatile bits from the State "
         "(set H: convert's subset).",
-    "side_one.wish": "rare: convert's Wish timer from the log (a failed Wish still counts); convert_full = the "
-        "simulator's slot condition (gen5+: the wisher's max HP / 2).",
+    "side_one.wish": "rare: convert's Wish timer from the log (a failed Wish still counts) and the current active's "
+        "max HP / 2; convert_full = the simulator's slot condition (gen8+: turn from startingTurn; the wisher's max "
+        "HP / 2). Student: wish turns + heal fraction from the State.",
     "side_one.last_used_move": "poke-env's last-used flag differs from the simulator's lastMove in rare orders "
         "(Pursuit on a switch, moves called by other moves). Student: not an input.",
     "side_one.force_trapped": "convert uses poke-env's `trapped` (the request's); convert_full the simulator's, "
