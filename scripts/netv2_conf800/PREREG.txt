@@ -1,0 +1,33 @@
+G9q-cd@800M 1000-GAME CONFIRMATIONS (milestone 1: raw net vs our pure gen9 search; raw net vs Foul Play gen9) —
+PRE-REGISTRATION, FINAL (netv2, 2026-11-15 ~20:45 UTC; ORCHESTRATOR DECISION 2026-11-15 ~20:05 (main, under the
+user's delegation), item 2, slot claim approved as the next after 1172540; written before any game; read-only copy
+runs/conf800/PREREG.txt). Template: runs/conf605/PREREG.txt (517b679c) with the net and the seeds changed.
+Standing: G9q-cd@605M (runs/conf605/RESULTS.txt) 52.5% +- 2.9% [49.6, 55.4] vs our pure gen9 search (NOT CONFIRMED),
+  58.8% +- 2.9% [55.9, 61.7] vs Foul Play gen9 (CONFIRMED). Fixed n, no looks, nothing pooled in.
+
+NET (both stages): G9q-cd@800 = the ONE file runs/g9q-cd800/final/<steps>.pt made by runs/g9q-cd800/PREREG.txt
+  (1a1b9fa4), its md5 = the branch driver's runs/g9q-cd800/STATUS line "G9q-cd800 final at ... (md5 ...)"; raw, T 0.5,
+  duplicate pairs (teams swapped), 95% interval from the pair means (the harnesses' result.txt line). At its start the
+  job waits <= 3 h for that file (if the branch is still running); runs/g9q-cd800/FAILED, more than one file, an md5
+  mismatch or no file after 3 h => runs/conf800/FAILED-net, nothing is played, RELEASE line.
+
+ONE slot job (24 CPUs, `training`, --time 10:00:00, --dependency=afterany:1172540 = after gen4 prior test #2;
+  scripts/netv2_conf800/conf800.sbatch = conf605.sbatch with the net lookup, seeds and paths changed; ledger CLAIM in
+  .orchestra/ledger.md before submission; RELEASE line to $C/LEDGER-OUTBOX.md at the end). Order (i) -> (ii); the
+  stages are independent: a failed stage writes runs/conf800/FAILED-<stage> and the job goes on. ETA ~2.4 h (i) +
+  ~1.3 h (ii) (conf605: 2 h 25 min + 1 h 19 min) after 1172540 ends (expected 11-16 ~16:00-18:00; its limit 11-17 00:50).
+(i) vs OUR PURE GEN9 SEARCH, 1000 games (500 pairs): scripts/netv2_vs_search.sbatch (md5 7d74e0ad = conf605 (i)'s
+    harness) `NET,temperature=0.5 1000 --gen 9 --seed 8800111`.
+    READING (the standing milestone rule): CONFIRMED (raw net >= our search) iff the lower 95% bound > 50%; else NOT
+    CONFIRMED (stated with the point estimate and interval).
+(ii) vs FOUL PLAY GEN9, 1000 games (500 pairs): data's fp9 harness /vol/bitbucket/fr1226/porygon-ws-data/code/scripts/
+    netv2_foulplay_fp9.sbatch (md5 7476be8b = conf605 (ii)'s; K = 20 Foul Play instances x 50 games, 1 s per state,
+    parallelism 1) `NET 1000 --gen 9 --seed 8800222 --temperature 0.5`.
+    READING: "the raw net beats Foul Play gen9" CONFIRMED iff the lower 95% bound > 50%; else NOT CONFIRMED.
+Seeds 8800111 / 8800222, NEW: grep-checked 2026-11-15 ~20:35 UTC as whole words in 598 record files under
+  porygon-ws-{netv2,data,fastenv,wsp} (depth <= 4: PREREG*, NETS.txt, *.env*, manifest*, RESULT*, READING*, VERDICT*,
+  *.sh, *.sbatch, NOTES*, *.meta.json, STATUS, *argv*.txt, notes.log, result.txt) and gloria/runs manifests (depth
+  <= 3), and in the laptop's .orchestra/ and the worktrees' scripts/ and docs/: no hit.
+Outputs: runs/conf800/{STATUS, RESULTS.txt (r--), FAILED-<stage>}; run dirs runs/vs-search-<date>-<job>/,
+  runs/foulplay-net-<date>-<job>/. Measurements only: no decision is taken by the job; the readings go to the
+  orchestrator (numbers re-read from RESULTS.txt).

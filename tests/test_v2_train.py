@@ -16,7 +16,7 @@ import torch
 from porygon.v2.encoder import aux_targets, encode
 from porygon.v2.model import Net
 from porygon.v2.spec import N_OPP_CLASSES
-from porygon.v2.train import build_rollout, lr_at, lr_schedule_desc, parse_args, power_decay, ppo_update, wsd_lr
+from porygon.v2.train import build_rollout, ent_at, lr_at, lr_schedule_desc, parse_args, power_decay, ppo_update, wsd_lr
 from porygon.v2.workers import ACT, DONE, LOGP, NEXT_V, OBS, OPP_C, OPP_T, REW, SEED, VAL, Packer, empty_like_blob
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -342,3 +342,69 @@ def test_lr_schedule_trainer_log_and_real_resume(tmp_path, monkeypatch):
         torch.set_num_threads(threads)
         torch.set_float32_matmul_precision(precision)
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_ent_schedule_values_and_default():
+    """--ent-schedule: const (default) = --ent-coef everywhere; linear = --ent-coef at --ent-start, linear to
+    --ent-final at --ent-start + --ent-horizon (absolute steps), flat outside; validation; the startup description."""
+    d = parse_args(G9_ARGS)
+    assert d.ent_schedule == "const" and d.ent_final is None and d.ent_start == 0 and d.ent_horizon is None
+    for s in _grid():
+        assert ent_at(d, s) == d.ent_coef == 0.01
+    assert "ent schedule" not in lr_schedule_desc(d)
+    S0, H = 830_040_000, 50_000_000
+    a = parse_args(G9_ARGS + ["--ent-schedule", "linear", "--ent-final", "0.001", "--ent-start", str(S0),
+                              "--ent-horizon", str(H)])
+    assert ent_at(a, 0) == 0.01 and ent_at(a, S0) == 0.01 and ent_at(a, S0 - 1) == 0.01
+    assert ent_at(a, S0 + H // 2) == pytest.approx(0.0055) and ent_at(a, S0 + H // 5) == pytest.approx(0.0082)
+    for s in (S0 + H, S0 + H + 1, S0 + 2 * H, 10**12):
+        assert ent_at(a, s) == pytest.approx(0.001)
+    vals = [ent_at(a, s) for s in range(S0 - 10**6, S0 + H + 10**7, 10**6)]
+    assert all(u >= v for u, v in zip(vals, vals[1:]))  # monotone non-increasing
+    assert "ent schedule linear 0.01 -> 0.001 over [830040000, 880040000]" in lr_schedule_desc(a)
+    for bad in (["--ent-schedule", "linear"], ["--ent-schedule", "linear", "--ent-final", "0.001"],
+                ["--ent-schedule", "linear", "--ent-final", "0.001", "--ent-horizon", "0"]):
+        with pytest.raises(SystemExit):
+            parse_args(G9_ARGS + bad)
+
+
+def test_ppo_update_ent_coef_override_is_exact():
+    """ppo_update(ent_coef=None) (the default path) and ent_coef=args.ent_coef give bit-identical weights; another
+    coefficient changes them."""
+    if not SNAPS.exists():
+        pytest.skip("no snapshots")
+    snaps = pickle.load(open(SNAPS, "rb"))[:64]
+    packer = Packer(9)
+    rng = np.random.default_rng(1)
+    seg = []
+    for i, (a, b) in enumerate(snaps):
+        o = encode(a)
+        legal = np.flatnonzero(o["action_mask"])
+        tr = transition(packer.pack(o, aux_targets(a, b, o)), 0.0, 0.0, 0.0, i % 16 == 15,
+                        int(rng.choice(legal)) if len(legal) else 0)
+        tr[LOGP] = float(-np.log(max(len(legal), 1)))
+        tr[REW] = float(rng.choice([-1, 1])) if tr[DONE] else 0.0
+        tr[SEED] = int(rng.integers(1, 2 ** 31))
+        seg.append(tr)
+    data = build_rollout({(0, 0): seg}, packer, 0.9999, 0.754)
+    args = parse_args(["--batch-size", "32", "--n-epochs", "1"])
+
+    def run(ec):
+        torch.manual_seed(0)
+        try:
+            import porygon.v2.damage  # noqa: F401
+            use_damage = True
+        except ImportError:
+            use_damage = False
+        net = Net(9, use_damage=use_damage, d_model=32, n_layers=1, n_heads=4, ffn_mult=2, d_move=16, d_species=16,
+                  d_move_emb=16, d_item=8, d_ability=8, d_type=8, pair_hidden=8, value_hidden=32)
+        opt = torch.optim.AdamW(net.param_groups(0.01), lr=1e-3)
+        st = ppo_update(net, opt, data, args, torch.device("cpu"), False, False, ent_coef=ec)
+        return st, [p.detach().clone() for p in net.parameters()]
+
+    st0, w0 = run(None)
+    st1, w1 = run(args.ent_coef)
+    st2, w2 = run(0.5)
+    assert "perf/ent_coef" not in st0 and st1["perf/ent_coef"] == 0.01 and st2["perf/ent_coef"] == 0.5
+    assert all(torch.equal(u, v) for u, v in zip(w0, w1))
+    assert not all(torch.equal(u, v) for u, v in zip(w0, w2))

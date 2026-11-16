@@ -1,0 +1,49 @@
+G9q-cd@800M (next deployment / evaluation net) + READING R800 (G9q-cd@800 vs G9q-cd@605M) — PRE-REGISTRATION, FINAL
+(netv2, 2026-11-15 ~21:00 UTC; ORCHESTRATOR DECISION 2026-11-15 ~20:05 (main, under the user's delegation), item 1;
+written before the branch and before any game; read-only copy runs/g9q-cd800/PREREG.txt).
+
+BRANCH (= G9q-cd@605M's recipe exactly: runs/g9q-cd600, scripts/netv2_g9q/cd600-driver.sh 9c7080a0):
+  Branch point = G9q's FIRST checkpoint >= 800,000,000 steps in job 1135476's live lineage dir
+  (/tmp/ws-netv2-1135476/run/G9q/checkpoints/ckpt_<S>.pt), copied to runs/g9q-cd800/branch-point-<S>.pt (md5 in STATUS).
+  ONE INLINE_CMD of job 1135476 (A30, dipper; G9q's trainer is stopped meanwhile, ~45 min): G9q's live trainer argv as
+  recorded at the branch (runs/g9q-cd800/trainer-argv.{bin,txt}: fp32 --no-bf16, 28 workers, wsd lr 7e-5, src-24c633f
+  wrapper, PORYGON_PS ps-2026-11) + the branch's own run / pool dirs (a copy of G9q's local pool; snapshots and
+  frozen bests newer than S moved out) + --resume <branch point> --cooldown-start S --total-steps S + 5,000,000
+  --final-lr-frac 0.1 (cosine 7e-5 -> 7e-6) --guard-entropy-min 0.35; limit 2 h (timeout -s INT).
+  Final net: runs/g9q-cd800/final/<steps, 11 digits>.pt (r--; md5 in runs/g9q-cd800/STATUS "final at ... (md5 ...)").
+  Refusals (runs/g9q-cd800/FAILED, nothing queued): no read-only PREREG with the pinned md5; trainer argv with an
+  --lr-schedule flag or without --guard-ptop-max 0.6; not exactly one trainer, or its parent is not the job script;
+  any of INLINE_CMD / INLINE_CMD.running / HOLD / WAIT_FOR / CHAIN_STOPPED / PARKED in runs/r1; no top-level
+  final_model.pt. No final after the INLINE => FAILED. Stop before the SIGINT: touch runs/g9q-cd800/CD_STOP.
+  G9q main resumes afterwards (restart in place, same allocation). The driver verifies the relaunch: a new 'v2
+  trainer:' line; the relaunched argv equals the recorded one with the two --resume values masked, the last --resume
+  = $LOCAL/run/G9q/final_model.pt; the first 'upd' line after it continues the step counter (0 < steps - saved <
+  200,000); then re-touches runs/r1/restart. A failed relaunch check writes runs/g9q-cd800/relaunch/FAILED (alert).
+  Driver: scripts/netv2_g9q/cd800-driver.sh (a setsid step in job 1135476, run from a node-local copy).
+
+READING R800 (a measurement with one reading; nothing is changed by it):
+  A = G9q-cd@800 (the one file in runs/g9q-cd800/final/, md5 = the STATUS line), B = G9q-cd@605M
+  runs/g9q-cd600/final/00605037107.pt (md5 7c28fac8); both raw at T 0.5; duplicate pairs (teams swapped),
+  gen9randombattle, fastenv in-process; harness scripts/netv2_cmp_step.sh (md5 a80c7da2, unmodified; its "G9s" label
+  = A, "G9p" label = B; STEP 0 = no step constraint: each side's dir holds only its one net) with wsp's sequential
+  design runs/cmp/seq-gain.json (md5 f12fec7c: theta0 50 -> theta1 52%, alpha 0.025 per one-sided test, power 0.8,
+  looks every 100 pairs, n_max 2400 pairs = 4800 games; the boundaries meet at n_max, so each test decides). Both
+  one-sided tests run on the same pairs; the nested pair-id order is the reading of record (round-robin alongside).
+  Design choice (main allowed fixed n >= 1000 pairs or this design): this design, the harness and design of the G9q2
+  readings, so R800 is directly comparable with the measured seed variance.
+  Seed 8006051, NEW: grep-checked 2026-11-15 ~20:35 UTC as a whole word in 598 record files under
+  porygon-ws-{netv2,data,fastenv,wsp} (depth <= 4: PREREG*, NETS.txt, *.env*, manifest*, RESULT*, READING*, VERDICT*,
+  *.sh, *.sbatch, NOTES*, *.meta.json, STATUS, *argv*.txt, notes.log, result.txt) and gloria/runs manifests (depth
+  <= 3), and in the laptop's .orchestra/ and the worktrees' scripts/ and docs/: no hit.
+  READING: "G9q still improving" iff the test "cd800 > cd605" SUCCEEDS (its 95% repeated CI excludes 50% from above,
+  i.e. the lower 95% bound > 50%; valid at any look) => IMPROVING. Otherwise NOT SHOWN, stated with the reason:
+  "cd800 > cd605" FUTILITY (a gain of >= 2 points is unlikely) and whether "cd605 > cd800" SUCCEEDED (cd800 weaker).
+  Reported with seq_monitor's median-unbiased estimate + 95% CI and the naive repeated CI at the decision look, and the
+  all-pairs merge line. Placement: a driver step in the data host job 1105603 (srun --overlap, 6 CPUs, 14G, the job's
+  GPU; 5 workers); it waits <= 10 h for the final (FAILED if runs/g9q-cd800/FAILED appears first); h2h limit 6 h; a
+  SIGTERM (host end / cancel) writes runs/g9q-cd800/r800/FAILED (rerun the same pre-registration in the next host).
+  Chain: scripts/netv2_g9q/r800-chain.sh.
+Outputs: runs/g9q-cd800/{STATUS, FAILED, final/, branch-train.log, trainer-argv.*}, runs/g9q-cd800/r800/{STATUS,
+  RESULT.txt, NETS.txt, run.log, FAILED}, runs/g9q-cd800/READING.txt (r--). Every reading goes to the orchestrator,
+  numbers re-read from the files. The net's 1000-game confirmations (raw vs our pure gen9 search; raw vs Foul Play
+  gen9) are pre-registered separately in runs/conf800/PREREG.txt.

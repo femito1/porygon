@@ -1,0 +1,41 @@
+R1b-F GUARD-TRIP HOLD RESPONSE — PRE-REGISTRATION, FINAL (netv2, 2026-11-15 ~20:55 UTC; ORCHESTRATOR DECISION
+2026-11-15 ~20:40 (main, under the user's delegation); written before any trip and any game; read-only copy
+runs/g4r1bf/HOLD-PREREG.txt).
+Context: the stale follow-up #1 (resume runs/r1/restart-best-7.5M.pt, park the pool past 7.5M) was disarmed by the
+  orchestrator at 20:34:58Z (runs/r1/FU.started first field 0). With it, an R1b-F guard trip (anchor eval >= 9.99
+  points below its best 84.5% for 2 evals in a row, i.e. <= 74.5% twice) goes to nv2_second_trip: runs/g4r1bf/HOLD
+  (job 1137378 waits <= 4 h, allocation kept), then the same config continues. Env mock case 58 (682/682 vs v15
+  c84b833f): HOLD, trip file renamed .second-*, argv unchanged, no FOLLOWUP1 / 7.5M resume, pool kept, G9q unaffected.
+
+TRIGGER: a NEW runs/g4r1bf/HOLD together with a new $LOCAL/run/R1bF/GUARD_TRIPPED.second-* in job 1137378 (the chain,
+  scripts/netv2_g4r1bf/hold-chain.sh, is a step of that job and polls every 60 s). One response per trip; after a
+  ROLLBACK, any further HOLD is left to the orchestrator.
+NETS: TRIP = R1b-F's final_model.pt as saved at the trip (copied to runs/g4r1bf-hold<k>/trip-<steps>.pt, md5 recorded);
+  B300 = runs/g4r1bf/check-R1bF-ckpt_00300027150.pt (md5 c3ec9433); V500 = v1@500M
+  /vol/bitbucket/fr1226/gloria/runs/20261025-195826-301040/final_model.zip. All raw at T 0.5, duplicate pairs.
+TESTS (during the HOLD, on the job's own CPUs / GPU; the trainer is stopped then):
+  T1 (decides): TRIP vs B300, in-process: wsp's spd_h2h (vendored ee76994 via scripts/netv2_spd.sh afc36cbe),
+     gen4randombattle, --v2-src $C/src-24c633f (R1b-F's training code; mechanical gen4 smoke ~20:45 UTC: void 0), 7 workers,
+     cuda, FIXED n = 1000 pairs (2000 games; 10 shards of 100), seed 3600301; 95% pair-mean interval from
+     `spd_h2h.py merge`.
+  T2 (information only; continuity with the strength watch's vs-v1@500M line, 300M: 60.7%): TRIP vs V500 on Showdown
+     (in-process cannot hold a v1 and a v2 net in one env): scripts/netv2_h2h.sbatch (as at 300M) `TRIP,temperature=0.5
+     V500,temperature=0.5 1000 --gen 4 --seed 3600501` (504 pairs); hang guard: 0 games after 12 min => killed, T2
+     void; cap 60 min. T2 never changes the decision.
+RULE: CLEARLY WORSE iff T1's upper 95% bound < 50%.
+  - not CLEARLY WORSE => CONTINUE: rm runs/g4r1bf/HOLD; the same config continues from the trip state (restart in
+    place); the chain re-touches runs/g4r1bf/restart after the relaunch.
+  - CLEARLY WORSE => ROLLBACK: walk back R1b-F's mirrored checkpoints (runs/g4r1bf/*/R1bF/checkpoints/ckpt_*.pt, every
+    5M) newest-first, from the newest with a step below the trip's, down to 305M: each vs B300 with T1's test (same
+    seed 3600301, same pairs); the first that is NOT clearly worse (upper 95% >= 50%) is R; if none, R = B300 (300M).
+    Then R1b-F resumes from R at --lr 3.5e-5 (x0.5; every other argument unchanged), its pool snapshots newer than R's
+    step parked (runs/g4r1bf/pool-after-rollback/), through the netv2.env rollback hook (runs/g4r1bf/ROLLBACK = "PATH
+    STEP MD5", applied once at the next relaunch, marker ROLLBACK.started); then rm HOLD. If the live netv2.env has no
+    rollback hook, the chain writes runs/g4r1bf-hold<k>/FAILED ("rollback hook not deployed") and leaves the HOLD to
+    the orchestrator. If the HOLD expired before the action (the job relaunched the same config), the chain applies
+    it by a restart in place (restart flag + ONE SIGINT outside an async eval).
+Seeds 3600301 / 3600501, NEW: grep-checked 2026-11-15 ~20:47 UTC (the R800 / conf800 scope, 610 record files under
+  porygon-ws-*, gloria/runs manifests, the laptop's .orchestra/ and worktree scripts/docs): no hit.
+Outputs: runs/g4r1bf-hold<k>/{STATUS, T1/, walk-<step>/, trip-<steps>.pt, rollback-<step>.pt, FAILED, VERDICT.txt (r--:
+  CONTINUE | ROLLBACK to <R>)}, T2 run dir runs/h2h-<date>-1137378/; chain STATUS runs/g4r1bf-hold-chain/STATUS; the
+  check-in alerts on HOLD and FAILED and lists the VERDICT. Reported to the orchestrator.

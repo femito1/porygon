@@ -974,6 +974,163 @@ o=$(q2src 1300100); check 57g "--lr 3.5e-5 .*--kl-anchor-coef 0.1 .*--resume $N/
 for f in HOLD PARKED; do q2tree; touch "$N/runs/g9/$f"; o=$(q2src 1300100); check "57h-$f" "^RC=0\|$" "$o"; yes_ "57h2-$f" '[ ! -e "$N/runs/g9q2/G9Q2_STARTED" ] && [ "$(nsb)" = 0 ]'; done
 # 57i: the other runs never see g9q2: r1 (G9q on the A30) and g4r1bf restarts unchanged by MODE g9 = g9q2 (argsdiff too)
 fi
+# 58 (2026-11-15 20:34, orchestrator): R1b-F's stale follow-up #1 (at 360M it would resume runs/r1/restart-best-7.5M.pt
+# and park the pool > 7.5M) disarmed by runs/r1/FU.started = "0 <time> orchestrator: ..." (first field 0). A restart in
+# place of the live job (1137378, wrapper, watchdog already run): an anchor-drop trip -> runs/g4r1bf/HOLD (nv2_second_trip),
+# the trip file renamed .second-*, no FOLLOWUP1 / FU.reason, no 7.5M resume, the pool kept, TRAIN_ARGS identical to the
+# no-trip restart; after rm HOLD the same config continues; G9q (r1 MODE g9q) never reads runs/r1/FU.started.
+g4tree; L=$ROOTM/local-T4; mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/R1bF/final_model.pt"; touch "$L/.nv2-watchdog"
+base=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+check 58a "--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$base"
+echo "0 2026-11-15T20:34:00 orchestrator: follow-up #1 disarmed (stale at 360M)" > "$N/runs/r1/FU.started"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58b '[ "$o" = "$base" ] && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+echo "eval score 74.0% < best 84.5% - 10% for 2 evals" > "$L/run/R1bF/GUARD_TRIPPED"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58c '[ "$o" = "$base" ]'
+yes_ 58d '[ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$L/run/R1bF/GUARD_TRIPPED" ] && ls "$L"/run/R1bF/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+yes_ 58e '[ ! -e "$N/runs/r1/FOLLOWUP1" ] && [ ! -e "$N/runs/g4r1bf/FU.reason" ] && [ -f "$L/run/R1bF/pool/00020009055.pt" ] && [ ! -d "$N/runs/r1/pool-before-FU" ] && grep -q "^0 2026-11-15T20:34:00 orchestrator" "$N/runs/r1/FU.started"'
+checkno 58f "ent-coef|restart-best-7.5M|zero-avoid" "$o"; check 58g "second guard trip of R1bF after its fallback: HOLD" "$(cat "$L/run/train.log")"
+rm -f "$N/runs/g4r1bf/HOLD"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4); yes_ 58h '[ "$o" = "$base" ] && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+wdtree; o1=$(wdsrc r1 1300500 ws-netv2-r1); wdtree; echo "0 2026-11-15T20:34:00 orchestrator" > "$N/runs/r1/FU.started"; o2=$(wdsrc r1 1300500 ws-netv2-r1)
+yes_ 58i '[ "$o1" = "$o2" ] && [ "${o1#RC=0|TRAIN_ARGS=}" != "$o1" ]'; check 58j "--lr 7e-5 .*--kl-anchor-coef 0.1 " "$o2"; checkno 58k "ent-coef|3.5e-5|kl-anchor-coef 0.3" "$o2"
+rm -f "$N/runs/r1/FU.started"
+if [ -z "${MOCK_SKIP_V16:-}" ]; then
+# 59 (v16, 2026-11-15; runs/g4r1bf/HOLD-PREREG.txt): the R1b-F ROLLBACK hook. runs/g4r1bf/ROLLBACK "PATH STEP MD5" valid
+# -> the first relaunch resumes PATH at --lr 3.5e-5 and parks snapshots > STEP (local + this job's mirror) once; later
+# restarts keep --lr 3.5e-5 from R1b-F's own final; a bad file -> HOLD, the same config; r1 / g9 never see it.
+rbtree() {
+  g4tree; L=$ROOTM/local-T4; mkdir -p "$N/bin"; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-24c633f"; chmod +x "$N/bin/py-src-24c633f"
+  src g4r1bf T4 > /dev/null; echo r1bf-final > "$L/run/R1bF/final_model.pt"; touch "$L/.nv2-watchdog"
+  echo "0 2026-11-15T20:34:58 orchestrator" > "$N/runs/r1/FU.started"
+  MP=$N/runs/g4r1bf/20261115-175703-1137378/R1bF/pool; mkdir -p "$MP" "$N/runs/g4r1bf-hold1"
+  for x in 00350016623 00360021860 00365000000; do echo "s$x" > "$L/run/R1bF/pool/$x.pt"; echo "s$x" > "$MP/$x.pt"; done
+  RB=$N/runs/g4r1bf-hold1/rollback-00355016707.pt; echo r355 > "$RB"
+}
+rbtree; base=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+check 59a "--lr 7e-5 .*--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt$" "$base"
+echo "$RB 355016707 $(md5sum < "$RB" | cut -c1-8)" > "$N/runs/g4r1bf/ROLLBACK"
+o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+yes_ 59b '[ "$o" = "$(sed -e "s# --lr 7e-5 # --lr 3.5e-5 #" -e "s#--guard-anchor-drop 0.0999 --resume $L/run/R1bF/final_model.pt\$#--guard-anchor-drop 0.0999 --resume $RB#" <<< "$base")" ]'
+checkno 59c "--lr 7e-5|R1bF/final_model.pt" "$o"
+yes_ 59d 'grep -q " $RB 355016707 " "$N/runs/g4r1bf/ROLLBACK.started" && [ ! -e "$N/runs/g4r1bf/HOLD" ]'
+yes_ 59e '[ -f "$L/run/R1bF/pool/00350016623.pt" ] && [ -f "$MP/00350016623.pt" ] && [ -f "$L/run/R1bF/pool/00020009055.pt" ] && [ ! -e "$L/run/R1bF/pool/00360021860.pt" ] && [ ! -e "$MP/00365000000.pt" ] && [ -f "$N/runs/g4r1bf/pool-after-rollback/00360021860.pt" ] && [ -f "$N/runs/g4r1bf/pool-after-rollback/00365000000.pt" ]'
+check 59f "R1b-F ROLLBACK \(runs/g4r1bf/ROLLBACK\): resume $RB \(steps 355016707\) at --lr 3.5e-5" "$(cat "$L/run/train.log")"
+echo s370 > "$L/run/R1bF/pool/00370000000.pt"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+yes_ 59g '[ "$o" = "$(sed "s# --lr 7e-5 # --lr 3.5e-5 #" <<< "$base")" ] && [ -f "$L/run/R1bF/pool/00370000000.pt" ]'
+for bad in "md5 $RB 355016707 deadbeef" "step $RB 35501x707 $(md5sum < "$RB" | cut -c1-8)" "path $N/nope.pt 355016707 deadbeef"; do
+  rbtree; read -r w x <<< "$bad"; echo "$x" > "$N/runs/g4r1bf/ROLLBACK"; o=$(SLURM_JOB_ID=1137378 src g4r1bf T4)
+  yes_ "59h-$w" '[ "$o" = "$base" ] && [ -f "$N/runs/g4r1bf/HOLD" ] && [ ! -e "$N/runs/g4r1bf/ROLLBACK.started" ] && [ -f "$L/run/R1bF/pool/00365000000.pt" ]'
+  check "59i-$w" "R1b-F ROLLBACK refused" "$(cat "$L/run/train.log")"; done
+wdtree; o1=$(wdsrc r1 1300500 ws-netv2-r1); q1=$(wdsrc g9 1300501 ws-netv2-g9); wdtree; mkdir -p "$N/runs/g4r1bf"; echo "/x 355016707 deadbeef" > "$N/runs/g4r1bf/ROLLBACK"; touch "$N/runs/g4r1bf/ROLLBACK.started"
+o2=$(wdsrc r1 1300500 ws-netv2-r1); q2=$(wdsrc g9 1300501 ws-netv2-g9); yes_ 59j '[ "$o1" = "$o2" ] && [ "$q1" = "$q2" ] && [ "${o1#RC=0|TRAIN_ARGS=}" != "$o1" ]'
+rm -f "$N/runs/g4r1bf/ROLLBACK" "$N/runs/g4r1bf/ROLLBACK.started" "$N/runs/r1/FU.started"
+fi
+if [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 60 (v17, 2026-11-15; runs/g9qbf/PREREG.txt): the bf16 A/B on the A40 (g9). Park guards (MODE g9q2 + runs/g9q2-parked/
+# PARKED.txt, MODE g9qbf + runs/g9qbf-parked/PARKED.txt => HOLD rounds, MODE re-read); the bench INLINE -> MODE g9qbf ->
+# the fork's first start = G9q2's restart args with ONLY --no-bf16 dropped (dirs G9qbf, resume = the fork point); its
+# restarts / a fresh job; refusals (bad FORK_POINT, no staged pool) => HOLD rounds; a guard trip => TRIPPED + HOLD, same args.
+qbtree() {  # q2tree + G9q2 started and saved on an A40 job 1300200 (restart args = base2)
+  q2tree; W=$ROOTM/wd-1300200; WD_GPU=46068 q2src 1300200 > /dev/null; echo g9q2-final > "$W/run/G9q2/final_model.pt"
+  FP=$N/runs/g9qbf/fork-point-00830040000.pt; mkdir -p "$N/runs/g9qbf"; echo fp830 > "$FP"
+}
+fpok() { echo "$FP 830040000 $(md5sum < "$FP" | cut -c1-8)" > "$N/runs/g9qbf/FORK_POINT"; mkdir -p "$W/run/G9qbf/pool"; touch "$W/run/G9qbf/.staged-830040000"; }
+qbtree; base2=$(WD_GPU=46068 q2src 1300200); check 60a "^RC=0\|PY=$N/bin/py-src-24c633f\|.*TRAIN_ARGS=--no-bf16 .*--run-dir $W/run/G9q2 .*--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $W/run/G9q2/final_model.pt$" "$base2"; checkno 60a2 "--seed" "$base2"
+mkdir -p "$N/runs/g9q2-parked"; echo parked > "$N/runs/g9q2-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=2 WD_GPU=46068 q2src 1300200); check 60b "^RC=3\|$" "$o"; yes_ 60b2 '[ -f "$N/runs/g9/HOLD" ] && [ "$(grep -c "MODE g9q2 is parked" "$W/run/train.log")" = 2 ]'
+# the bench INLINE flow: an INLINE_CMD (run by nv2_pause before the MODE read) parks, stages and writes MODE g9qbf
+qbtree; fpok_cmd="echo parked > $N/runs/g9q2-parked/PARKED.txt; echo g9qbf > $N/runs/g9/MODE"; mkdir -p "$N/runs/g9q2-parked"; fpok
+echo "$fpok_cmd" > "$N/runs/g9/INLINE_CMD"; o=$(WD_GPU=46068 q2src 1300200)
+exp="${base2/--no-bf16 /}"; exp="${exp//$W\/run\/G9q2/$W/run/G9qbf}"; exp="${exp%--resume *}--resume $FP"
+yes_ 60c '[ "$o" = "$exp" ]'; yes_ 60c2 'grep -q "^20.* 830040000 g9 " "$N/runs/g9qbf/G9QBF_STARTED" && [ ! -e "$N/runs/g9/HOLD" ] && [ "$(cat "$N/runs/g9/MODE")" = g9qbf ] && ls "$N"/runs/g9/INLINE_CMD.done-* > /dev/null 2>&1'
+check 60c3 "G9qbf first start: the fork of G9q at 830040000" "$(cat "$W/run/train.log")"; checkno 60c4 "no-bf16|--seed|G9q2" "${o#*TRAIN_ARGS=}"
+echo qbf-final > "$W/run/G9qbf/final_model.pt"; o=$(WD_GPU=46068 q2src 1300200); yes_ 60d '[ "$o" = "${exp%--resume *}--resume $W/run/G9qbf/final_model.pt" ]'
+# a guard trip: no fallback (TRIPPED + HOLD), the same args
+echo "collapse: entropy 0.4 < 0.5" > "$W/run/G9qbf/GUARD_TRIPPED"; o2=$(WD_GPU=46068 q2src 1300200)
+yes_ 60e '[ "$o2" = "$o" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q collapse "$N/runs/g9qbf/TRIPPED" && ls "$W"/run/G9qbf/GUARD_TRIPPED.ab-* > /dev/null 2>&1 && [ ! -e "$N/runs/g9qbf/FU.started" ] && [ ! -e "$N/runs/g9q2/FU.started" ]'
+checkno 60e2 "kl-anchor-coef 0.3|lr 3.5e-5" "$o2"
+# the fork parked => HOLD rounds
+rm -f "$N/runs/g9/HOLD"; mkdir -p "$N/runs/g9qbf-parked"; echo parked > "$N/runs/g9qbf-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 60f "^RC=3\|$" "$o"; check 60f2 "MODE g9qbf is parked" "$(cat "$W/run/train.log")"
+# refusals at the first start: bad md5, no staged pool => HOLD rounds, no G9QBF_STARTED
+for bad in md5 staged; do
+  qbtree; echo g9qbf > "$N/runs/g9/MODE"; fpok
+  if [ $bad = md5 ]; then echo "$FP 830040000 deadbeef" > "$N/runs/g9qbf/FORK_POINT"; else rm -f "$W/run/G9qbf/.staged-830040000"; fi
+  o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check "60g-$bad" "^RC=3\|$" "$o"
+  yes_ "60g2-$bad" '[ ! -e "$N/runs/g9qbf/G9QBF_STARTED" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q "MODE g9qbf: no valid first start" "$W/run/train.log"'; done
+# a fresh A40 job (the successor) under MODE g9qbf after the first start: the newest mirrored G9qbf file
+qbtree; echo g9qbf > "$N/runs/g9/MODE"; echo "2026-11-16T03:00:00 830040000 g9 1300200" > "$N/runs/g9qbf/G9QBF_STARTED"
+MQ=$N/runs/g9/20261116-030000-1300200/G9qbf; mkdir -p "$MQ/pool"; echo mq > "$MQ/final_model.pt"; W2=$ROOTM/wd-1300210
+o=$(WD_GPU=46068 q2src 1300210); check 60h "^RC=0\|PY=$N/bin/py-src-24c633f\|.*TRAIN_ARGS=--n-epochs 3 .*--run-dir $W2/run/G9qbf .*--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $MQ/final_model.pt$" "$o"
+checkno 60h2 "no-bf16|--seed" "$o"
+rm -rf "$N/runs/g9qbf" "$N/runs/g9qbf-parked" "$N/runs/g9q2-parked"; echo g9q2 > "$N/runs/g9/MODE"; rm -f "$N/runs/g9/HOLD"
+fi
+if [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 61 (v18, 2026-11-15; runs/g9qent/PREREG.txt): the entropy-schedule arm G9qent on the A40. From the parked-G9q2 HOLD
+# (after SKIP / the bf16 park) an INLINE_CMD stages it and writes MODE g9qent => first start = G9q2's restart args
+# (fp32 kept) with the G9qent dirs, --guard-entropy-min 0.35, + --ent-schedule linear --ent-final 0.001 --ent-start S0
+# --ent-horizon 50000000, resume = the fork point, PY = py-src-8892762; restarts / a fresh job; trip => TRIPPED + HOLD.
+qetree() { qbtree; printf '#!/bin/bash\nexit 0\n' > "$N/bin/py-src-8892762"; chmod +x "$N/bin/py-src-8892762"
+  EP=$N/runs/g9qent/fork-point-00880050000.pt; mkdir -p "$N/runs/g9qent" "$N/runs/g9q2-parked"; echo fp880 > "$EP"; echo parked > "$N/runs/g9q2-parked/PARKED.txt"; }
+epok() { echo "$EP 880050000 $(md5sum < "$EP" | cut -c1-8)" > "$N/runs/g9qent/FORK_POINT"; mkdir -p "$W/run/G9qent/pool"; touch "$W/run/G9qent/.staged-880050000"; }
+qetree; epok; echo "echo g9qent > $N/runs/g9/MODE" > "$N/runs/g9/INLINE_CMD"; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2//$W\/run\/G9q2/$W/run/G9qent}"; ex="${ex/ --guard-entropy-min 0.5 / --guard-entropy-min 0.35 }"
+ex="${ex/--snapshot-cache-cpu 200 --resume*/--snapshot-cache-cpu 200 --ent-schedule linear --ent-final 0.001 --ent-start 880050000 --ent-horizon 50000000 --resume $EP}"
+ex="${ex/PY=$N\/bin\/py-src-24c633f/PY=$N/bin/py-src-8892762}"
+yes_ 61a '[ "$o" = "$ex" ]'; yes_ 61a2 'grep -q " 880050000 g9 1300200" "$N/runs/g9qent/G9QENT_STARTED" && [ "$(cat "$N/runs/g9/MODE")" = g9qent ] && [ ! -e "$N/runs/g9/HOLD" ]'
+check 61a3 "TRAIN_ARGS=--no-bf16 " "$o"; checkno 61a4 "--seed|G9q2|G9qbf|guard-entropy-min 0.5" "${o#*TRAIN_ARGS=}"; check 61a5 "G9qent first start: the fork of G9q at 880050000" "$(cat "$W/run/train.log")"
+echo qe-final > "$W/run/G9qent/final_model.pt"; o=$(WD_GPU=46068 q2src 1300200); yes_ 61b '[ "$o" = "${ex%--resume *}--resume $W/run/G9qent/final_model.pt" ]'
+echo "eval score 40% < best 82.5% - 15% for 2 evals" > "$W/run/G9qent/GUARD_TRIPPED"; o2=$(WD_GPU=46068 q2src 1300200)
+yes_ 61c '[ "$o2" = "$o" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q "for 2 evals" "$N/runs/g9qent/TRIPPED" && [ ! -e "$N/runs/g9qent/FU.started" ] && ls "$W"/run/G9qent/GUARD_TRIPPED.ab-* > /dev/null 2>&1'
+rm -f "$N/runs/g9/HOLD"; mkdir -p "$N/runs/g9qent-parked"; echo parked > "$N/runs/g9qent-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 61d "^RC=3\|$" "$o"; check 61d2 "MODE g9qent is parked" "$(cat "$W/run/train.log")"
+qetree; echo g9qent > "$N/runs/g9/MODE"; epok; echo "$EP 880050000 deadbeef" > "$N/runs/g9qent/FORK_POINT"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 61e "^RC=3\|$" "$o"; yes_ 61e2 '[ ! -e "$N/runs/g9qent/G9QENT_STARTED" ] && grep -q "MODE g9qent: no valid first start" "$W/run/train.log"'
+qetree; echo g9qent > "$N/runs/g9/MODE"; echo "2026-11-16T04:00:00 880050000 g9 1300200" > "$N/runs/g9qent/G9QENT_STARTED"; epok
+MQ=$N/runs/g9/20261116-040000-1300200/G9qent; mkdir -p "$MQ/pool"; echo mq > "$MQ/final_model.pt"; W2=$ROOTM/wd-1300220
+o=$(WD_GPU=46068 q2src 1300220); check 61f "^RC=0\|PY=$N/bin/py-src-8892762\|.*TRAIN_ARGS=--no-bf16 .*--guard-entropy-min 0.35 .*--run-dir $W2/run/G9qent .*--ent-schedule linear --ent-final 0.001 --ent-start 880050000 --ent-horizon 50000000 --resume $MQ/final_model.pt$" "$o"
+rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf"; rm -f "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
+fi
+if [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 62 (v19, 2026-11-16; runs/p4/PREREG.txt): MODE g9p4 = G9-P4 on the A40 = G9q2's restart args on this GPU with the
+# BC net P4 in all three roles (kl-anchor, frozen, first --resume), lineage G9P4, no --seed, first start only from a
+# read-only BC-P4 whose md5 = runs/g9p4/P4.md5; the bridge state (G9qbf started and saved, then MODE g9p4) -> first
+# start; restarts / a fresh job; park guard; refusals => HOLD rounds; G9q's guard fallbacks with state runs/g9p4.
+p4tree() {  # qetree + the 11-16 state (G9qent parked, MODE g9qent) + BC-P4 r-- with its md5 in runs/g9p4/P4.md5
+  qetree; echo g9qent > "$N/runs/g9/MODE"; mkdir -p "$N/runs/g9qent-parked" "$N/runs/g9p4"; echo parked > "$N/runs/g9qent-parked/PARKED.txt"
+  P4=$N/runs/pretrain/P4-g9-s2.pt; rm -f "$P4"; echo p4net > "$P4"; chmod a-w "$P4"; md5sum < "$P4" | cut -c1-8 > "$N/runs/g9p4/P4.md5"; }
+p4bridge() {  # what the bridge leaves: G9qbf started and saved in this job, MODE g9p4 (written by the chain)
+  mkdir -p "$W/run/G9qbf/pool"; echo qbf-bridge-final > "$W/run/G9qbf/final_model.pt"; echo "2026-11-17T04:00:00 820017467 g9 1300200" > "$N/runs/g9qbf/G9QBF_STARTED"; echo g9p4 > "$N/runs/g9/MODE"; }
+p4tree; p4bridge; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2//$W\/run\/G9q2/$W/run/G9P4}"; ex="${ex//$P3/$P4}"; ex="${ex%--resume *}--resume $P4"
+yes_ 62a '[ "$o" = "$ex" ]'; yes_ 62a2 'grep -q "^20[0-9T:-]* $(cat "$N/runs/g9p4/P4.md5") g9 1300200$" "$N/runs/g9p4/G9P4_STARTED" && [ "$(cat "$N/runs/g9/MODE")" = g9p4 ] && [ ! -e "$N/runs/g9/HOLD" ]'
+check 62a3 "TRAIN_ARGS=--no-bf16 .*--kl-anchor $P4 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P4 --p-frozen 0.67 .*--fastenv-workers 8 .*--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $P4$" "$o"
+check 62a4 "^RC=0\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|child=$NOV\|" "$o"; checkno 62a5 "P3-g9-s2|--seed|G9q2|G9qbf|G9qent|ent-schedule|lr-schedule|gae-lambda|actor-stream" "${o#*TRAIN_ARGS=}"
+check 62a6 "G9-P4 first start: from BC-P4 $P4 \(md5 $(cat "$N/runs/g9p4/P4.md5"); steps 0\)" "$(cat "$W/run/train.log")"
+echo p4-final > "$W/run/G9P4/final_model.pt"; o=$(WD_GPU=46068 q2src 1300200); yes_ 62b '[ "$o" = "${ex%--resume *}--resume $W/run/G9P4/final_model.pt" ]'
+yes_ 62b2 '[ "$(grep -c "G9-P4 first start" "$W/run/train.log")" = 1 ]'
+MQ=$N/runs/g9/20261117-040000-1300200/G9P4; mkdir -p "$MQ/pool"; echo mq > "$MQ/final_model.pt"; W2=$ROOTM/wd-1300230
+o=$(WD_GPU=46068 q2src 1300230); check 62c "^RC=0\|PY=$N/bin/py-src-24c633f\|.*TRAIN_ARGS=--no-bf16 .*--kl-anchor $P4 .*--frozen $P4 .*--run-dir $W2/run/G9P4 --pool-dir $W2/run/G9P4/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $MQ/final_model.pt$" "$o"; checkno 62c2 "--seed|P3-g9-s2" "$o"
+# a first trip: collapse -> KL x3 (state runs/g9p4 only), then a second trip -> HOLD (G9q's rules)
+p4tree; p4bridge; WD_GPU=46068 q2src 1300200 > /dev/null; echo p4-final > "$W/run/G9P4/final_model.pt"; echo "collapse: entropy 0.4 < 0.5" > "$W/run/G9P4/GUARD_TRIPPED"
+o=$(WD_GPU=46068 q2src 1300200); check 62d "--kl-anchor $P4 --kl-anchor-coef 0.3 .*--run-dir $W/run/G9P4 .*--resume $W/run/G9P4/final_model.pt$" "$o"
+yes_ 62d2 'grep -q "^1 " "$N/runs/g9p4/FU.started" && grep -q collapse "$N/runs/g9p4/FU.reason" && [ ! -e "$N/runs/g9q2/FU.started" ] && [ ! -e "$N/runs/g9q/FU.started" ]'
+echo "eval score 40% < best 60% - 15%" > "$W/run/G9P4/GUARD_TRIPPED"; o=$(WD_GPU=46068 q2src 1300200); yes_ 62d3 '[ -f "$N/runs/g9/HOLD" ] && ls "$W"/run/G9P4/GUARD_TRIPPED.second-* > /dev/null 2>&1'
+# the park guard: MODE g9p4 + runs/g9p4-parked/PARKED.txt => HOLD rounds
+rm -f "$N/runs/g9/HOLD"; mkdir -p "$N/runs/g9p4-parked"; echo parked > "$N/runs/g9p4-parked/PARKED.txt"
+o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 62e "^RC=3\|$" "$o"; check 62e2 "MODE g9p4 is parked" "$(cat "$W/run/train.log")"
+# refusals at the first start (P4 missing / writable / md5 mismatch / no P4.md5) => HOLD rounds, no G9P4_STARTED
+for bad in missing writable md5 nomd5; do
+  p4tree; p4bridge
+  case $bad in missing) rm -f "$P4" ;; writable) chmod u+w "$P4" ;; md5) echo deadbeef > "$N/runs/g9p4/P4.md5" ;; nomd5) rm -f "$N/runs/g9p4/P4.md5" ;; esac
+  o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check "62f-$bad" "^RC=3\|$" "$o"
+  yes_ "62f2-$bad" '[ ! -e "$N/runs/g9p4/G9P4_STARTED" ] && [ -f "$N/runs/g9/HOLD" ] && grep -q "MODE g9p4: no valid BC-P4" "$W/run/train.log"'; done
+# v19 keeps v18's park HOLD of the 11-16 state (MODE g9qent parked), and the bridge itself (MODE g9qbf, v18's 60c path)
+p4tree; o=$(NV2_PARK_HOLD_ROUNDS=1 WD_GPU=46068 q2src 1300200); check 62g "^RC=3\|$" "$o"; check 62g2 "MODE g9qent is parked" "$(cat "$W/run/train.log")"
+p4tree; FP=$N/runs/g9qbf/fork-point-00830040000.pt; fpok; echo g9qbf > "$N/runs/g9/MODE"; o=$(WD_GPU=46068 q2src 1300200)
+ex="${base2/--no-bf16 /}"; ex="${ex//$W\/run\/G9q2/$W/run/G9qbf}"; ex="${ex%--resume *}--resume $FP"; yes_ 62h '[ "$o" = "$ex" ]'
+chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"

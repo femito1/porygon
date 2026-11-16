@@ -1,0 +1,84 @@
+P4 DATA LEVER ON THE A40 (job 1173274): BC-P4 -> B1 -> G9-P4 -> R25 / R50 vs G9q — PRE-REGISTRATION, FINAL (netv2,
+2026-11-16 ~15:40 UTC; ORCHESTRATOR DECISION 2026-11-16 14:5x (main, under the user's delegation): the A40's next use is
+the data lever P4; written before the P4 freeze is READY, before any BC-P4 step and before any game; read-only copy
+runs/p4/PREREG.txt). ONE cluster-side chain (scripts/netv2_p4/chain-p4.sh), a step of the A40 job 1173274; no agent.
+Status runs/p4/STATUS; any failure appends runs/p4/FAILED and ends the chain.
+
+1. WAIT for the data stream's P4 freeze: exactly one /vol/bitbucket/fr1226/porygon-ws-data/datasets/frozen/p4-gen9-<stamp>/
+   READY (the data agent: own rating >= 1900, all available, ~12.8M decisions = ~1.8x P3's 7.05M; earlier held-out
+   games and NNUE set H held out). Waits <= 24 h, else FAILED. Then needs the shuffled layout <dir>/v2pre-human-shuf/
+   (>= 1 shard-*.npz training shard and >= 1 shard-val-*.npz) and a verify.json with top-level "ok": true (in that dir
+   or <dir>/); else FAILED. Size, games and summary.json md5 recorded in runs/p4/bc/DATA.txt.
+2. BC-P4 = P3's exact BC recipe and wrapper, ONLY the dataset changes: `bash logs/nv2agent-p2-20261109.sh g9-p4-s2
+   <dir>/v2pre-human-shuf --stream-gb 1.0 --eval-every 5000` (wrapper md5 1886db62, code src-p2b = ws/netv2 745c479, the
+   command that made runs/pretrain/g9-p3-s2/ = P3-g9-s2.pt md5 3e600174 and U7): porygon.v2.pretrain --model-json
+   {"n_layers":4,"ffn_mult":1} --epochs 6 --seed 2 --value-sample one-per-game --gen 9 --val-frac 0.06 --no-bf16
+   --stream-parts shards --stream-gb 1.0 --eval-every 5000; batch 512, lr 3e-4 cosine, warm-up 1000, weight decay 0.01,
+   value coef 0.5, aux coef 0.1, grad norm 1.0, select total. Epochs stay 6, so BC-P4 takes ~1.8x P3's 77,592 steps
+   (compute scales with the data, as from P2 to P3). Step of 1173274 (-c 8, the A40 idle in its park HOLD; P3 ran on an
+   A16: hardware only). Limit 20 h, else FAILED. Output runs/pretrain/g9-p4-s2/; BC-P4 = a byte-identical read-only copy
+   runs/pretrain/P4-g9-s2.pt (md5 in runs/g9p4/P4.md5, r--).
+3. READING B1 (informational for the data lever; NO stop rule: step 4 starts whatever it says): BC-P4 vs BC-P3,
+   in-process via scripts/netv2_cmp_step.sh (md5 a80c7da2, unmodified; STEP 0 on numerically named copies
+   runs/p4/bc/nets/{A,B}/00000000000.pt; A = BC-P4 ("G9s" label), B = BC-P3 = runs/pretrain/P3-g9-s2.pt ("G9p")); both
+   raw T 0.5; duplicate pairs; wsp's design runs/cmp/seq-gain.json (f12fec7c: theta0 50 -> theta1 52%, alpha 0.025 per
+   one-sided test, looks every 100 pairs, n_max 2400); both directions on the same pairs; nested pair-id order = record;
+   7 workers; seed 4410041. runs/p4/bc/READING.txt (r--): "BC-P4 > BC-P3" SUCCESS / "BC-P3 > BC-P4" SUCCESS / BOTH
+   FUTILITY (gap below ~2 points) / UNDECIDED (n_max), with the estimate and interval from RESULT.txt.
+4. G9-P4 on the A40 = G9q's recipe and live TRAIN_ARGS with ONE change, the BC net: BC-P4 in all three of P3's roles in
+   G9q (init: steps 0, fresh AdamW; KL anchor coef 0.1 with its linear decay to 0 at 50M; frozen net + --frozen-best).
+   Everything else as G9q / G9q2 on this GPU: lr 7e-5 WSD constant, critic warm-up 1M, p_frozen 0.67, p_baseline 0.08,
+   PPO 3 epochs x batch 4096, fp32 (--no-bf16), --no-overlap, fastenv 8 workers x 48 battles, 16 + 16, eval anchor P1,
+   November sets for the collector (PORYGON_PS ps-2026-11), guards anchor drop 0.15 / entropy rel 1.5 / floor 0.5 /
+   ptop 0.6 with G9q's fallback rules in its own state runs/g9p4/ (collapse -> KL x3; other trip -> best_model.pt at lr
+   3.5e-5; once; a second trip -> HOLD); unseeded (as G9q); src = bin/py-src-24c633f; speed only: cache 512 +
+   --stacked-opp + --snapshot-cache-cpu 200 (G9q2's A40 settings). Lineage G9P4 ($LOCAL/run/G9P4, mirrored
+   runs/g9/<job>/G9P4/), first-start marker runs/g9p4/G9P4_STARTED. netv2.env v19 (staged r-- $C/netv2.env.v19-g9p4,
+   md5 b705bb93) = v18 + MODE g9p4 + its park guard (MODE g9p4 + runs/g9p4-parked/PARKED.txt => HOLD rounds); first
+   start only from a read-only P4-g9-s2.pt whose md5 = runs/g9p4/P4.md5, else HOLD rounds (never another net).
+   Mocks (laptop, ws/netv2): env mock 753/753 with the new case 62 (v18: 727/727 with MOCK_SKIP_V19, fails 21 of the
+   26 new); job mock 184/184 with the new S18 (fresh A40 jobs: first start, restart, successor, parked; v18 177/177 with
+   MOCK_SKIP_V19); argsdiff v18 -> v19 identical over the 54 old r1 x g9 mode pairs (8 job/GPU cases each);
+   scripts/netv2_p4/mock-p4.sh 15/15 (bridge INLINE + refusals, argv check incl. negatives).
+   START MECHANISM (the A40 sits in v18's park HOLD with v18 in the job script's memory: bash reads a sourced file whole
+   (tested), and the job script re-reads netv2.env only when a trainer exits with runs/g9/restart; v18 has no MODE
+   g9p4). So: (a) wait <= 6 h until runs/r1 and runs/g4r1bf hold no INLINE_CMD(.running) / HOLD / WAIT_FOR; (b) the
+   BRIDGE: one INLINE_CMD (scripts/netv2_p4/inline-bridge.sh) stages an empty pool for the never-started bf16 fork
+   lineage G9qbf, writes MODE g9qbf and lifts the park HOLD, so v18 launches ONE G9qbf trainer (v18's mocked path, env
+   mock 60c / 62h; its own dir $LOCAL/run/G9qbf; no live or parked lineage touched; runs/g9qbf/BRIDGE.txt records it;
+   never read or resumed); (c) in that trainer window, with no job of r1 / g9 / g4r1bf in nv2_pause, the chain deploys
+   v19 by the netv2 procedure (backup netv2.env.bak-<stamp>; .new copy; md5 + bash -n; mv), then writes MODE g9p4 and
+   keeps runs/g9/restart armed; (d) ONE SIGINT to the bridge trainer (outside an async eval): the restart re-reads v19
+   => G9-P4's first start. No deploy window within 2 h => MODE g9qent restored, ONE SIGINT (v18 then HOLDs on the
+   parked arm again), FAILED. A file runs/p4/NO_BRIDGE (orchestrator veto) before (a) => FAILED, nothing started.
+   FIRST-START CHECKS (else G9-P4 is parked at once and FAILED): scripts/netv2_p4/argvcheck.py: its argv equals G9q2's
+   first argv (runs/p4/ref-g9q2-first-argv.txt = runs/g9q2/first-argv.txt) after mapping P4 -> P3 and G9P4 -> G9q2,
+   blanking --ports and the job-level first --resume, minus G9q2's "--seed 7272027"; and its recipe tokens equal G9q's
+   live argv recorded at this PREREG (runs/p4/ref-g9q-live-argv.txt, the A30 trainer 11-16 ~15:00) after dropping
+   speed / infra tokens (--ports, --n-battles, --pool-battles, --pool-dir, --run-dir, --resume, --fastenv-workers,
+   --snapshot-cache, --snapshot-cache-cpu, --stacked-opp, --seed); last --resume = P4-g9-s2.pt; P3 named nowhere;
+   PYTHONPATH has src-24c633f; PORYGON_PS = ps-2026-11; startup line "amp=False" and "resume=<P4-g9-s2.pt>, steps=0".
+5. READINGS (measurements; scripts/netv2_cmp_step.sh as in 3, A = G9-P4 ("G9s"), B = G9q ("G9p"), 7 workers on the
+   A40 beside G9-P4's trainer (as G9q2's readings), as G9q vs G9p / G9q2 vs G9q were read):
+     R25, seed 4425251: G9-P4's first pool snapshot >= 25M (runs/g9/*/G9P4/pool or the local pool) vs G9q's own
+         runs/g9/20261109-021316-741849/G9q/pool/00025038951.pt (md5 b1cb200f); waits <= 24 h after G9-P4's start.
+     R50, seed 4450501: G9-P4's first pool snapshot >= 50M vs G9q's .../G9q/pool/00050038810.pt (md5 29b0d2af); waits
+         <= 36 h after G9-P4's start.
+   Per step (runs/p4/cmp/{25M,50M}/READING.txt, r--): SUCCESS-P4 ("G9-P4 > G9q" succeeds) / SUCCESS-G9q ("G9q > G9-P4"
+   succeeds) / FUTILITY (both futile) / UNDECIDED (n_max). G9q2 vs G9q (same recipe, other seed) read FUTILITY both
+   ways at R25 (50.2 +- 1.7%) and R50 (50.7 +- 2.2%), so seed variance at matched steps is below ~2 points. A guard fallback of G9-P4
+   (runs/g9p4/FU.started) before a reading is stated in that READING (the orchestrator judges it).
+   OVERALL (runs/p4/cmp/OVERALL.txt, r--), decided by R50 alone (R25 informational):
+     R50 "G9-P4 > G9q" SUCCESS => CANDIDATE: G9-P4 is the candidate for the next main run; main decides its placement;
+         G9-P4 keeps training on the A40 meanwhile (v19; its watchdog successor resumes it).
+     otherwise (FUTILITY, SUCCESS-G9q or UNDECIDED) => NOT A CANDIDATE: G9-P4 is parked at its state when R50 is read
+         (~50-55M; ONE INLINE_CMD with scripts/netv2_g9qbf/park.sh md5 ed1062b9 -> runs/g9p4-parked/, PARKED.txt +
+         MD5SUMS) and the A40 HOLDs (v19's park guard) for main / the user.
+Seeds 4410041 / 4425251 / 4450501, NEW: grep-checked 2026-11-16 ~15:05 UTC (1724 small text files PREREG* / NETS.txt /
+  *.env* / manifest* / RESULT*.txt / READING* / *.sh / *.sbatch / NOTES* / *.meta.json / STATUS / *argv*.txt /
+  notes.log / *.md under porygon-ws-netv2, -fastenv, -wsp and data's code/scripts, depth <= 4; the laptop's .orchestra/
+  and the ws/netv2 scripts): no hit.
+Outputs: runs/p4/{STATUS, FAILED, ref-*-argv.txt, cmp/OVERALL.txt}, runs/p4/bc/{DATA.txt, nets/, h2h/, READING.txt},
+  runs/pretrain/{g9-p4-s2/, P4-g9-s2.pt}, runs/g9p4/{P4.md5, G9P4_STARTED, first-argv.bin, first-argv-check.txt,
+  first-env.txt, first-startup-line.txt}, runs/p4/cmp/{25M,50M}/, runs/g9p4-parked/ (if parked), runs/g9qbf/BRIDGE.txt.
+Every result goes to the orchestrator, numbers re-read from the files; 95% intervals from duplicate pairs.

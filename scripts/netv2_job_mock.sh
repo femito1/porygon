@@ -618,6 +618,37 @@ if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
   q2tree17; touch "$G/PARKED"; job g9 1300100 10 a16 ws-netv2-g9 > /dev/null
   expect "S17c no trainer call, exit 0, no sbatch, no G9Q2_STARTED" "^0 exit 0 0 n$" "$(cnt ws-netv2-1300100 "$M/calls.log") $(job_rc 1300100) $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0) $([ -e "$M/nv2/runs/g9q2/G9Q2_STARTED" ] && echo y || echo n)"
 fi
+# S18 (v19, 2026-11-16; runs/p4/PREREG.txt; skipped with MOCK_SKIP_V19=1 / MOCK_SKIP_G9Q2=1 / MOCK_SKIP_G9T=1): fresh A40
+# jobs (watchdog on) with g9 MODE g9p4. S18: G9-P4's first start in a fresh job = BC-P4 in all three roles, the 24c633f
+# wrapper, November sets, cache 512 + --stacked-opp + cpu 200, no --seed, one successor; its restart in place: its own
+# save. S18b: the successor: G9-P4's newest mirrored save (never G9q2's / G9q's). S18c: G9-P4 parked (PARKED.txt + the
+# park guard's runs/g9/HOLD): the fresh job exits 0 without a trainer call or a successor.
+if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ]; then
+  P4=$M/nv2/runs/pretrain/P4-g9-s2.pt
+  p4args() {  # p4args JOB RESUME: the G9-P4 TRAIN_ARGS pattern after --batch-size 4096 (A40)
+    echo "--lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.5 --guard-ptop-max 0.6 --kl-anchor $P4 --kl-anchor-coef 0.1 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $P4 --p-frozen 0.67 --p-baseline 0.08 --frozen-best --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 16 --pool-battles 16 --run-dir $T/ws-netv2-$1/run/G9P4 --pool-dir $T/ws-netv2-$1/run/G9P4/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $2"
+  }
+  p4tree18() {
+    q2tree17; echo g9p4 > "$G/MODE"; mkdir -p "$M/nv2/runs/g9p4"; rm -f "$P4"; echo P4 > "$P4"; chmod a-w "$P4"; md5sum < "$P4" | cut -c1-8 > "$M/nv2/runs/g9p4/P4.md5"
+    mkdir -p "$M/nv2/runs/g9q2-parked"; echo parked > "$M/nv2/runs/g9q2-parked/PARKED.txt"; lineage "$G/20261115-170149-1173274/G9q2" G9q2-mirror '17 13:00' 00050000000
+    echo 46068 > "$M/gpu_mib-1300300"; echo 46068 > "$M/gpu_mib-1300301"
+  }
+  echo "== S18: a fresh A40 job 1300300 with MODE g9p4: G9-P4's first start from BC-P4, then its restart in place"
+  p4tree18; job g9 1300300 10 a40 ws-netv2-g9 restart > /dev/null; c7=$(grep "ws-netv2-1300300/" "$M/calls.log"); sed 's/^/    /' <<< "$c7" | cut -c1-260
+  expect "S18 first start: BC-P4, G9P4 dirs, P1 eval anchor, November sets, the 24c633f wrapper" "^call resume=$P4 \[P4\] run_dir=$T/ws-netv2-1300300/run/G9P4 pool_dir=$T/ws-netv2-1300300/run/G9P4/pool .*anchor=$P1 ps=$NOV $PP24" "$(sed -n 1p <<< "$c7")"
+  expect "S18 restart in place: its own save" "^call resume=$T/ws-netv2-1300300/run/G9P4/final_model.pt \[trained-from:P4\] run_dir=$T/ws-netv2-1300300/run/G9P4 .*ps=$NOV $PP24" "$(sed -n 2p <<< "$c7")"
+  expect "S18 args (first start, the trainer's argv): G9q's recipe with BC-P4, no --seed" "^1300300 -u -m porygon.v2.train .* --max-hours 70.5 --no-bf16 --n-epochs 3 --batch-size 4096 $(p4args 1300300 "$P4")$" "$(grep '^1300300 ' "$M/argv.log" | sed -n 1p)"
+  if grep '^1300300 ' "$M/argv.log" | grep -q -- "--seed\|P3-g9-s2"; then bad "S18 --seed or P3 in G9-P4's argv"; else ok "S18 no --seed, no P3"; fi
+  expect "S18 G9P4_STARTED, MODE g9p4, 2 calls, exactly one sbatch (afterany:1300300, a40, 10 CPUs, the job's mem)" "^[0-9T:-]+ $(cat "$M/nv2/runs/g9p4/P4.md5") g9 1300300 g9p4 2 sbatch --job-name=ws-netv2-g9 --partition=a40 --gres=gpu:1 --cpus-per-task=10 --mem=[0-9]+M --time=72:00:00 --dependency=afterany:1300300 scripts/slurm_train_v2.sbatch g9 1$" "$(cat "$M/nv2/runs/g9p4/G9P4_STARTED" 2>/dev/null) $(cat "$G/MODE") $(grep -c . <<< "$c7") $(cat "$M/sbatch.log") $(grep -c . "$M/sbatch.log")"
+  echo "== S18b: the successor 1300301 (fresh): G9-P4's newest mirrored save"
+  rm -f "$M/sbatch.log"; : > "$WQ"; job g9 1300301 10 a40 ws-netv2-g9 > /dev/null; c8=$(grep "ws-netv2-1300301/" "$M/calls.log"); sed 's/^/    /' <<< "$c8" | cut -c1-260
+  expect "S18b G9-P4's mirrored save from 1300300 (not G9q2's / G9q's), wrapper, November sets" "^call resume=$G/[0-9]+-[0-9]+-1300300/G9P4/final_model.pt \[trained-from:trained-from:P4\] run_dir=$T/ws-netv2-1300301/run/G9P4 .*ps=$NOV $PP24" "$(sed -n 1p <<< "$c8")"
+  echo "== S18c: G9-P4 parked (runs/g9p4-parked/PARKED.txt + runs/g9/HOLD): a fresh job exits 0 without training or chaining"
+  p4tree18; echo "2026-11-17T04:00:00 x g9 1300300" > "$M/nv2/runs/g9p4/G9P4_STARTED"; mkdir -p "$M/nv2/runs/g9p4-parked"; echo parked > "$M/nv2/runs/g9p4-parked/PARKED.txt"; touch "$G/HOLD"
+  job g9 1300300 10 a40 ws-netv2-g9 > /dev/null
+  expect "S18c no trainer call, exit 0, no sbatch" "^0 exit 0 0$" "$(cnt ws-netv2-1300300 "$M/calls.log") $(job_rc 1300300) $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0)"
+  rm -f "$G/HOLD"; chmod u+w "$P4"; rm -rf "$P4" "$M/nv2/runs/g9p4" "$M/nv2/runs/g9p4-parked" "$M/nv2/runs/g9q2-parked"
+fi
 rm -f "$M"/pending-inline* "$M"/gpu_mib-* "$M"/break-*
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
 tree pre; job r1 900003 30 a30 ws-netv2-r1; calls
