@@ -14,7 +14,8 @@ decisions replayed through poke-env, field by field.
 
 Normalisation: a side whose active mon has fainted (forced switch pending) is not compared on its active mon's
 fields (boosts, volatiles, last move, substitute, toxic / protect counters, durations; ACTIVE_FIELDS): the engine
-resets them on the switch-in, the simulator has already cleared them, poke-env still holds the old values.
+resets them on the switch-in, the simulator has already cleared them, poke-env still holds the old values. Likewise
+a fainted mon's `terastallized` (the simulator deletes it at the faint, poke-env keeps it).
 Rule fields (PREREG): all of side one; side two's species / items / abilities / moves / stats / status / boosts /
 active mon; hazards and screens of both sides; weather, terrain, trick room. Mismatch rate > 0.5% of decisions
 on any rule field => FAIL (fix before generating). Other fields (side two HP / PP / volatiles / ...) are reported
@@ -123,6 +124,8 @@ def compare(a: dict, b: dict) -> tuple[dict, dict]:
         diff(rule, k, fa[k], fb.get(k))
     for i, (ma, mb) in enumerate(zip(s1a["pokemon"], s1b["pokemon"])):
         for k in ma:
+            if k == "terastallized" and ma["hp"] == 0 and mb["hp"] == 0:
+                continue  # the simulator clears a fainted mon's tera (battle.faintMessages), poke-env keeps it
             if k == "moves":  # ids + disabled flags; PP separately (poke-env ignores Pressure)
                 diff(rule, "side_one.pokemon.moves", (i, [(m[0], m[2]) for m in ma[k]]), (i, [(m[0], m[2]) for m in mb[k]]))
                 diff(rule, "side_one.pokemon.pp", (i, [m[1] for m in ma[k]]), (i, [m[1] for m in mb[k]]))
@@ -141,7 +144,8 @@ def compare(a: dict, b: dict) -> tuple[dict, dict]:
         diff(rule, "side_two.pokemon.moves", (ma["id"], sorted(m[0] for m in ma["moves"])),
              (ma["id"], sorted(m[0] for m in mb["moves"])))
         for k in ("hp", "sleep_turns", "rest_turns", "types", "tera_type", "terastallized", "level", "weight_kg"):
-            diff(info, f"side_two.pokemon.{k}", (ma["id"], ma[k]), (ma["id"], mb[k]))
+            if not (k == "terastallized" and ma["hp"] == 0):
+                diff(info, f"side_two.pokemon.{k}", (ma["id"], ma[k]), (ma["id"], mb[k]))
         diff(info, "side_two.pokemon.moves_pp_disabled", (ma["id"], sorted(ma["moves"])), (ma["id"], sorted(mb["moves"])))
     act = lambda s: s["pokemon"][int(s["active_index"])]["id"]  # noqa: E731
     diff(rule, "side_two.active", act(s2a), act(s2b))
