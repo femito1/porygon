@@ -48,6 +48,38 @@ BOOSTS = ("attack_boost", "defense_boost", "special_attack_boost", "special_defe
           "accuracy_boost", "evasion_boost")
 STATS = ("maxhp", "attack", "defense", "special_attack", "special_defense", "speed")
 
+# Fields known not to match exactly (laptop gen4 30 games + a 3-game gen9 smoke, 2026-11-16): in each case
+# convert_full holds the simulator's truth and search.convert an estimate from what poke-env shows. How the gate-1
+# student copes is given with each (features.py, step 4).
+KNOWN = {
+    "field.weather_turns_remaining": "convert counts 5 turns from when it first saw the weather (no Damp Rock / Heat "
+        "Rock, and +1 when the weather started after the residual phase, e.g. Drought on a forced switch-in); "
+        "convert_full = the simulator's duration. Student: weather turns as a capped scalar from the State "
+        "(train = truth); on set H it sees convert's estimate, within 1-3 turns.",
+    "field.terrain_turns_remaining": "as weather (Terrain Extender, terrain started after the residual phase). "
+        "Student: as weather.",
+    "side_one.toxic_count": "convert = poke-env's end-of-turn count, +1 when the poison came after the residual "
+        "phase (Toxic Spikes on a forced switch-in, Toxic Orb); convert_full = the simulator's toxic stage. "
+        "Student: status one-hot + toxic stage scalar; on set H it sees convert's (+1) value.",
+    "side_one.pokemon.sleep_turns": "gen4 only: the simulator draws the sleep length without storing it; convert_full "
+        "counts from the first dump that saw the status (1 short if the mon tried to act in the turn it fell asleep). "
+        "gen9 stores startTime: exact. Student (gen9): sleep turns scalar from the State.",
+    "side_one.pokemon.rest_turns": "follows sleep_turns (rest = the mon put itself to sleep).",
+    "side_one.pokemon.pp": "poke-env ignores Pressure (2 PP per use); convert_full = the simulator's PP. "
+        "Student: PP is not an input.",
+    "side_one.volatile_statuses": "the simulator has volatiles poke-env does not show but the engine knows "
+        "(e.g. UNBURDEN); convert_full keeps every one the engine knows. Student: volatile bits from the State "
+        "(set H: convert's subset).",
+    "side_one.wish": "rare: convert's Wish timer from the log (a failed Wish still counts); convert_full = the "
+        "simulator's slot condition (gen5+: the wisher's max HP / 2).",
+    "side_one.last_used_move": "poke-env's last-used flag differs from the simulator's lastMove in rare orders "
+        "(Pursuit on a switch, moves called by other moves). Student: not an input.",
+    "side_one.force_trapped": "convert uses poke-env's `trapped` (the request's); convert_full the simulator's, "
+        "which also traps by a hidden ability (request maybeTrapped). Student: not an input (engine-only flag).",
+    "side_two.pokemon.maxhp": "gen4: convert recomputes stats from the true set's EVs/IVs with its own formula; "
+        "convert_full = the simulator's stats. Student: stats / 100 from the State.",
+    "side_two.pokemon.status": "rare: an end-of-turn status (Flame Orb / Toxic Orb) poke-env has not applied yet.",
+}
 
 def play(n_games: int, fmt: str, workers: int, out_dir: Path, seed: int) -> list[str]:
     import numpy as np
@@ -223,6 +255,12 @@ async def run(a) -> int:
     lines += ["", "INFO fields (not in the rule; convert estimates them):"]
     for k in sorted(info_n):
         lines.append(f"  {k:44s} {rate(info_n[k]):8.4%}  ({info_n[k]})")
+    seen = [k for k in sorted(rule_n) if k in KNOWN]
+    if seen:
+        lines += ["", "Known differences (convert_full = the simulator's truth; convert = its estimate):"]
+        lines += [f"  {k}: {KNOWN[k]}" for k in seen]
+    unexplained = [k for k in bad if k not in KNOWN]
+    lines.insert(1, f"rule fields > {THRESHOLD:.1%} without a known cause: {', '.join(unexplained) or 'none'}")
     lines += ["", "Examples (full = convert_full, convert = search.convert):"]
     for k in sorted(examples):
         lines.append(f"  {k}:")

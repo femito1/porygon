@@ -136,7 +136,7 @@ def _side(s: dict[str, Any], other: dict[str, Any], turn: int, to_move: bool) ->
         special_defense_boost=b.get("spd", 0), speed_boost=b.get("spe", 0), accuracy_boost=b.get("accuracy", 0),
         evasion_boost=b.get("evasion", 0),
         last_used_move=f"switch:{idx}" if last is None else f"move:{last}",
-        **({"force_switch": force, "force_trapped": bool(req.get("trapped") or req.get("maybeTrapped"))}
+        **({"force_switch": force, "force_trapped": bool(act and act.get("trapped") and not force)}
            if to_move else {}),
     )
 

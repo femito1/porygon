@@ -8,7 +8,7 @@
 //            request: {forceSwitch, wait, trapped, maybeTrapped, canTera, disabled: [move id]} | null, totalFainted}
 //   mon   = {species, base, level, types, added, tera, terastallized, hp, maxhp, stats {atk, def, spa, spd, spe},
 //            item, ability, base_ability, moves: [{id, pp, maxpp, disabled}], base_moves: [id], hp_type, status,
-//            status_state, boosts, volatiles: {id: effect}, last_move, active_turns, fainted, active, weightkg,
+//            status_state, boosts, volatiles: {id: effect}, last_move, active_turns, fainted, active, trapped (incl. by a hidden ability), weightkg,
 //            transformed, illusion (species shown | null)}
 //   field = {weather, weather_state, terrain, terrain_state, pseudo: {id: effect}}
 // A mon's volatiles also carry _start (the turn it most likely started: the first dump that saw it is at the start
@@ -71,7 +71,7 @@ function mon(p, battle) {
     base_moves: p.baseMoveSlots.map(m => m.id), hp_type: (p.hpType || '').toLowerCase(),
     status: p.status || '', status_state: statusState(p.statusState, battle), boosts: {...p.boosts},
     volatiles: volatiles(p.volatiles, battle), last_move: p.lastMove ? p.lastMove.id : '', active_turns: p.activeTurns,
-    fainted: !!p.fainted, active: !!p.isActive, weightkg: p.weighthg / 10, transformed: !!p.transformed,
+    fainted: !!p.fainted, active: !!p.isActive, trapped: !!p.trapped, weightkg: p.weighthg / 10, transformed: !!p.transformed,
     illusion: p.illusion ? p.illusion.species.id : null,
   };
 }
