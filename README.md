@@ -1,6 +1,6 @@
 # Porygon
 A Pokémon Showdown agent for random battles (gen4, gen9): determinized MCTS on poke-engine with a fitted leaf
-evaluation and set inference, plus a PPO self-play network; in gen9 the benchmark bot is a network + search hybrid.
+evaluation and set inference, plus a PPO self-play network; in gen9 the benchmark bot is lookahead2 (a one-turn lookahead with network-valued leaves).
 
 **Goal:** the best bot in gen4 and gen9 random battles, and a network strong enough to rival or beat search on
 its own. The bar is Jaxcalibur (gen9, closed source: self-play transformer + pUCT, peak 2557 Elo / 95.3 GXE, #1
@@ -16,8 +16,10 @@ licence, and its author's own head-to-head against plain Foul Play is 44.0% [37.
 | gen4, stock eval (and stock weights at ×2 scale) | 54.5% ± 1.5% (54.5% ± 2.3%) |
 | gen4, oracle: true sets of revealed mons / whole team | 62.1% ± 3.2% / 64.4% ± 3.0% |
 | gen4, **raw network** R1b-F@300M at T 0.5, no search (old v1 network: 46.2% ± 3.8%) | 55.6% ± 4.1% (400 games) |
-| gen9, **raw network** G9q-cd@605M at T 0.5, no search | **58.8% ± 2.9%** (1000 games, confirmed > 50%) |
-| gen9, **network + search** (the benchmark bot): G9p-cd net at T 0.5, overridden by our search when its pick is > 0.0212 better in root Q (22% of moves) | 56.2% ± 2.8% (1000 games) |
+| gen9, **lookahead2** (the benchmark bot since 11-17): G9q-cd@805M, one-turn lookahead with net-valued leaves over 8 sampled worlds, margin 0.005 (overrides ~20% of moves) | **58.2% ± 2.9%** (1000 games); beats the previous benchmark hybrid **54.0% ± 2.8%** (1000 games, pre-registered: adopted) |
+| gen9, **raw network** G9q-cd@805M at T 0.5, no search | **57.8% ± 2.8%** (1000 games, confirmed); 56.9% ± 3.0% on the lookahead2 harness's pairs (lookahead2 − raw +1.3 ± 4.0, not shown); beats our pure gen9 search 55.5% ± 2.8% (1000 games) |
+| gen9, **raw network** G9q-cd@605M at T 0.5, no search | 58.8% ± 2.9% (1000 games, confirmed > 50%) |
+| gen9, network + search hybrid (benchmark bot 11-11 → 11-17): G9p-cd net at T 0.5, overridden by our search when its pick is > 0.0212 better in root Q (22% of moves) | 56.2% ± 2.8% (1000 games) |
 | gen9, pure engine search on the same team pairs | 51.6% ± 2.8% (1000 games); hybrid − search +4.6 ± 3.9 points |
 | gen9, pure engine search (no network), stock / stock ×2 / fitted ×2 | 51.7% / 53.3% / 53.3% (± 2.4%) |
 
