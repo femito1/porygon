@@ -19,7 +19,7 @@ done
 # the per-run watcher also runs as a /tmp copy: bash reads scripts incrementally, and replacing a file another NFS
 # client has open gives that reader a stale handle
 # G9q (the main gen9 run) and R1b-F (gen4); the parked G9p / G9s confs left the loop on 2026-11-16 (their tables stay)
-for c in v2diag/conf/g9q.conf v2diag/conf/r1b.conf; do
+for c in v2diag/conf/g9q.conf v2diag/conf/g9p4.conf v2diag/conf/r1b.conf; do
   echo "#### $c $(date -u +%H:%M)"
   A=$(mktemp /tmp/v2diag-any-XXXX.sh); cp scripts/wsp/v2diag_watch_any.sh $A
   NO_CHAIN=1 bash $A $c; rm -f $A

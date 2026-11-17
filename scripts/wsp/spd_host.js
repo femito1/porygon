@@ -13,6 +13,10 @@
 //     pair_seed u16[12] (battle seed, side-0 team seed of game 0, side-1 team seed of game 0; 4 words each).
 //   A battle that crashes while starting is recorded as a void game and the slot moves on (host.js would leave
 //   such a slot without rows forever).
+//   --game-log FILE (wsp loss analysis, off by default): append one JSON line per finished game to FILE: pair, game in
+//     pair, winner, turns, the true teams, the omniscient Showdown log, and for every decision the choice string plus a
+//     true-state snapshot taken just before it is submitted (logSnap). Read-only probes of the PS battle object (types,
+//     stats, effectiveness); nothing here feeds the policy or the PRNG.
 // Other options as in host.js: --duplicate 1 (game 2k+1 replays game 2k's battle seed with the teams swapped, so side
 // 0 plays both teams of a pair), --bot NAME --bot-battles K (side two of battles 0..K-1 is an env-side poke-env
 // baseline port: heuristic | max_power | random; those sides emit no rows), --bots, --wait-rows.
@@ -44,7 +48,7 @@ const MAGIC = 0x50594746, MAGIC_HELLO = 0x4c454846;  // 'FGYP', 'FHEL'
 function parseArgs(argv) {
   const a = {format: 'gen9randombattle', battles: 64, seed: 1, encoder: 'v1', fdIn: 0, fdOut: 1,
     shaping: '0.05,0.05,0', victory: 1, maxTurns: 1000, duplicate: 0, bot: '', botBattles: 0, bots: '',
-    waitRows: 0, pairs: '', pairSeed: 0};
+    waitRows: 0, pairs: '', pairSeed: 0, gameLog: ''};
   for (let i = 2; i < argv.length; i += 2) {
     const k = argv[i].replace(/^--/, '').replace(/-(.)/g, (_, c) => c.toUpperCase());
     a[k] = argv[i + 1];
@@ -140,6 +144,7 @@ class Slot {  // one battle position: the current battle, its trackers and per-s
     this.crashed = false;
     this.truncated = false;
     this.retries = [0, 0];
+    this.decLog = [];          // --game-log: [{snapshot, choice}] in submission order
     this.dynBot = null;        // a --bots bot Python handed side two of this battle to (action -2-k)
     this.oppPrev = [[-1, 0, 0, 0], [-1, 0, 0, 0]];
     this.auxTeams = [aux.teamIds(teams[0], GEN), aux.teamIds(teams[1], GEN)];
@@ -286,6 +291,7 @@ function emitSlot(slot) {
     if (!(b.ended || slot.crashed)) break;
     stats.games++;
     stats.turns += b.turn;
+    if (args.gameLog) writeGameLog(slot);
     row(slot, 0, false, true);
     if (!isBot(slot)) row(slot, 1, false, true);
     slot.newBattle();
@@ -390,6 +396,8 @@ for (;;) {
       const t = slot.trackers[side];
       if (t.markChosen) t.markChosen(); else t.decisionPending = false;
       stats.decisions++;
+      let rec = null;
+      if (args.gameLog) { rec = logSnap(slot, side, c, slot.lastAction[side]); slot.decLog.push(rec); }
       let ok;
       try {
         ok = b.choose(side, c);
@@ -399,6 +407,7 @@ for (;;) {
         slot.crashed = true;
         break;
       }
+      if (rec) rec.ok = ok ? 1 : 0;
       if (!ok) {
         stats.rejected++;
         slot.rejected[side] = true;
@@ -421,6 +430,66 @@ for (;;) {
   flush();
 }
 finish();
+
+// --- --game-log (wsp loss analysis) -------------------------------------------------------------------
+function monSnap(p, battle, active) {  // bench mons: the short form (moves and sets are in the record's teams)
+  const o = {sp: p.species.name, ty: p.getTypes(), hp: p.hp, mh: p.maxhp, st: p.status || '', it: p.item || ''};
+  if (p.fainted) o.f = 1;
+  if (p.terastallized) o.te = p.terastallized;
+  if (p.status === 'slp' && p.statusState) o.slp = p.statusState.time ?? null;
+  if (active) {
+    o.ab = p.ability || '';
+    o.mv = p.moveSlots.map(m => [m.id, m.pp, m.disabled ? 1 : 0]);
+    o.bo = Object.fromEntries(Object.entries(p.boosts).filter(([, v]) => v));
+    o.vo = Object.keys(p.volatiles);
+    if (p.volatiles.substitute) o.subhp = p.volatiles.substitute.hp;
+    if (p.volatiles.choicelock) o.lock = p.volatiles.choicelock.move;
+    try { o.spe = p.getActionSpeed(); } catch (e) { o.spe = null; }
+    o.lm = p.lastMove ? p.lastMove.id : '';
+    o.at = p.activeTurns;
+  }
+  return o;
+}
+// type effectiveness of a move type on a type list: 'x' = immune (types only, no abilities), else 2^k
+function effOn(battle, type, types) {
+  const dex = battle.dex;
+  if (!dex.getImmunity(type, types)) return 'x';
+  return dex.getEffectiveness(type, types);
+}
+function logSnap(slot, side, choice, action) {
+  const battle = slot.battle.battle;
+  const sides = battle.sides.map((s, n) => {
+    const act = s.active[0];
+    return {act: s.pokemon.indexOf(act), mons: s.pokemon.map(p => monSnap(p, battle, p === act && p.isActive)),
+      sc: Object.fromEntries(Object.entries(s.sideConditions).map(([k, v]) => [k, v.layers ?? 1]))};
+  });
+  // effectiveness of each move of each side's active on every mon of the other side (types only)
+  for (const n of [0, 1]) {
+    const me = battle.sides[n], opp = battle.sides[1 - n], act = me.active[0];
+    if (!act || act.fainted) continue;
+    sides[n].eff = act.moveSlots.map(m => {
+      const mv = battle.dex.moves.get(m.id);
+      return [m.id, mv.category, mv.type, mv.basePower, opp.pokemon.map(q => effOn(battle, mv.type, q.getTypes()))];
+    });
+  }
+  const r = slot.battle.request(side) || {};
+  const ra = (r.active && r.active[0]) || {};
+  return {turn: battle.turn, side, c: choice, a: action, li: battle.log.length,
+    rq: {fs: r.forceSwitch ? 1 : 0, tr: ra.trapped || ra.maybeTrapped ? 1 : 0, ct: ra.canTerastallize || '',
+      mv: (ra.moves || []).map(m => m.id + (m.disabled ? '!' : ''))},
+    fld: {w: battle.field.weather || '', t: battle.field.terrain || '', pw: Object.keys(battle.field.pseudoWeather)},
+    s: sides};
+}
+function writeGameLog(slot) {
+  const b = slot.battle;
+  try {
+    const rec = {pair: slot.pair, game: slot.gameInPair, winner: b.winner, turns: b.turn, void: slot.crashed ? 1 : 0,
+      truncated: slot.truncated ? 1 : 0, teams: slot.battle.teams, log: b.battle.log, dec: slot.decLog};
+    fs.appendFileSync(args.gameLog, JSON.stringify(rec) + '\n');
+  } catch (e) {
+    process.stderr.write(`spd_host: game log failed: ${e.message}\n`);
+  }
+}
 
 function finish() {
   if (process.env.PORYGON_FASTENV_VERBOSE) process.stderr.write(`host done: ${JSON.stringify(stats)}\n`);
