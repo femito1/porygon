@@ -1,0 +1,8 @@
+purpose,jobs,gpu_h,cpu_core_h,gpu_h_A30,gpu_h_A40,gpu_h_A16,gpu_h_T4,gpu_h_A100-80GB
+RL training (PPO),43,739.41,13730.2,311.08,43.86,144.26,240.21,0
+benchmarks on Showdown (vs Foul Play / our search),111,351.33,7953.5,0,0,129.8,221.53,0
+"data (crawl, re-simulation, labels, self-play data, eval fits)",14,218.77,1952.5,0,0.34,213.02,5.41,0
+diagnostics / dev / microbenchmarks,608,56.2,502.6,0,6.09,3.62,46.49,0
+head-to-heads (in-process / engine),33,43.92,1217.6,0,0,6.29,37.63,0
+BC pretraining / distillation,5,16.18,362.0,11.2,0,4.97,0,0
+builds / tests / probes,25,2.04,23.1,0.35,0.01,1.59,0,0.1

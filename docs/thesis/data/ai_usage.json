@@ -1,0 +1,95 @@
+{
+ "source_dirs": [
+  "/home/nand/.claude/projects/-home-nand-Documents-personal-projects-ShowdownAgent"
+ ],
+ "transcript_files": 131,
+ "main_session_files": 10,
+ "subagent_files": 121,
+ "sessions": 10,
+ "subagents": 118,
+ "first": "2026-10-19T10:59:53.958Z",
+ "last": "2026-11-17T12:33:14.338Z",
+ "totals": {
+  "input_tokens": 1379819,
+  "cache_creation_input_tokens": 268605420,
+  "cache_read_input_tokens": 4158689249,
+  "output_tokens": 18164005,
+  "requests": 15773
+ },
+ "by_model": {
+  "claude-opus-5-5": {
+   "input_tokens": 167546,
+   "cache_creation_input_tokens": 68446333,
+   "cache_read_input_tokens": 425121942,
+   "output_tokens": 1219196,
+   "requests": 1730
+  },
+  "databricks-claude-opus-5-5": {
+   "input_tokens": 1211484,
+   "cache_creation_input_tokens": 199066688,
+   "cache_read_input_tokens": 3727675153,
+   "output_tokens": 16929061,
+   "requests": 14010
+  },
+  "<synthetic>": {
+   "input_tokens": 0,
+   "cache_creation_input_tokens": 0,
+   "cache_read_input_tokens": 0,
+   "output_tokens": 0,
+   "requests": 19
+  },
+  "databricks-claude-opus-4-8": {
+   "input_tokens": 789,
+   "cache_creation_input_tokens": 1092399,
+   "cache_read_input_tokens": 5892154,
+   "output_tokens": 15748,
+   "requests": 14
+  }
+ },
+ "by_month": {
+  "2026-10": {
+   "input_tokens": 180509,
+   "cache_creation_input_tokens": 74925519,
+   "cache_read_input_tokens": 470474430,
+   "output_tokens": 1356819,
+   "requests": 1864
+  },
+  "2026-11": {
+   "input_tokens": 1199310,
+   "cache_creation_input_tokens": 193679901,
+   "cache_read_input_tokens": 3688214819,
+   "output_tokens": 16807186,
+   "requests": 13909
+  }
+ },
+ "tool_calls": {
+  "Bash": 12900,
+  "SendMessage": 554,
+  "Write": 435,
+  "Monitor": 360,
+  "Edit": 303,
+  "TaskStop": 289,
+  "Read": 274,
+  "mcp__websearch__web_fetch": 205,
+  "mcp__websearch__web_search": 137,
+  "Agent": 99,
+  "WebFetch": 31,
+  "CronCreate": 20,
+  "mcp__tavily__tavily_search": 17,
+  "CronDelete": 14,
+  "StructuredOutput": 14,
+  "AskUserQuestion": 12,
+  "ListAgents": 12,
+  "CronList": 8,
+  "mcp__tavily__tavily_extract": 4,
+  "Skill": 4,
+  "WebSearch": 3,
+  "Workflow": 3,
+  "mcp__tavily__tavily_research": 2,
+  "EnterPlanMode": 1,
+  "ExitPlanMode": 1,
+  "mcp__tavily__tavily_map": 1,
+  "mcp__websearch__search_status": 1
+ },
+ "tool_calls_total": 15704
+}
