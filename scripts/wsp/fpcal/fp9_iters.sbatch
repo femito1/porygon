@@ -3,8 +3,9 @@
 # change: Foul Play's MCTS runs a FIXED iteration count, --fp-iters N per 1000 ms of nominal budget (2 states x N,
 # 4 x N/2 early), through scripts/wsp/fpcal/fp_fixed_iters.py, instead of --search-time-ms 1000 wall clock.
 # Bookkeeping only besides that: OUT = $WSP/fpcal/runs/foulplay-net-<date>-<job>-<N> (not netv2's runs/), cpu.txt
-# (lscpu), and a background check that every "Iterations i: V" line of Foul Play's logs is N or N/2 (rounded up to
-# 1000): a mismatch writes OUT/ITERS_MISMATCH and stops the games (the arm is then void). Run with cwd = the netv2
+# (lscpu), and a background check (fp_iters_check.py) that every "Iterations i: V" line of Foul Play's logs is N or
+# N/2 (rounded up to 1000), or 1000 on a single-option state (11-17 fix, see fp_iters_check.py): a mismatch writes
+# OUT/ITERS_MISMATCH and stops the games (the arm is then void). Run with cwd = the netv2
 # cluster dir (src/, scripts/, .showdown-eval/ read only), like conf800 runs the fp9 harness:
 #   cd $C && bash $WSP/fpcal/code/fp9_iters.sbatch NET N --gen 9 --seed S --fp-iters ITERS [vs_foulplay args]
 #SBATCH --job-name=ws-netv2-foulplay
@@ -68,16 +69,20 @@ for ((i = 0; i < K; i++)); do  # importing on a slow shared disk can take minute
 done
 echo "$K Foul Play instances up on port $PORT"
 # wsp: every logged per-state iteration count must be FP_ITERS (1000 ms states) or FP_ITERS/2 rounded up to 1000
-# (500 ms states); checked every 60 s; a mismatch voids the arm and stops the games
-HALF=$(( (FP_ITERS / 2 + 999) / 1000 * 1000 ))
+# (500 ms states), or 1000 on a single-option state (poke-engine's own quick exit; fp_iters_check.py); checked every
+# 60 s and once more after the games; a mismatch voids the arm and stops the games
+CHECK=$(dirname "$WRAP")/fp_iters_check.py
+[ -f "$CHECK" ] || { echo "no $CHECK" >&2; exit 1; }
+iters_check() {
+  local msg
+  if msg=$("$PY" -I "$CHECK" "$FP_ITERS" "$LOGS"/fp*.log 2>&1); then echo "$(date -u +%FT%T) $msg" > "$OUT/ITERS_OK"; return 0; fi
+  echo "$(date -u +%FT%T) $msg" > "$OUT/ITERS_MISMATCH"; return 1
+}
 ( while sleep 60; do
-    bad=$(cat "$LOGS"/fp*.log 2>/dev/null | grep -oE "Iterations [0-9]+: [0-9]+" | awk -v a="$FP_ITERS" -v b="$HALF" '$3 != a && $3 != b' | head -n 3)
-    n_ok=$(cat "$LOGS"/fp*.log 2>/dev/null | grep -cE "Iterations [0-9]+: " || true)
-    if [ -n "$bad" ]; then echo "$(date -u +%FT%T) expected $FP_ITERS or $HALF, saw: $bad" > "$OUT/ITERS_MISMATCH"
-      pkill -u "$USER" -f "^$PY scripts/vs_foulplay.py .*--port $PORT " || true; exit 0; fi
-    echo "$(date -u +%FT%T) $n_ok iteration lines, all $FP_ITERS or $HALF" > "$OUT/ITERS_OK"
+    iters_check || { pkill -u "$USER" -f "^$PY scripts/vs_foulplay.py .*--port $PORT " || true; exit 0; }
   done ) &
 LOOPS+=($!)
 "$PY" scripts/vs_foulplay.py "$NET" --player policy --port "$PORT" --opponents "${NAMES[@]}" --n "$PER" \
   --results "$OUT/results.jsonl" --format "$FORMAT" "$@" 2>&1 | tee "$OUT/vs.log" || true
+iters_check || true  # the games of the last minute
 "$PY" scripts/netv2_pool_ci.py "$OUT" 2>&1 | tee "$OUT/result.txt" || true
