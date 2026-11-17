@@ -1131,6 +1131,25 @@ p4tree; FP=$N/runs/g9qbf/fork-point-00830040000.pt; fpok; echo g9qbf > "$N/runs/
 ex="${base2/--no-bf16 /}"; ex="${ex//$W\/run\/G9q2/$W/run/G9qbf}"; ex="${ex%--resume *}--resume $FP"; yes_ 62h '[ "$o" = "$ex" ]'
 chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
+if [ -z "${MOCK_SKIP_V20:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 63 (v20, 2026-11-17; G9q hit the global TOTAL 1e9): TOTAL=3e9 in the r1 MODE g9q branch only (first source and a
+# restart in place); the g9 run (MODE g9q2, the bridge MODE g9qbf, MODE g9p4) and g4r1bf keep the global 1e9.
+totsrc() {  # totsrc RUN JOB NAME: wdsrc's source, printing RC|TOTAL|TRAIN_ARGS
+  local run=$1 job=$2 name=$3; shift 3
+  mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log" "$ROOTM/wd-$job/.toucher-G9q" "$ROOTM/wd-$job/.toucher-G9q2" "$ROOTM/wd-$job/.toucher-G9qbf" "$ROOTM/wd-$job/.toucher-G9P4" "$ROOTM/wd-$job/.toucher-R1bF"
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=$run; SLURM_JOB_ID=$job; SLURM_JOB_NAME=$name
+    SLURM_JOB_PARTITION=${WD_PART:-a30}; SLURM_CPUS_ON_NODE=${WD_CPUS:-30}; SLURM_MEM_PER_NODE=${WD_MEM:-98304}; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-24576}; NV2_PARK_HOLD_ROUNDS=${NV2_PARK_HOLD_ROUNDS:-1}
+    source "$ENVF"; echo "TOTAL=$TOTAL|TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
+  echo "RC=$?|$(grep '^TOTAL=' "$ROOTM.wdout" || true)"
+}
+wdtree; o=$(totsrc r1 1300300 ws-netv2-r1); check 63a "^RC=0\|TOTAL=3000000000\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300300/run/G9q .*--resume " "$o"
+echo g9q-final > "$ROOTM/wd-1300300/run/G9q/final_model.pt"; o=$(totsrc r1 1300300 ws-netv2-r1)
+check 63b "^RC=0\|TOTAL=3000000000\|TRAIN_ARGS=.*--resume $ROOTM/wd-1300300/run/G9q/final_model.pt$" "$o"
+q2tree; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300310 ws-netv2-g9); check 63c "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*G9q2" "$o"
+p4tree; W=$ROOTM/wd-1300200; p4bridge; o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1300200 ws-netv2-g9); check 63d "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--run-dir $W/run/G9P4 " "$o"
+chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"

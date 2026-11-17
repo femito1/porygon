@@ -1,7 +1,7 @@
 #!/bin/bash
 # argsdiff: source two netv2.env versions as the job script does (set -euo pipefail, restart in place for the running
 # jobs, fresh first source for the successors) in a fake cluster tree and print FORMAT|ANCHOR|PY|PORYGON_PS|TRAIN_ARGS
-# for 718701 r1, 810366 r1 (a30, a40), 741849 g9, 810367 g9 (a16, a40) and 829660 g4r1bf, then diff the two.
+# (v20: and TOTAL, the job script's --total-steps) for 718701 r1, 810366 r1 (a30, a40), 741849 g9, 810367 g9 (a16, a40) and 829660 g4r1bf, then diff the two.
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW            current MODE files (r1 g9p, g9 g9q): must print "identical"
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW swapped    after a committed swap (r1 g9q, g9 g9p2): first starts + successors
 #   bash /tmp/nv2s/argsdiff.sh OLD NEW now        the 2026-11-12 cluster (swap COMMITted + applied, r1 g9q = G9q on the
@@ -70,7 +70,7 @@ one() {  # one ENVFILE RUN JOB GPU_MIB
     if fresh "$3"; then unset LOCAL; fi  # a fresh job: the first source of the job script (LOCAL from SLURM_JOB_ID)
     TMPDIR=$R/tmp
     source "$1" > /dev/null 2>&1
-    echo "FORMAT=$FORMAT|ANCHOR=$ANCHOR|PY=${PY:-unset}|PS=${PORYGON_PS:-unset}|TRAIN_ARGS=$TRAIN_ARGS"
+    echo "FORMAT=$FORMAT|TOTAL=${TOTAL:-unset}|ANCHOR=$ANCHOR|PY=${PY:-unset}|PS=${PORYGON_PS:-unset}|TRAIN_ARGS=$TRAIN_ARGS"
     sleep 0.3; kill $(jobs -p) 2> /dev/null || true ) > "$R.one" 2>&1 < /dev/null
   sed "s#$R#R#g" "$R.one"
 }
