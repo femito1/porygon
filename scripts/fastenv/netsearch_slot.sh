@@ -127,7 +127,7 @@ fi
   [ -z "${SEQ_DESIGN:-}" ] || echo "sequential design: $SEQ_DESIGN md5 $(md5sum < "$SEQ_DESIGN" | cut -c1-32)"
   for spec in "$OPP" "${ARMS[@]}"; do
     echo "spec: $spec"
-    base=${spec%%,*}; base=${base#netsearch:}; base=${base#lookahead:}; base=${base#search:}
+    base=${spec%%,*}; base=${base#netsearch:}; base=${base#lookahead:}; base=${base#deepen:}; base=${base#search:}
     [ ! -f "$base" ] || echo "  file: $(readlink -f "$base") $(stat -L -c '%s bytes, mtime %y' "$base") sha256 $(sha256sum "$base" | cut -c1-64)"
     [ "$DRY" = 1 ] || [ "$spec$FP_MODE" = "${OPP}1" ] || echo "  check: $("$PY" "$CODE/scripts/fastenv/netsearch_h2h.py" --check "$spec" 2>&1 | tail -2 | tr '\n' ' ')"
   done
@@ -198,9 +198,9 @@ play_block() {  # K J: arm K's block J (node-local, then copied to OUT/arm-K/blo
   local k=$1 j=$2 spec=${ARMS[$(($1 - 1))]} dir=$LOCAL/arm-$1/block-$2 seed=${TAG}b$2 rc waited=0
   local n=$((2 * BLOCK_PAIRS)) tag=${JOB}a$1b$2
   rm -rf "$dir"; mkdir -p "$dir" "$OUT/arm-$k"
-  case "$spec" in netsearch:*|lookahead:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
+  case "$spec" in netsearch:*|lookahead:*|deepen:*) spec="$spec,log=$dir/gate.jsonl" ;; esac
   local opp=$OPP  # a netsearch: / lookahead: opponent (re-freeze R) logs its own gate decisions too
-  case "$opp" in netsearch:*|lookahead:*) opp="$opp,log=$dir/gate-opp.jsonl" ;; esac
+  case "$opp" in netsearch:*|lookahead:*|deepen:*) opp="$opp,log=$dir/gate-opp.jsonl" ;; esac
   if [ "$DRY" = 1 ]; then
     $SLOT fake "$dir" --games "$n" --p "${DRY_P[$(($1 - 1))]}" --a "pa$tag" --seed "$seed" > "$dir/evaluate.log" 2>&1
     rc=$?
