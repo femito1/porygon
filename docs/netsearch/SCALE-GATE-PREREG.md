@@ -1,4 +1,4 @@
-# Scale gate: does the deepened lookahead get stronger with thinking time? Pre-registration (fastenv, 2026-11-17; DRAFT until main signs off, then binding and read-only)
+# Scale gate: does the deepened lookahead get stronger with thinking time? Pre-registration (fastenv, 2026-11-17; signed off by main 11-17 ~00:30Z with the chain-A dependency amended; binding and read-only)
 Main's decision (11-16 ~23:10Z, with the user's go-ahead): the next depth route is a net-guided search that gets
 stronger with more thinking time. The design is `SCALE-SEARCH-DESIGN.md` (algorithm, budgets, microbench); the
 prototype is `porygon.deepen` (best-first selective deepening below lookahead2's root game; budget 0 = lookahead2
@@ -54,8 +54,9 @@ Records and deviations after sign-off go in `$C/runs/scale-gate/NOTES.txt`, neve
   battles, blocks of 100 duplicate pairs, arms rotated per round, block j on a fresh server seeded
   `scale20261117b<j>`, so every arm in both chains plays the same team pairs. No battle timer (our server, our
   players). Two searching sides share the job's T4.
-- **Chain A (the slot):** arm 1 = D4. One 24-CPU `--partition=training` job with a T4, `--dependency=afterany:1173672`
-  (LA2-H), claimed in `ledger.md` on sign-off.
+- **Chain A (the slot):** arm 1 = D4. One 24-CPU `--partition=training` job with a T4, `--dependency=afterany:1173956`
+  (wsp's fpcal, which holds the slot claim after LA2-H; two slot jobs never run at once), claimed in `ledger.md` on
+  sign-off.
 - **Chain B (fastenv's helper):** arms 2 = L and 3 = raw. One 12-CPU `--partition=training` job with a T4, started on
   sign-off (it needs no slot).
 
@@ -113,7 +114,7 @@ RESULT, FAILED}`.
   `--time 60:00:00`.
 - **Chain B (L vs D1, raw vs D1, 5 workers per side):** ≈ 35 × 3.5 s / 3 ≈ 40-45 s per game ⇒ ≈ 80 games/h; E ≈ 800-1,100
   games per arm at most ⇒ ≈ 15-25 h for both; worst case ≈ 40 h. `--time 60:00:00`.
-- The two chains run in parallel; the verdict is expected ≈ 1-1.5 days after the slot frees (LA2-H ≈ 15Z 11-17).
+- The two chains run in parallel; the verdict is expected ≈ 1-1.5 days after the slot frees (after fpcal ≈ 20Z 11-17).
 
 ## Caveats (known before sign-off)
 - All arms use the same net: a GO is a scaling claim, not a strength claim vs other bots; the vs-Foul-Play and
