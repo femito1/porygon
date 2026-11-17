@@ -204,3 +204,9 @@ pause/HOLD windows, inline BC-P4 and the bf16 microbenchmark (97% accounted for)
 5. **Running jobs** are counted to the snapshot; pending jobs (7 at the snapshot) count nothing until they start.
 6. **Energy** is an upper bound at TDP, not a measurement (the cluster records `energy` in AccountingStorageTRES, but
    only sacct exposes it).
+
+## GPU Dojo VM (Azure, 1× T4, 4 vCPU) — outside Slurm
+| date | use | VM wall time | source |
+|---|---|---|---|
+| 2026-11-17 | setup (venv, Node 22, Showdown/fastenv/netv2 copies) + 50-pair smoke + 2000-pair cross-machine validation (cal-vm1) | ≈ 0.75 h (VM up 16:44Z → shutdown 17:37Z) [M] | VM `uptime` at 16:50Z (up 6 min); shutdown sent 17:37:14Z |
+Budget: 100 free GPU-hours, counted while the VM runs (user, 11-17).

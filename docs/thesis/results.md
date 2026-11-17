@@ -225,6 +225,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | v2g4-08 | 2026-11-14 | R1b-F strength check @300M vs v1@46M | R1b-F @300M vs v1 @46M | Showdown duplicate server (netv2 h2h) | 1008 / 504 | 84.6 [82.5, 86.7] [M] | g4r1bf/NOTES.txt (300M watch) (6ae5d289) | continue | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/h2h-20261114-154510-1136569/result.txt` |
 | v2g4-09 | 2026-11-14 | R1b-F @300M vs v1@500M (best v1) | R1b-F @300M vs v1 @500M | Showdown duplicate server (netv2 h2h) | 1008 / 504 | 60.7 [58.1, 63.3] [M] | g4r1bf/NOTES.txt (300M watch) (6ae5d289) | >= 60% => candidate prior | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/h2h-20261114-154746-1136569/result.txt` |
 | v2g4-13 | 2026-11-16 | R1b-F hold #1: guard trip @390.2M vs R1b-F@300M | R1b-F trip @390.2M vs R1b-F @300M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2000 / 1000 | 49.9 [47.9, 51.9] [M] | g4r1bf/HOLD-PREREG.txt (af0441c6) | CONTINUE (not clearly worse; not better) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold1/VERDICT.txt` |
+| v2g4-14 | 2026-11-17 | R1b-F hold #2: guard trip @437.7M vs R1b-F@300M | R1b-F trip @437.73M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator, duplicate pairs | 2000 / 1000 | 53.0 [51.0, 55.0] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE (better than @300M; hold #1 @390M was 49.9) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold2/VERDICT.txt` |
 
 ### v2 network, gen9 (G9s, G9p, G9q milestones) (28 rows)
 
@@ -300,6 +301,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | bc-15 | 2026-11-16 | P4 data lever: BC-P4 (12.0M, own rating >=1900) vs BC-P3 | BC-P4 vs BC-P3 | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2000 / 1000 | 49.95 [47.81, 52.23] [M] | p4/PREREG.txt (2479eb4f) | B1 both FUTILITY: within ~2 points (informational) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/p4/bc/READING.txt` |
 | g9q-25 | 2026-11-17 | P4 init: G9-P4 vs G9q step-matched @25M | G9-P4 @25M vs G9q @25M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 4800 / 2400 | 51.45 [50.06, 52.87] [M] | p4/PREREG.txt (2479eb4f) | SUCCESS-P4 (informational) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/p4/cmp/OVERALL.txt` |
 | g9q-26 | 2026-11-17 | P4 init: G9-P4 vs G9q step-matched @50M (decides) | G9-P4 @50M vs G9q @50M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3800 / 1900 | 51.81 [50.31, 53.29] [M] | p4/PREREG.txt (2479eb4f) | CANDIDATE next main | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/p4/cmp/OVERALL.txt` |
+| g9q-27 | 2026-11-17 | P4 init (informational): G9-P4 vs G9q step-matched @105M | G9-P4 @105.02M vs G9q @105.03M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 4000 / 2000 | 51.8 [50.4, 53.2] [M] | rule fixed before the run (`QUESTION.txt`) | better, edge ≈ +1.8 pts (stable vs 25M / 50M) | `/vol/bitbucket/fr1226/porygon-ws-wsp/spd/p4-vs-g9q-105M-20261117` |
 
 ### Network + search: hybrid, V3, lookahead2, NNUE, deepen (19 rows)
 
@@ -330,6 +332,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
+| cal-vm1 | 2026-11-17 | Cross-machine check of the in-process h2h: GPU Dojo VM vs cluster, same 2000 team pairs | G9-P4 @105.02M vs G9q @105.03M (T 0.5) | spd_h2h on the VM (T4, 4 vCPU, torch 2.15) | 4000 / 2000 | 52.4 [51.0, 53.8] [M] | - | agrees with the cluster's 51.8 [50.4, 53.2] (g9q-27); games not bit-identical | VM `~/val2000` |
 | cal-01 | 2026-11-09 | in-process vs real Showdown: G9p@25M vs P1 | in-process 65.9 +- 1.1 (6000 g) vs Showdown 65.7 +- 2.7 (1008 g) | spd_h2h vs netv2 h2h |  | 0.2 [-2.8, 3.2] [M] | - | in-process valid (detects biases >= ~4 points); pre-registered by wsp (file not located) | `memory benchmark-method.md; Showdown side /vol/bitbucket/fr1226/porygon-ws-netv2/runs/h2h-20261109-115722-741849/result.txt` |
 | cal-02 | 2026-11-09 | in-process vs real Showdown: P1 vs heuristic | in-process 78.8 +- 1.7 vs Showdown 80.0 +- 3.2 | spd_h2h vs Showdown |  | agree [M] | - | agree | `memory benchmark-method.md` |
 | cal-03 | 2026-11-11 | harness offset: raw G9p-cd vs pure search, Stage 3 harness vs netv2 harness | 48.05 (Stage 3, 500 pairs) vs 43.4 (netv2, 500 pairs) | two harnesses, different pairs |  | 4.65 [D] | - | compare arms within one harness | `ns-06 minus v2g9-15` |
