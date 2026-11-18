@@ -1,0 +1,12 @@
+BIGNET RESULT (docs/netv2/BIGNET-PREREG.md); T 0.5, duplicate pairs, pair-mean 95% intervals, h2h seed 4416017
+E1A (decision of record, arm A D384L4 final vs BC-P4): 50.13% ± 1.04 [49.09, 51.17] (4000 pairs, 8000 games, void 0) => NO DIFFERENCE SHOWN
+E4  (confirmation, arm A vs control S = BC-P4's size, seed 3, same T4/code; run only if E1A = BIGGER BETTER): not run
+OVERALL: NO DIFFERENCE SHOWN
+E2A (informational, D384L4 at matched T4 step time vs BC-P4): 47.99% ± 1.42 [46.56, 49.41] (2000 pairs, 4000 games, void 0) => BIGGER WORSE
+E0  (informational, control S vs BC-P4: seed + hardware noise; 'BIGGER' = S here): not run
+held-out D384L4 (step 140880; same 767,203 val decisions): policy CE 1.13692 (BC-P4 1.13794, delta -0.00102); value BCE 0.58403 (delta -0.00083); top-1 0.57896 (BC-P4 0.57867)
+T4 microbench base: 5,809,977 params, train 3470 samples/s fp32 (4784 fp16), fwd bs512 11025/s, bs64 2837/s, peak 1.66 GiB
+T4 microbench D384L4: 11,606,329 params, train 2392 samples/s fp32 (3931 fp16), fwd bs512 8414/s, bs64 2847/s, peak 2.22 GiB
+2026-11-18T10:48:54Z boot 2026-11-18 10:38:41 start
+2026-11-18T10:49:24Z boot 2026-11-18 10:38:41 up_s 642 reason FAILED microbench
+2026-11-18T11:00:43Z boot 2026-11-18 10:57:11 start

@@ -210,3 +210,6 @@ pause/HOLD windows, inline BC-P4 and the bf16 microbenchmark (97% accounted for)
 |---|---|---|---|
 | 2026-11-17 | setup (venv, Node 22, Showdown/fastenv/netv2 copies) + 50-pair smoke + 2000-pair cross-machine validation (cal-vm1) | ≈ 0.75 h (VM up 16:44Z → shutdown 17:37Z) [M] | VM `uptime` at 16:50Z (up 6 min); shutdown sent 17:37:14Z |
 Budget: 100 free GPU-hours, counted while the VM runs (user, 11-17).
+| 2026-11-18 | BIGNET (bigger-network BC, PREREG ws/netv2 4597222b): boot 10:38Z, data push (7.64 GB, cluster → VM, 469 s), FAILED microbench 10:49 (missing package) ⇒ auto-shutdown; restarted 10:57Z, arm A D384L4 trained 11:02–21:00Z (140,880 steps, 9.97 h), E1A + E2A evals, DONE 21:12Z ⇒ auto-shutdown; restarted 22:53Z only to copy the result (shutdown 22:55Z) | ≈ 10.5 h (10:38–10:49, 10:57–21:12, 22:53–22:55) [M] | `docs/thesis/data/bignet/` |
+
+VM total to 11-18: ≈ 11.4 of 100 GPU-hours [D].

@@ -1,0 +1,11 @@
+2026-11-18T10:49:21Z DATA_OK 7636217663 bytes
+2026-11-18T10:49:23Z FAILED microbench
+2026-11-18T11:01:54Z MB_OK keep D384L4 97000
+2026-11-18T11:02:10Z SMOKE_OK "line": "A win rate 60.0% \u00b1 15.2% (pair-mean 95% interval, 20 pairs = 40 games; naive \u00b115.2%; 0 ties)"
+2026-11-18T11:25:12Z GUARD_OK D384L4-s2 projected 10.6 h (limit 24 h)
+2026-11-18T21:00:33Z TRAIN_DONE D384L4-s2 final md5 e67c2817 "policy_ce": 1.13692, "value_bce": 0.58403
+2026-11-18T21:08:13Z e1a "line": "A win rate 50.1% \u00b1 1.0% (pair-mean 95% interval, 4000 pairs = 8000 games; naive \u00b11.1%; 1 ties)" => NO DIFFERENCE SHOWN
+2026-11-18T21:12:22Z e2a "line": "A win rate 48.0% \u00b1 1.4% (pair-mean 95% interval, 2000 pairs = 4000 games; naive \u00b11.5%; 1 ties)" => BIGGER WORSE
+2026-11-18T21:12:22Z control S not run: E1A = NO DIFFERENCE SHOWN
+2026-11-18T21:12:22Z RESULT written
+2026-11-18T21:12:22Z DONE

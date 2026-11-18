@@ -36,7 +36,7 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
 
 Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7% (gen9); a Jaxcalibur-level bot ≈ 75%
-(`.orchestra/research/REPORT.md`). **Pending at compilation:** fpcal (VOID 11-17, rerun pending) (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt`, md5
+(`.orchestra/research/REPORT.md`). **Pending at compilation:** fpcal replay (job 1174394, after the scale gate) (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt`, md5
 5a68f926), scale gate T1 (deepen D4 vs D1, md5 9fd3960d, `$F/runs/scale-gate/VERDICT.txt`), G9-P4 later readings.
 `$F` = `/vol/bitbucket/fr1226/porygon-ws-fastenv`, `$C` = `/vol/bitbucket/fr1226/porygon-ws-netv2`.
 
@@ -302,6 +302,9 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | g9q-25 | 2026-11-17 | P4 init: G9-P4 vs G9q step-matched @25M | G9-P4 @25M vs G9q @25M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 4800 / 2400 | 51.45 [50.06, 52.87] [M] | p4/PREREG.txt (2479eb4f) | SUCCESS-P4 (informational) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/p4/cmp/OVERALL.txt` |
 | g9q-26 | 2026-11-17 | P4 init: G9-P4 vs G9q step-matched @50M (decides) | G9-P4 @50M vs G9q @50M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3800 / 1900 | 51.81 [50.31, 53.29] [M] | p4/PREREG.txt (2479eb4f) | CANDIDATE next main | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/p4/cmp/OVERALL.txt` |
 | g9q-27 | 2026-11-17 | P4 init (informational): G9-P4 vs G9q step-matched @105M | G9-P4 @105.02M vs G9q @105.03M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 4000 / 2000 | 51.8 [50.4, 53.2] [M] | rule fixed before the run (`QUESTION.txt`) | better, edge ≈ +1.8 pts (stable vs 25M / 50M) | `/vol/bitbucket/fr1226/porygon-ws-wsp/spd/p4-vs-g9q-105M-20261117` |
+| g9q-28 | 2026-11-18 | P4 init (informational): G9-P4 vs G9q step-matched @245M | G9-P4 @245.04M vs G9q @245.00M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 4000 / 2000 | 50.5 [49.1, 51.9] [M] | rule fixed before the run (`QUESTION.txt`) | not better: edge +1.8 → +0.5 pts (washing out) | `/vol/bitbucket/fr1226/porygon-ws-wsp/spd/p4-vs-g9q-245M-20261118` |
+| bn-01 | 2026-11-18 | BIGNET E1A: 2×-wide BC net (D384L4, 11.6M) vs BC-P4 (5.8M), same data / recipe / steps | D384L4 vs BC-P4 (T 0.5) | spd_h2h on the GPU Dojo VM, duplicate pairs | 8000 / 4000 | 50.13 [49.09, 51.17] [M] | BIGNET-PREREG.md (4597222b) | NO DIFFERENCE SHOWN ⇒ stop at this size; held-out policy CE 1.13692 vs 1.13794 (−0.001) | `docs/thesis/data/bignet/RESULT.txt` |
+| bn-02 | 2026-11-18 | BIGNET E2A (info): D384L4 at matched T4 step time vs BC-P4 | D384L4 @97k steps vs BC-P4 | same | 4000 / 2000 | 47.99 [46.56, 49.41] [M] | BIGNET-PREREG.md (4597222b) | bigger worse at matched compute | same |
 
 ### Network + search: hybrid, V3, lookahead2, NNUE, deepen (19 rows)
 
@@ -373,7 +376,7 @@ sequential tests in rows g9q-05 / g9q-10.
   NNUE `gate1-smoke` (FAIL on 20k positions, superseded by gate 1).
 - Void: fpcal (wsp, job 1173956, PREREG 5a68f926), 11-17 16:21/16:23Z: both arms L (50k) and H (800k) FAILED the pre-registered
   iteration check — Foul Play ran 1,000 iterations per search, so the fixed-iteration launcher did not take effect; voided
-  within ~2 min each, no games counted; rerun with the same seeds after a fix (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/FAILED-{L,H}`).
+  within ~2 min each, no games counted; the void was a false positive of the check (poke-engine's 1000-visit exit on single-option states); fixed check (ws/wsp f9eab4a), smoke 1174393 PASS 11-17 21:50Z (N 50k and 800k counts exact), replay 1174394 queued after the scale gate (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/void-1173956/`, `fpcal/NOTES.txt`).
 - Void: `$C/runs/h2h-20261114-152241-1136569` ("no games": websocket-login hang, killed by the hang guard and replayed
   as `h2h-20261114-154510/154746-1136569`); R1b-F hold #1 T2 (Showdown, informational) "void".
 - Failed / incomplete: gloria `foulplay-*-301121`, `-301734`, `-302004` (no results.jsonl); wsp harness tests

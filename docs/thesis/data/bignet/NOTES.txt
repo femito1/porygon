@@ -1,0 +1,1 @@
+2026-11-18T11:00:43Z orchestrator: FAILED microbench at 10:49 = ModuleNotFoundError supersuit (src-p2b imports porygon.env); installed supersuit 3.11.0, stable-baselines3 2.9.0, tensorboard into ~/venv; imports of src-p2b, microbench.py, pretrain_resumable.py checked; FAILED renamed; unit re-enabled. No design change.

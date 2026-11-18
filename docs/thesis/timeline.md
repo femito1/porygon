@@ -132,3 +132,7 @@ bot, beat Jaxcalibur), no Jaxcalibur distillation, crawl ≥ 1500 only, bot-regi
 delegation, short-lived agents, G9q2 · 11-16 raw net as strong as Jaxcalibur's; "do 1 and 2" · monthly random-battle sets only
 at new runs; benchmark server only with a re-baseline (undated, PLAN.md) · the user warned against an un-designed "testing
 random stuff loop" (undated, memory `benchmark-method.md`). [M memory / PLAN.md / ORCHESTRATOR.md]
+- 2026-11-18 16:41Z — A40 job 1173274 reached its 3-day limit; successor 1173283 (gpuvm33) resumed G9-P4 exactly (upd 5853 @ 243,290,742 → upd 5854 @ 243,332,444) [M `runs/g9/20261118-164715-1173283/G9P4/train.log`]; its slurm header names the generic g9 resume file, the g9p4 branch overrides it with the lineage's own checkpoint (netv2.env v20). Restart flag re-armed 16:58Z.
+- 2026-11-18 17:40Z — T4 job 1137378 (R1b-F) reached its limit; successor 1173311 (dove01) resumed exactly (upd 11576 @ 482,186,281 → upd 11577 @ 482,227,948) [M `runs/g4r1bf/20261118-174152-1173311/R1bF/train.log`]; restart flag re-armed 18:27Z.
+- 2026-11-18 17:28Z — G9-P4 vs G9q @245M 50.5 [49.1, 51.9]: the P4 head start washed out (results g9q-28); G9q stays main.
+- 2026-11-18 21:12Z — BIGNET: a 2×-wide BC net (11.6M params) trained on the same P4 data as BC-P4 plays even with it (50.13 [49.09, 51.17], 8000 g; held-out policy CE −0.001); at matched compute it is worse (47.99). Capacity is not the bottleneck of BC at 12M decisions. The bigger-net arm stops at this size (pre-registered). [M `docs/thesis/data/bignet/RESULT.txt`]

@@ -1,0 +1,40 @@
+{
+ "pairs": 4000,
+ "games": 8000,
+ "a_wins": 4010,
+ "ties": 1,
+ "win_rate": 0.5013125,
+ "ci95": 0.010370391172188423,
+ "naive_ci95": 0.010956695340314467,
+ "line": "A win rate 50.1% \u00b1 1.0% (pair-mean 95% interval, 4000 pairs = 8000 games; naive \u00b11.1%; 1 ties)",
+ "exp": "a4b810dddb7a",
+ "files": [
+  "/home/azureuser/bignet/eval/e1a/shard-0000.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0001.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0002.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0003.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0004.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0005.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0006.jsonl",
+  "/home/azureuser/bignet/eval/e1a/shard-0007.jsonl"
+ ],
+ "pair_range": [
+  0,
+  4000
+ ],
+ "missing_in_range": 0,
+ "void_games": 0,
+ "truncated_games": 1,
+ "a": "v2:/home/azureuser/bignet/run/g9-p4-D384L4-s2/final.pt,temperature=0.5",
+ "b": "v2:/home/azureuser/bignet/nets/P4-g9-s2.pt,temperature=0.5",
+ "format": "gen9randombattle",
+ "seed": 4416017,
+ "shards": 8,
+ "shard_wall_seconds": 430.0464038848877,
+ "games_per_cpu_hour": 16742.379275719402,
+ "decisions_per_cpu_hour": 1126548.6599201504,
+ "decisions_per_game": 67.28725,
+ "nodes": [
+  "gpudojo-fernando-rimoli26"
+ ]
+}
