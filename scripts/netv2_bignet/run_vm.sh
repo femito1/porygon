@@ -123,6 +123,10 @@ stage_data() {
   [ "$(md5sum < "$NET_P4" | cut -c1-32)" = "$BC_P4_MD5" ] || fail "data: $NET_P4 md5 is not $BC_P4_MD5"
   [ "$(cat "$SRC/GIT_COMMIT" 2>/dev/null)" = "$SRC_COMMIT" ] || fail "data: $SRC/GIT_COMMIT is not $SRC_COMMIT"
   touch "$B/DATA_OK"; mark "DATA_OK $(du -sb "$DATA" | cut -f1) bytes"
+  # orchestrator 11-17: the cluster push key is needed only until the data is verified; revoke it on the VM now
+  if grep -q 'porygon-vm-push' ~/.ssh/authorized_keys 2>/dev/null; then
+    sed -i '/porygon-vm-push/d' ~/.ssh/authorized_keys && log "data: cluster push key revoked from authorized_keys"
+  fi
 }
 
 stage_mb() {
