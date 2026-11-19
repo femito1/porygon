@@ -92,7 +92,7 @@ pipeline() {  # DIR GAMES GEN_SEED FT_EXTRA EVAL_GAMES(T1 T2 T3) EVAL_W EVAL_B
     --battles 32 --fifo-dir "${TMPDIR:-/tmp}" >> "$D/gen.log" 2>&1 || { fail gen "gen ($D/gen.log)"; }
   st "gen done: $(tail -1 "$D/gen.log")"
   "$PY" -u "$X" label --records "$D/gen/rec-*.jsonl.gz" --net "$NET" --out "$D/labels" --delta-file "$DELTA_FILE" \
-    --workers 11 --concurrency 4 --seed 7191102 >> "$D/label.log" 2>&1 || fail label "label ($D/label.log)"
+    --workers 11 --concurrency 10 --seed 7191102 >> "$D/label.log" 2>&1 || fail label "label ($D/label.log)"
   st "label done: $(tail -1 "$D/label.log")"
   rm -rf "$D/shards"
   "$PY" -u "$X" shards --labels "$D/labels" --out "$D/shards" > "$D/shards.log" 2>&1 || fail shards "shards"
@@ -140,8 +140,9 @@ if [ "$MODE" = smoke ] || ! grep -q "^PASS $(cat "$CODE/COMMIT")" "$S/smoke/SMOK
   SM=$S/smoke
   [ ! -e "$SM/SMOKE.txt" ] || mv "$SM" "$S/smoke.old-$(date -u +%Y%m%dT%H%M%S)"
   pipeline "$SM" 200 7191199 "--batch-size 32 --warmup 5" 400 400 400 4 16
-  "$PY" -u "$X" verdict --labels "$SM/labels" --check "$SM/check.json" --t1 "$SM/T1.json" --t2 "$SM/T2.json" \
-    --t3 "$SM/T3.json" --out "$SM/verdict-smoke.txt" --min-rows 380 > /dev/null 2>&1 || fail smoke "verdict"
+  # shellcheck disable=SC2086
+  "$PY" -u "$X" verdict --labels "$SM/labels" --check "$CK" --t1 "$SM/T1.json" --t2 "$SM/T2.json" \
+    --t3 "$SM/T3.json" --out "$SM/verdict-smoke.txt" --min-rows 380 $DOSE > /dev/null 2>&1 || fail smoke "verdict"
   res=$("$PY" - "$SM" <<'PYEOF'
 import json, sys
 from pathlib import Path
