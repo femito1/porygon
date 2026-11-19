@@ -124,6 +124,7 @@ and cluster dir; a shared benchmark-slot ledger (`.orchestra/PLAN.md`).
 | 11-15 | ~700k-token stream agent | short-lived-agent rule | memory `agent-token-budget.md` |
 | 11-15 | stale R1b-F follow-up rule could reset 360M → 7.5M | disarmed (`runs/r1/FU.started`) | memory |
 | 11-17 | **G9q step cap**: stop at 1.0B, A30 allocation lost | netv2.env v20 (cap 3e9), STALE/STEPCAP alerts | ORCHESTRATOR.md |
+| 11-19 | Foul Play websocket handshake timeouts at harness start (slow shared disk), 0 games: fpcal arm L 1174394 (dove04), F1350 1228320 (dove01) | voided, replayed with the same seed (PLAN rule); not node-specific | `$C/runs/conf1350-void1/NOTES.txt` |
 
 ## Standing user decisions (index)
 2026-10-19 Wang recipe · 10-2x maximum speed, accept FairShare cost, no heavy jobs on the laptop · 11-08 goal (best gen9/gen4
@@ -136,3 +137,9 @@ random stuff loop" (undated, memory `benchmark-method.md`). [M memory / PLAN.md 
 - 2026-11-18 17:40Z — T4 job 1137378 (R1b-F) reached its limit; successor 1173311 (dove01) resumed exactly (upd 11576 @ 482,186,281 → upd 11577 @ 482,227,948) [M `runs/g4r1bf/20261118-174152-1173311/R1bF/train.log`]; restart flag re-armed 18:27Z.
 - 2026-11-18 17:28Z — G9-P4 vs G9q @245M 50.5 [49.1, 51.9]: the P4 head start washed out (results g9q-28); G9q stays main.
 - 2026-11-18 21:12Z — BIGNET: a 2×-wide BC net (11.6M params) trained on the same P4 data as BC-P4 plays even with it (50.13 [49.09, 51.17], 8000 g; held-out policy CE −0.001); at matched compute it is worse (47.99). Capacity is not the bottleneck of BC at 12M decisions. The bigger-net arm stops at this size (pre-registered). [M `docs/thesis/data/bignet/RESULT.txt`]
+- 2026-11-19 00:23Z — scale gate T1 FUTILITY: deepen D4 vs D1 51.72 [49.16, 54.40] (1200 g) ⇒ FLAT, the deeper-search route stops (results ns-25).
+- 2026-11-19 06:38Z / 10:33Z — fpcal SENSITIVE: raw cd@805 vs Foul Play 61.3 / 57.8 / 54.9% at 50k / 210k (time-based) / 800k iterations, −3.2 pts per 4× budget (fpc-02…04); arm L was first void (Foul Play websocket handshake timeout, job 1174394) and rerun with the same seed. Decision: new headline Foul Play runs at a fixed 200k iterations/state.
+- 2026-11-19 10:34Z — ExIt-LA2 stage 1 starts (fastenv helper job 1229025, dove02): cd@805 fine-tuned toward lookahead2's played policy vs toward its own policy.
+- 2026-11-19 10:56–11:39Z — G9q-cd@1350 cooldown branch INLINE in G9q's job (final `runs/g9q-cd1350/final/01355036714.pt`, md5 6cf40c0c); G9q relaunched in place, counter continues (1,350,851,430 → 1,350,894,821) [M `runs/g9q-cd1350/STATUS`].
+- 2026-11-19 11:52Z — **R1350 SUCCESS**: cd@1350 beats cd@805, MUE 52.05 [50.45, 53.62] (3400 g, look 17) ⇒ new deployment-net candidate; F1350 released (g9q-29).
+- 2026-11-19 12:32Z — F1350 attempt 1 (job 1228320) void: Foul Play never connected (websocket handshake timeouts for 30 min, slow shared disk), 0 games; 12:50Z replayed unchanged with the same seed as job 1238699 [M `$C/runs/conf1350-void1/NOTES.txt`].

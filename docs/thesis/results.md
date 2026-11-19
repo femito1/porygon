@@ -36,8 +36,8 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
 
 Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7% (gen9); a Jaxcalibur-level bot ≈ 75%
-(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1, G9q-cd@1350 readings (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt`, md5
-5a68f926), scale gate T1 (deepen D4 vs D1, md5 9fd3960d, `$F/runs/scale-gate/VERDICT.txt`), G9-P4 later readings.
+(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1 (`$F/runs/exit-la2/VERDICT.txt`), F1350 = raw G9q-cd@1350 vs Foul Play gen9
+(`$C/runs/conf1350/RESULTS.txt`; R1350 SUCCESS = g9q-29), G9-P4 later readings. Done since: fpcal (fpc-02…04), scale gate T1 (ns-25).
 `$F` = `/vol/bitbucket/fr1226/porygon-ws-fastenv`, `$C` = `/vol/bitbucket/fr1226/porygon-ws-netv2`.
 
 ## Results by theme
@@ -227,7 +227,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | v2g4-13 | 2026-11-16 | R1b-F hold #1: guard trip @390.2M vs R1b-F@300M | R1b-F trip @390.2M vs R1b-F @300M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2000 / 1000 | 49.9 [47.9, 51.9] [M] | g4r1bf/HOLD-PREREG.txt (af0441c6) | CONTINUE (not clearly worse; not better) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold1/VERDICT.txt` |
 | v2g4-14 | 2026-11-17 | R1b-F hold #2: guard trip @437.7M vs R1b-F@300M | R1b-F trip @437.73M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator, duplicate pairs | 2000 / 1000 | 53.0 [51.0, 55.0] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE (better than @300M; hold #1 @390M was 49.9) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold2/VERDICT.txt` |
 
-### v2 network, gen9 (G9s, G9p, G9q milestones) (28 rows)
+### v2 network, gen9 (G9s, G9p, G9q milestones) (29 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -259,6 +259,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | g9q-16 | 2026-11-15 | Milestone 1 attempt: raw G9q-cd@605M vs pure gen9 search (1000 g) | G9q-cd@605M vs pure gen9 search | pure gen9 search (search:none, 4 x 1000 ms, stock eval), netv2 vs-search harness (21 workers, 5 concurrent) | 1000 / 500 | 52.5 [49.6, 55.4] [M] | conf605/PREREG.txt (517b679c) | NOT CONFIRMED (+9.1 +- 3.9 over G9p-cd on the same pairs) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf605/RESULTS.txt` |
 | g9q-21 | 2026-11-15 | G9q still improving: cd@805 vs cd@605 | G9q-cd @805.03M vs G9q-cd @605.04M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2800 / 1400 | 52.46 [50.67, 54.22] [M] | g9q-cd800/PREREG.txt (1a1b9fa4) | IMPROVING | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd800/READING.txt` |
 | g9q-23 | 2026-11-16 | Milestone 1: raw G9q-cd@805M vs pure gen9 search (1000 g, seed 8800111) | G9q-cd@805M T 0.5 vs pure gen9 search | pure gen9 search (search:none, 4 x 1000 ms, stock eval), netv2 vs-search harness (21 workers, 5 concurrent) | 1000 / 500 | 55.5 [52.7, 58.3] [M] | conf800/PREREG.txt (c6a38724) | CONFIRMED: raw net beats our search | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf800/RESULTS.txt` |
+| g9q-29 | 2026-11-19 | G9q still improving: cd@1350 vs cd@805 (R1350) | G9q-cd @1355.04M vs G9q-cd @805.03M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3400 / 1700 | 52.05 [50.45, 53.62] [M] (naive 52.44, repeated CI [50.43, 54.45]) | g9q-cd1350/PREREG.txt (342e63f8) | IMPROVING (SUCCESS at look 17) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd1350/READING.txt` |
 
 ### v2 PPO recipe arms (one change each) (13 rows)
 
@@ -380,6 +381,9 @@ sequential tests in rows g9q-05 / g9q-10.
   `vs-search-20261115-175226-1172540` (8 games each); gloria `foulplay-20261107-025934-492059` (gen9, 8 games);
   `/vol/bitbucket/fr1226/porygon-ws-data/runs/evalnet-*-677193` (4-game dry runs of the data stream's eval wrappers);
   NNUE `gate1-smoke` (FAIL on 20k positions, superseded by gate 1).
+- Void: F1350 attempt 1 (netv2 slot job 1228320, dove01), 11-19 11:56–12:32Z: Foul Play instance 0 timed out in its websocket
+  handshake through the harness's 30-min restart loop (slow shared disk), no games; replayed unchanged with the same seed 8135222 as
+  job 1238699 (`$C/runs/conf1350-void1/NOTES.txt`).
 - Void: fpcal replay 1174394 arm L (50k), 11-19 00:24–00:55Z: a Foul Play instance timed out in its websocket handshake at
   start (slow-disk startup), no games; rerun with the same seed pending (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/arm-L.log`).
 - Void: fpcal (wsp, job 1173956, PREREG 5a68f926), 11-17 16:21/16:23Z: both arms L (50k) and H (800k) FAILED the pre-registered
