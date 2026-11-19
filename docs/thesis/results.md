@@ -36,8 +36,8 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
 
 Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7% (gen9); a Jaxcalibur-level bot ≈ 75%
-(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1 (`$F/runs/exit-la2/VERDICT.txt`), F1350 = raw G9q-cd@1350 vs Foul Play gen9
-(`$C/runs/conf1350/RESULTS.txt`; R1350 SUCCESS = g9q-29), G9-P4 later readings. Done since: fpcal (fpc-02…04), scale gate T1 (ns-25).
+(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1 (`$F/runs/exit-la2/VERDICT.txt`), LA2-1350 (lookahead2 on cd@1350 vs the
+benchmark bot, `$F/runs/la2-1350/VERDICT.txt`), G9-P4 later readings. F1350 done (g9q-30), R1350 (g9q-29). Done since: fpcal (fpc-02…04), scale gate T1 (ns-25).
 `$F` = `/vol/bitbucket/fr1226/porygon-ws-fastenv`, `$C` = `/vol/bitbucket/fr1226/porygon-ws-netv2`.
 
 ## Results by theme
@@ -69,6 +69,7 @@ Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7%
 | v2g4-10 | 2026-11-14 | raw R1b-F@300M vs Foul Play gen4 | raw R1b-F@300M T 0.5 vs Foul Play gen4 (8f541f8) | netv2 foulplay-net harness | 400 / 200 | 55.6 [51.5, 59.7] [M] | rawfp/PREREG.txt (f0a508e3) | raw gen4 net beats Foul Play (400 g, not confirmed at 1000) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/rawfp/RESULTS.txt` |
 | g9q-17 | 2026-11-15 | raw G9q-cd@605M vs Foul Play gen9 (1000 g) | G9q-cd@605M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness | 1000 / 500 | 58.8 [55.9, 61.7] [M] | conf605/PREREG.txt (517b679c) | CONFIRMED (lower > 50%) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf605/RESULTS.txt` |
 | g9q-24 | 2026-11-16 | raw G9q-cd@805M vs Foul Play gen9 (1000 g, seed 8800222) | G9q-cd@805M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness | 1000 / 500 | 57.8 [55.0, 60.6] [M] | conf800/PREREG.txt (c6a38724) | CONFIRMED (= cd@605 within noise) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf800/RESULTS.txt` |
+| g9q-30 | 2026-11-19 | raw G9q-cd@1350M vs Foul Play gen9 (F1350, seed 8135222) | G9q-cd@1355.04M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness; 2 of 20 FP instances stopped accepting after 4–5 games | 906 / 453 | 59.1 [56.2, 62.0] [M] | g9q-cd1350/PREREG.txt (342e63f8) | CONFIRMED | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf1350/RESULTS.txt` |
 | ns-18 | 2026-11-17 | LA2-FP: lookahead2(cd@805, d 0.005) vs Foul Play gen9 | lookahead2 on G9q-cd@805M vs Foul Play gen9 (8f541f8) | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 58.2 [55.29, 61.11] [M] | LA2-FP-PREREG.md (1173284f) | Q1 headline | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 | ns-19 | 2026-11-17 | LA2-FP arm 2: raw cd@805 vs Foul Play gen9 (same pairs) | raw G9q-cd@805M T 0.5 vs Foul Play gen9 | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 56.9 [53.94, 59.86] [M] | LA2-FP-PREREG.md (1173284f) | positive | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 
