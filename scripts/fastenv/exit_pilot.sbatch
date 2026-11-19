@@ -52,7 +52,8 @@ nvidia-smi -L > /dev/null 2>&1 || fail checks "no GPU"
 for d in "$PS_SELF" "$PS_EVAL"; do [ -d "$d/dist/sim" ] || fail checks "no built simulator in $d"; done
 lr=$(PYTHONPATH=$FROZEN/src "$PY" -c '
 import sys, torch
-a = vars(torch.load(sys.argv[1], map_location="cpu", weights_only=False)["args"])
+a = torch.load(sys.argv[1], map_location="cpu", weights_only=False)["args"]
+a = a if isinstance(a, dict) else vars(a)
 last = a["lr"] * a["final_lr_frac"]
 print("lr", a["lr"], "final_lr_frac", a["final_lr_frac"], "last %.3g" % last, "OK" if 5e-6 <= last <= 1.5e-5 else "OUT")
 ' "$NET" 2>&1 | tail -1)
