@@ -13,7 +13,7 @@
 #SBATCH --partition=training
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=48G
+#SBATCH --mem=16000
 #SBATCH --time=30:00:00
 #SBATCH --output=logs/slurm-%j.out
 set -uo pipefail
@@ -54,7 +54,7 @@ lr=$(PYTHONPATH=$FROZEN/src "$PY" -c '
 import sys, torch
 a = vars(torch.load(sys.argv[1], map_location="cpu", weights_only=False)["args"])
 last = a["lr"] * a["final_lr_frac"]
-print(f"lr {a[\"lr\"]} final_lr_frac {a[\"final_lr_frac\"]} last {last:.3g}", "OK" if 5e-6 <= last <= 1.5e-5 else "OUT")
+print("lr", a["lr"], "final_lr_frac", a["final_lr_frac"], "last %.3g" % last, "OK" if 5e-6 <= last <= 1.5e-5 else "OUT")
 ' "$NET" 2>&1 | tail -1)
 case $lr in *OK) st "checks OK: PREREG md5 $(md5of "$S/PREREG.txt"), net sha256 ok, delta 0.005, S $lr" ;;
   *) fail checks "S's last lr not 1e-5 +- 50% (stop for main): $lr" ;; esac
