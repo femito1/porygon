@@ -53,15 +53,17 @@ at temperature 0.5:
 | gen9, **lookahead2** on G9q-cd@605M vs the same raw network | **53.2% [50.6, 55.7]** (1200 games, sequential) |
 | gen4, search with the R1b-F@150M / @300M prior vs the v1@500M prior | 51.1% ± 2.0% / 51.9% [50.0, 53.8] (2000 games each) |
 
-On the same team pairs as G9p-cd's 43.4%, G9q-cd@605M gains +9.1 ± 3.9 points against our gen9 search, but its
-52.5% [49.6, 55.4] is not yet a confirmed ≥ 50%; the stronger G9q-cd@805M is now being measured against our search
-and Foul Play (1000 games each). Scoring the search's leaves with the network works: **lookahead2** simulates every
-pair of moves for one turn in sampled worlds, scores each outcome with the network's win probability, and overrides
-the raw network's pick only by a clear margin; it beats its own raw network 53.2%. Its tests against Foul Play and
-against the benchmark hybrid are queued. Two seeds of G9q's recipe agree within ~2 points. Human-data quality
-matters at equal size (U7), so the next BC init, P4, uses all ≥ 1900-rated data (1.8× P3). G9q is the main gen9
-run; G9p, G9q2, G9r, G9t and G9qent are parked. In gen4 the R1b-F prior did not clearly help our search, so the
-v1@500M prior stays.
+The raw G9q-cd@805M beats our pure gen9 search 55.5% ± 2.8% (1000 games, confirmed) and Foul Play 57.8% ± 2.8%.
+Scoring the search's leaves with the network works at one ply: **lookahead2** simulates every pair of moves for one turn
+in sampled worlds, scores each outcome with the network's win probability, and overrides the raw network's pick only by
+a clear margin. It beats its own raw network 53.2% and the old hybrid 54.0%, so it is the gen9 benchmark bot (58.2% vs
+Foul Play), but its gain over the raw network against Foul Play (+1.3 ± 4.0) is not significant. Going deeper did not
+pay: a best-first deepening of lookahead2 at 4× the budget scored 51.7% [49.2, 54.4] against 1× (it changes few moves).
+A 2× wider network trained on the same human data plays even with the original (50.1%), and the head start from
+higher-rated human data (P4) fades under long RL (+1.8 points at 105M, +0.5 at 245M). Foul Play numbers depend on its
+search budget (57.8% at its default, 61.3% / 54.9% at ¼× / 4× the iterations), so new Foul Play benchmarks fix it at
+200k iterations per search. G9q is the main gen9 run (a cooldown branch at 1.35B is under test). In gen4 the R1b-F
+prior did not clearly help our search, so the v1@500M prior stays.
 
 **Tried, no gain — don't retry as is:**
 - **Search:** 8 determinizations instead of 4; root PUCT on the prior (`--c-puct`); regret matching in the tree
@@ -89,18 +91,17 @@ The 0.25 network prior does help the gen4 search (+3.8 ± 3.5 vs none, 800 games
 
 ## Roadmap
 1. **A stronger raw network.** G9q keeps training and still improves (cd@805 beat cd@605); confirm the raw net past
-   our gen9 search (≥ 50%) and grow it toward MissingNo.Zero's 66.7% against Foul Play. P4 (all ≥ 1900-rated data,
-   1.8× P3) gives BC-P4 and a P4-init run read against G9q at 25M / 50M; the better init seeds the next main run
-   with the December sets. The recipe levers tried so far (lr annealing, GAE λ, entropy schedule, bf16,
-   actor-stream) did not help. gen4: R1b-F keeps training under its strength guard.
-2. **Network-quality leaves in the search (the lever against Jaxcalibur, whose search adds 100–150 Elo).** Done:
-   the margin-rule hybrid at the root (the gen9 benchmark bot) and lookahead2 (one ply of network-valued leaves,
-   +3 points over its own raw net). Queued: lookahead2 vs Foul Play and vs the benchmark hybrid (adopted iff better).
-   Next, chosen by those results: more depth, either a deeper selective GPU lookahead or a second attempt at a fast
-   CPU student inside the engine. V3 (the network inside an MCTS tree on the benchmark GPU) stays parked: ~2k
-   leaves per decision (`docs/netsearch/V3-GATES-PREREG.md`, `V3-I1-PREREG.md`, `V3-RUST-DESIGN.md`).
-3. **Distil the stronger search into the network:** lookahead2 now beats the net, so it is a teacher worth
-   copying (search labels from the weaker hand-evaluation search did not help).
+   our gen9 search (done) and grow it toward MissingNo.Zero's 66.7% against Foul Play. Long training of one main run
+   plus lr-cooldown branches is what has worked; recipe levers (lr annealing, GAE λ, entropy schedule, bf16,
+   actor-stream), a wider network and higher-rated human data did not. gen4: R1b-F keeps training under its strength
+   guard.
+2. **Distil the search into the network (expert iteration):** lookahead2 beats the raw net head to head, so it is a
+   teacher worth copying (search labels from the weaker hand-evaluation search did not help). A pre-registered pilot
+   fine-tunes the net toward lookahead2's policy, with a control fine-tuned toward its own policy
+   (`docs/netsearch/EXIT-LA2-PREREG.md`); a win is iterated.
+3. **Search depth:** one ply of network-valued leaves is the only depth that has paid. V3 (the network inside an MCTS
+   tree), a CPU student inside the engine (NNUE gate 1) and best-first deepening (scale gate) did not scale
+   (`docs/netsearch/`).
 4. **Leaf evaluation, round 2:** refit on self-play played with the fitted evaluation; TreeStrap-style targets
    from deeper search; recheck the leaf scale whenever the time per move changes. Engine-only head-to-heads
    over-predict Showdown gains (gen9: 60% in self-play, +1.6 ± 3.4 vs Foul Play): confirm on Showdown.
