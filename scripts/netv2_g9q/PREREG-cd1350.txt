@@ -1,0 +1,82 @@
+G9q-cd@1350M (next deployment-net candidate) + READING R1350 (G9q-cd@1350 vs G9q-cd@805) + CONFIRMATION F1350
+(G9q-cd@1350 vs Foul Play gen9, 1000 games, only on R1350 SUCCESS) — PRE-REGISTRATION, FINAL
+(netv2, 2026-11-19 ~10:00 UTC; ORCHESTRATOR DECISION 2026-11-19 10:00Z (main, under the user's delegation), item 1;
+written before the branch and before any game; read-only copy runs/g9q-cd1350/PREREG.txt).
+Why: steps + lr cooldown are what have reliably moved the raw net (R800: cd@805 vs cd@605 median-unbiased 52.46%
+[50.67, 54.22]); G9q has trained ~540M steps since cd@805's branch point; search-depth routes (scale gate FLAT) and a
+2x BC net (BIGNET) gave no gain. Standing: cd@805 vs Foul Play gen9 57.8% +- 2.8% [55.0, 60.6] (runs/conf800/RESULTS.txt).
+
+BRANCH (= G9q-cd@805's recipe exactly: runs/g9q-cd800/PREREG.txt 1a1b9fa4, scripts/netv2_g9q/cd800-driver.sh 7db6ea44):
+  Branch point = G9q's FIRST checkpoint >= 1,350,000,000 steps present in job 1174222's live lineage dir
+  (/tmp/ws-netv2-1174222/run/G9q/checkpoints/ckpt_<S>.pt; 5M cadence, so S ~ 1,350.0M; if the driver starts late it
+  takes the earliest one >= 1,350M still there), copied to runs/g9q-cd1350/branch-point-<S>.pt (md5 in STATUS).
+  ONE INLINE_CMD of job 1174222 (A30, clapper; G9q's trainer is stopped meanwhile, ~45 min): G9q's live trainer argv as
+  recorded at the branch (runs/g9q-cd1350/trainer-argv.{bin,txt}: fp32 --no-bf16, 28 workers, wsd lr 7e-5, src-24c633f
+  wrapper, PORYGON_PS ps-2026-11) + the branch's own run / pool dirs (a copy of G9q's local pool; snapshots and
+  frozen bests newer than S moved out) + --resume <branch point> --cooldown-start S --total-steps S + 5,000,000
+  --final-lr-frac 0.1 (cosine 7e-5 -> 7e-6) --guard-entropy-min 0.35; limit 2 h (timeout -s INT).
+  Final net: runs/g9q-cd1350/final/<steps, 11 digits>.pt (r--; md5 in runs/g9q-cd1350/STATUS "final at ... (md5 ...)").
+  Refusals (runs/g9q-cd1350/FAILED, nothing queued): no read-only PREREG with the pinned md5; trainer argv with an
+  --lr-schedule flag or without --guard-ptop-max 0.6; not exactly one trainer, or its parent is not the job script;
+  any of INLINE_CMD / INLINE_CMD.running / HOLD / WAIT_FOR / CHAIN_STOPPED / PARKED in runs/r1; no top-level
+  final_model.pt; less than 3 h left in job 1174222. No final, or a final < S + 5M steps => FAILED. Stop before the
+  SIGINT: touch runs/g9q-cd1350/CD_STOP.
+  G9q main resumes afterwards (restart in place, same allocation). The driver verifies the relaunch: a new 'v2
+  trainer:' line; the relaunched argv equals the recorded one with the --resume values masked, the last --resume
+  = $LOCAL/run/G9q/final_model.pt; the first 'upd' line after it continues the step counter (0 < steps - saved <
+  200,000); then re-touches runs/r1/restart. A failed relaunch check writes runs/g9q-cd1350/relaunch/FAILED (alert).
+  Driver: scripts/netv2_g9q/cd1350-driver.sh (a setsid step in job 1174222, run from a node-local copy).
+
+READING R1350 (a measurement with one reading; it gates F1350 and nothing else):
+  A = G9q-cd@1350 (the one file in runs/g9q-cd1350/final/, md5 = the STATUS line), B = G9q-cd@805
+  runs/g9q-cd800/final/00805029873.pt (md5 d0c5b6cf); both raw at T 0.5; duplicate pairs (teams swapped),
+  gen9randombattle, fastenv in-process; harness scripts/netv2_cmp_step.sh (md5 a80c7da2, unmodified; its "G9s" label
+  = A, "G9p" label = B; STEP 0 = no step constraint: each side's dir holds only its one net) with wsp's sequential
+  design runs/cmp/seq-gain.json (md5 f12fec7c: theta0 50 -> theta1 52%, alpha 0.025 per one-sided test, power 0.8,
+  looks every 100 pairs, n_max 2400 pairs = 4800 games; the boundaries meet at n_max, so each test decides). Both
+  one-sided tests run on the same pairs; the nested pair-id order is the reading of record (round-robin alongside).
+  Same harness and design as R800, so R1350 is directly comparable with R800 and the measured seed variance.
+  Seed 8135061, NEW (grep check below).
+  READING: SUCCESS iff the test "cd1350 > cd805" SUCCEEDS (its 95% repeated CI excludes 50% from above, i.e. the
+  lower 95% bound > 50%; valid at any look) => IMPROVING: G9q-cd@1350 is the NEW DEPLOYMENT-NET CANDIDATE and F1350
+  is released. Otherwise NOT SHOWN, stated with the reason: "cd1350 > cd805" FUTILITY (a gain of >= 2 points is
+  unlikely) and whether "cd805 > cd1350" SUCCEEDED (cd1350 weaker: a warning about the main run, for main);
+  cd@805 stays the deployment net and F1350 is cancelled (not played).
+  Reported with seq_monitor's median-unbiased estimate + 95% CI and the naive repeated CI at the decision look, and the
+  all-pairs merge line. Placement: a driver step in the data host job 1172609 (parrot, a16; srun --overlap, 6 CPUs,
+  14G, the job's GPU; 5 workers); it waits <= 10 h for the final (FAILED if runs/g9q-cd1350/FAILED appears first);
+  h2h limit 6 h; a SIGTERM (host end / cancel) writes runs/g9q-cd1350/r1350/FAILED (rerun the same pre-registration in
+  the next host). Chain: scripts/netv2_g9q/r1350-chain.sh.
+
+CONFIRMATION F1350 (fixed n, no looks, nothing pooled in; = runs/conf800/PREREG.txt c6a38724 stage (ii) with the net
+  and the seed changed): raw G9q-cd@1350 (the same file and md5 as R1350's A) vs FOUL PLAY GEN9, 1000 games (500
+  pairs), data's fp9 harness /vol/bitbucket/fr1226/porygon-ws-data/code/scripts/netv2_foulplay_fp9.sbatch (md5
+  7476be8b = conf800 (ii)'s; K = 20 Foul Play instances x 50 games, 1 s per state, parallelism 1)
+  `NET 1000 --gen 9 --seed 8135222 --temperature 0.5`; 95% interval from the pair means (the harness's result.txt line).
+  ONE slot job (24 CPUs, `training`, --time 6:00:00), scripts/netv2_conf1350/conf1350.sbatch, submitted now HELD
+  (sbatch --hold) with --dependency=afterany:1228316 (after wsp's fpcal L rerun, the slot's current claim); ledger
+  CLAIM line in $C/LEDGER-OUTBOX.md at submission. r1350-chain.sh releases it (scontrol release) on R1350 SUCCESS and
+  cancels it (scancel; WITHDRAWN line to the outbox) on NOT SHOWN; on an R1350 FAILED it stays held for main. The job
+  itself refuses to play unless runs/g9q-cd1350/READING.txt says SUCCESS and the net's md5 matches (FAILED-net,
+  RELEASE line). RELEASE line to $C/LEDGER-OUTBOX.md at the end. ETA ~1.3 h of games (conf800 (ii): 1 h 20 min).
+  READING: "the raw net beats Foul Play gen9" CONFIRMED iff the lower 95% bound > 50%; else NOT CONFIRMED (stated with
+  the point estimate and interval). cd@805's 57.8 [55.0, 60.6] is quoted alongside for context only (not a paired
+  test; no difference claim is made from it).
+
+WHAT EACH OUTCOME MEANS
+  - R1350 SUCCESS and F1350 CONFIRMED => G9q-cd@1350 is the new deployment-net candidate (raw benchmark net in place of
+    cd@805). Adopting lookahead2 on it as the gen9 benchmark bot is an LA2-H-style test owned by fastenv (a follow-up,
+    not part of this pre-registration).
+  - R1350 SUCCESS but F1350 NOT CONFIRMED => the net-vs-net gain did not carry to Foul Play; no switch; main decides.
+  - R1350 NOT SHOWN => cd@805 stays the deployment net; G9q keeps training (constant lr); F1350 is not played.
+  - Any FAILED => nothing is read; the stage is rerun under this same pre-registration (new attempt, same seeds) by
+    main's decision.
+  The readings go to the orchestrator, numbers re-read from the files.
+
+Seeds 8135061 (R1350) / 8135222 (F1350), NEW: grep-checked 2026-11-19 ~10:00 UTC as whole words in the record files
+  under porygon-ws-{netv2,data,fastenv,wsp} (depth <= 4: PREREG*, NETS.txt, *.env*, manifest*, RESULT*, READING*,
+  VERDICT*, *.sh, *.sbatch, NOTES*, *.meta.json, STATUS, *argv*.txt, notes.log, result.txt) and gloria/runs manifests
+  (depth <= 3), and in the laptop's .orchestra/, docs/ and the worktrees' scripts/ and docs/: no hit.
+Outputs: runs/g9q-cd1350/{STATUS, FAILED, final/, branch-train.log, trainer-argv.*, relaunch/}, runs/g9q-cd1350/r1350/
+  {STATUS, RESULT.txt, NETS.txt, run.log, FAILED}, runs/g9q-cd1350/READING.txt (r--); runs/conf1350/{STATUS,
+  RESULTS.txt (r--), FAILED-<stage>}, run dir runs/foulplay-net-<date>-<job>/.
