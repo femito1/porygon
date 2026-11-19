@@ -36,7 +36,7 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
 
 Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7% (gen9); a Jaxcalibur-level bot ≈ 75%
-(`.orchestra/research/REPORT.md`). **Pending at compilation:** fpcal replay (job 1174394, after the scale gate) (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt`, md5
+(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1, G9q-cd@1350 readings (`/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt`, md5
 5a68f926), scale gate T1 (deepen D4 vs D1, md5 9fd3960d, `$F/runs/scale-gate/VERDICT.txt`), G9-P4 later readings.
 `$F` = `/vol/bitbucket/fr1226/porygon-ws-fastenv`, `$C` = `/vol/bitbucket/fr1226/porygon-ws-netv2`.
 
@@ -330,6 +330,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | ns-22 | 2026-11-17 | scale gate T3 (info): raw net vs deepen D1 | raw cd@805 vs deepen D1 | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) (helper) | 400 / 200 | 46.17 [40.99, 52.01] [M] | SCALE-GATE-PREREG.md (9fd3960d) | FUTILITY (naive 44.00 [39.80, 48.20]) | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/scale-gate/VERDICT-B.txt` |
 | ns-24 | 2026-11-17 | LA2-H: lookahead2 vs the benchmark hybrid | lookahead2 on G9q-cd@805M (δ 0.005, K 8) vs H(δ 0.0212) + G9p-cd@104.71M | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) | 1000 / 500 | **54.00 [51.18, 56.82]** [M] | LA2-H-PREREG.md (ee8f1bd6) | **ADOPTED**: lookahead2 = gen9 benchmark bot | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-h/VERDICT.txt` |
 | ns-25 | 2026-11-19 | scale gate T1 (decides): deepen D4 vs D1 | D4 (4,096 extra leaves) vs D1 (1,024), cd@805 | fastenv Stage 3 slot harness | 1200 / 600 | 51.72 [49.16, 54.40] [M] (median-unbiased) | SCALE-GATE-PREREG.md (9fd3960d) | **FUTILITY ⇒ FLAT: stop the route** | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/scale-gate/VERDICT.txt` |
+| la2-len1 | 2026-11-19 | LA2-FP by game length (post hoc, informational) | lookahead2 − raw vs Foul Play, paired, by team-pair mean length | LA2-FP games | 500 pairs | short (<25 turns, 133 pairs) −3.0 ± 7.7; long (367) +2.9 ± 4.7; short − long −5.9 ± 9.1 [M] | not pre-registered | lookahead2 does not fix the short-game weakness | `/vol/bitbucket/fr1226/porygon-ws-fastenv/analysis/la2-fp-by-length/result.txt` |
 | ns-23 | 2026-11-17 | deepen microbench: wall time per decision at budget 1x / 4x / 8x | deepen b1024 / b4096 / b8192 vs lookahead2 0.94 s | 120 positions |  | 5.0 [M] | - | info | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/dbench2-20261117/RESULT` |
 
 ### Calibration (harnesses, opponent strength, value) (5 rows)
@@ -337,8 +338,10 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
 | cal-vm1 | 2026-11-17 | Cross-machine check of the in-process h2h: GPU Dojo VM vs cluster, same 2000 team pairs | G9-P4 @105.02M vs G9q @105.03M (T 0.5) | spd_h2h on the VM (T4, 4 vCPU, torch 2.15) | 4000 / 2000 | 52.4 [51.0, 53.8] [M] | - | agrees with the cluster's 51.8 [50.4, 53.2] (g9q-27); games not bit-identical | VM `~/val2000` |
-| fpc-01 | 2026-11-19 | fpcal arm H: raw cd@805 vs Foul Play fixed 800k it./state | raw cd@805 vs Foul Play @800k | fp9 harness (fixed iterations), seed 8800222 | 972 / 486 | 54.9 [51.9, 57.9] [M] | fpcal PREREG (5a68f926) | measured; L−H reading pending the L rerun | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt` |
+| fpc-01 | 2026-11-19 | fpcal arm H: raw cd@805 vs Foul Play fixed 800k it./state | raw cd@805 vs Foul Play @800k | fp9 harness (fixed iterations), seed 8800222 | 972 / 486 | 54.9 [51.9, 57.9] [M] | fpcal PREREG (5a68f926) | measured (reading: fpc-04) | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt` |
 | fpc-02 | 2026-11-19 | fpcal info: T (210k) − H (800k), paired | points | paired per team pair | 486 pairs | +3.1 [−0.9, +7.1] [M] | fpcal PREREG (5a68f926) | n.s.; slope −3.0 pts per 4× FP budget [−7.2, +1.3] | same |
+| fpc-03 | 2026-11-19 | fpcal arm L: raw cd@805 vs Foul Play fixed 50k it./state | raw cd@805 vs Foul Play @50k | fp9 harness (fixed iterations), seed 8800222 | 1000 / 500 | 61.3 [58.4, 64.2] [M] | fpcal PREREG (5a68f926) | measured | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt` |
+| fpc-04 | 2026-11-19 | **fpcal reading of record: L − H** | points, paired | paired per team pair | 486 pairs | **+6.4 [2.1, 10.7]** [M] | fpcal PREREG (5a68f926) | **SENSITIVE**: slope −3.2 pts per 4× Foul Play budget [−5.3, −1.1] | same |
 | cal-01 | 2026-11-09 | in-process vs real Showdown: G9p@25M vs P1 | in-process 65.9 +- 1.1 (6000 g) vs Showdown 65.7 +- 2.7 (1008 g) | spd_h2h vs netv2 h2h |  | 0.2 [-2.8, 3.2] [M] | - | in-process valid (detects biases >= ~4 points); pre-registered by wsp (file not located) | `memory benchmark-method.md; Showdown side /vol/bitbucket/fr1226/porygon-ws-netv2/runs/h2h-20261109-115722-741849/result.txt` |
 | cal-02 | 2026-11-09 | in-process vs real Showdown: P1 vs heuristic | in-process 78.8 +- 1.7 vs Showdown 80.0 +- 3.2 | spd_h2h vs Showdown |  | agree [M] | - | agree | `memory benchmark-method.md` |
 | cal-03 | 2026-11-11 | harness offset: raw G9p-cd vs pure search, Stage 3 harness vs netv2 harness | 48.05 (Stage 3, 500 pairs) vs 43.4 (netv2, 500 pairs) | two harnesses, different pairs |  | 4.65 [D] | - | compare arms within one harness | `ns-06 minus v2g9-15` |
