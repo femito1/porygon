@@ -197,15 +197,19 @@ lookahead2 on top of it?
 - **The in-process gain may not carry over** (re-freeze #1: an in-process 59.6% gave no hybrid gain). That is why
   stage 2 exists, and why the iterate step 1 measures with Showdown search.
 
-## 9. Implementation (after sign-off; ws/fastenv, frozen into the run dir at submission)
-- `scripts/fastenv/exit_gen.py`: fastenv self-play of the v2 net at T 0.5 (nnue_gen's batched-forward loop), the FIFO
-  reader that keeps G lines and the chosen (side, e), and gzip'd F2-style records.
-- `scripts/fastenv/exit_label.py`: replay, then lookahead2 (reusing `lookahead2_study.bench`'s per-position call,
-  run A only), then the label rows and the obs npz, with the parity check.
-- `scripts/fastenv/exit_shards.py`: the E and C shard sets from one label set.
-- Chain `scripts/fastenv/exit_pilot.sh` as a helper step: checks → smoke (200 games, 400 positions, parity, a 20-step
-  fine-tune, a 400-game h2h) → gen → label → shards → fine-tunes (netv2's pretrain at a pinned netv2 commit; its
-  outputs must load through the frozen fba02fb tree) → manipulation/value checks (+ dose retry) → T1–T3 →
-  `exit_verdict.py` → VERDICT.
-- Tests: the exact π_LA (gate cases, undefined Q, failures); √ and t_C = p; shard round-trip through
-  `pretrain.load_shard`; replay parity on a few fastenv games.
+## 9. Implementation (built 11-19 after the sign-off; ws/fastenv, frozen into `$C/runs/exit-la2/code`)
+- `scripts/fastenv/exit_la2.py` holds every step as a subcommand:
+  - `gen`: fastenv self-play using nnue_gen's batched-forward loop. One reader process per worker keeps the G lines
+    and the S-line prefixes, then picks the two positions and writes gzip'd F2-style records with the self-play p.
+  - `label`: replay, then the p-parity check, then the v2 obs and one lookahead2 call, then π_LA. Writes npz parts,
+    meta and drops, and resumes from what is already there.
+  - `shards`: the E and C shard sets.
+  - `check`: r, top-1 on moved positions, value log-loss and AUC.
+  - `eval`: porygon.fastenv_eval between two v2 nets.
+  - `verdict`: the PREREG rule.
+- `scripts/fastenv/exit_pilot.sbatch smoke|main`: the stage-1 chain, one helper job.
+  - Order: checks → smoke → gen → label → shards → fine-tunes → load checks → check (+ dose retry) → T1–T3 → VERDICT.
+  - The fine-tunes run the frozen fba02fb tree's pretrain.
+  - Self-play uses the November sets; the in-process tests use October (`NOTES.txt`).
+- Tests: `tests/test_exit_la2.py` covers the exact π_LA (the gate, an undefined Q, margin ∞), the √ transform and
+  t_C = p, KL, the verdict rule and the S-line parse. A login-node dry run on 4 games covered every subcommand.
