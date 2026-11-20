@@ -8,12 +8,16 @@
 #   rule   : analyze-bench on the pooled file -> margin_rule.delta -> DELTA (one number) + VERDICT.txt (r--) + RESULT;
 #   end    : cancels the helper job unless runs/la2-delta800/KEEP_HELPER exists.
 # Stage files in runs/la2-delta800/: STATUS, FAILED, DELTA, RESULT, VERDICT.txt. Code frozen into runs/la2-delta800/code.
+# Another net (the same rule; environment, the defaults are the la2-delta800 run): LA2D_STAGE (stage dir, holding
+# PREREG.txt / PREREG.md5 and code/), LA2D_NET + LA2D_NET_SHA, LA2D_LABEL (the net's name in VERDICT), LA2D_OUT (bench
+# dir), LA2D_PREFIX (prefix of the VERDICT.txt / RESULT names and of the STATUS lines, e.g. DELTA-), LA2D_CANCEL (1:
+# cancel the job at the end; 0 inside a slot chain, lookahead2_adopt.sbatch, which runs this with LA2_FROZEN=1).
 set -uo pipefail
 C=/vol/bitbucket/fr1226/porygon-ws-fastenv
 G=/vol/bitbucket/fr1226/gloria
 D=/vol/bitbucket/fr1226/porygon-ws-data
 PY=$G/.venv/bin/python
-S=$C/runs/la2-delta800
+S=${LA2D_STAGE:-$C/runs/la2-delta800}
 cd "$C" || exit 1
 if [ -z "${LA2_FROZEN:-}" ]; then
   mkdir -p "$S"
@@ -22,9 +26,11 @@ if [ -z "${LA2_FROZEN:-}" ]; then
   LA2_FROZEN=1 exec bash "$S/code/scripts/fastenv/lookahead2_delta.sh"
 fi
 CODE=$S/code
-NET=$C/nets/g9q-cd-805.03M.pt; NET_SHA=e93ac3f8a73590d905b150976287b261243f7861ce347f0c94baaf445b34b11f
+NET=${LA2D_NET:-$C/nets/g9q-cd-805.03M.pt}; NET_SHA=${LA2D_NET_SHA:-e93ac3f8a73590d905b150976287b261243f7861ce347f0c94baaf445b34b11f}
+LABEL=${LA2D_LABEL:-G9q-cd@805.03M}
+PFX=${LA2D_PREFIX:-}
 FROZEN=$C/frozen/netv2-fba02fb-20261110
-OUT=$C/lookahead2/study-cd805-20261116
+OUT=${LA2D_OUT:-$C/lookahead2/study-cd805-20261116}
 I=$C/netsearch/study-20261109
 ST=$CODE/scripts/fastenv/lookahead2_study.py
 SL="$D/datasets/searchlabels/records/gen9randombattle/part-0000[67].jsonl.gz"
@@ -33,7 +39,7 @@ HU2C="$D/datasets/human/records/gen9randombattle/part-0027[23].jsonl.gz"
 export PORYGON_GEN=9 PYTHONPATH=$G/.engine-gen9:$CODE/src NETV2_SRC=$FROZEN/src OMP_NUM_THREADS=1
 J=${SLURM_JOB_ID:-none}
 now() { date -u +%FT%TZ; }
-st() { echo "$(now) $*" | tee -a "$S/STATUS"; }
+st() { echo "$(now) ${PFX:+${PFX%-} }$*" | tee -a "$S/STATUS"; }
 fail() { st "FAILED at stage $1: $2"; echo "$(now) stage $1: $2 (job $J)" > "$S/FAILED"; exit 1; }
 trap 'fail signal "TERM/INT (time limit or scancel)"' TERM INT
 md5of() { md5sum < "$1" | cut -c1-32; }
@@ -92,15 +98,17 @@ PYEOF
 case $line in NONE*|*Error*|*Traceback*|"") fail rule "no δ* by the rule: $line" ;; esac
 DELTA=${line%% *}
 [[ "$DELTA" =~ ^[0-9]+\.?[0-9]*$ ]] || fail rule "δ* not a number: $line"
-{ echo "DELTA* = $DELTA for G9q-cd@805.03M by Bet 1's δ rule (pooled 1,403 study positions): $line"
+{ echo "DELTA* = $DELTA for $LABEL by Bet 1's δ rule (pooled 1,403 study positions): $line"
   echo "  net $NET sha256 $NET_SHA; bench $OUT; code $(cat "$CODE/COMMIT")"
-  cat "$OUT/bench-all.txt"; } > "$S/VERDICT.txt.tmp"
-mv -f "$S/VERDICT.txt.tmp" "$S/VERDICT.txt" && chmod a-w "$S/VERDICT.txt"
+  cat "$OUT/bench-all.txt"; } > "$S/${PFX}VERDICT.txt.tmp"
+mv -f "$S/${PFX}VERDICT.txt.tmp" "$S/${PFX}VERDICT.txt" && chmod a-w "$S/${PFX}VERDICT.txt"
 echo "$DELTA" > "$S/DELTA.tmp" && mv -f "$S/DELTA.tmp" "$S/DELTA" && chmod a-w "$S/DELTA"
-head -1 "$S/VERDICT.txt" > "$S/RESULT"
+head -1 "$S/${PFX}VERDICT.txt" > "$S/${PFX}RESULT"
 st "DELTA* = $DELTA ($line)"
 trap - TERM INT
-if [ ! -e "$S/KEEP_HELPER" ] && [ "$J" != none ]; then
+if [ "${LA2D_CANCEL:-1}" != 1 ]; then
+  st "chain done (job $J kept: LA2D_CANCEL=${LA2D_CANCEL})"
+elif [ ! -e "$S/KEEP_HELPER" ] && [ "$J" != none ]; then
   st "chain done; cancelling the helper job $J"
   scancel "$J"
 else
