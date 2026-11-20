@@ -1169,7 +1169,7 @@ g9etree() {  # p4tree + G9-P4 started (bridge) + MODE g9e + cd@1350 r-- + stub s
 esrc() {  # esrc JOB: a source in job JOB on an A40 (LOCAL wd-JOB; its first source runs the watchdog) -> RC|TOTAL|PY|PS|RESTART|TRAIN_ARGS
   local job=$1
   mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log"; for x in G9E G9Ecd100 G9Ecd250 G9P4 G9q2 G9q; do touch "$ROOTM/wd-$job/.toucher-$x"; done
-  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=g9; SLURM_JOB_ID=$job; SLURM_JOB_NAME=ws-netv2-g9
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=g9; export SLURM_JOB_ID=$job; SLURM_JOB_NAME=ws-netv2-g9
     SLURM_JOB_PARTITION=a40; SLURM_CPUS_ON_NODE=10; SLURM_MEM_PER_NODE=65536; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
     NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-46068}; NV2_PARK_HOLD_ROUNDS=${NV2_PARK_HOLD_ROUNDS:-}
     source "$ENVF"; echo "TOTAL=${TOTAL:-unset}|PY=${PY:-unset}|PS=${PORYGON_PS:-unset}|RESTART=$([ -e "$N/runs/g9/restart" ] && echo yes || echo no)|TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
@@ -1189,7 +1189,7 @@ yes_ 64a4 '[ -f "$N/runs/g9/HOLD" ] && ls "$P4J"/run/G9P4/GUARD_TRIPPED.second-*
 g9etree; W=$ROOTM/wd-1175374; GI=$N/runs/g9q-cd1350/final/01355036714.pt; o=$(esrc 1175374)
 check 64b "^RC=0\|TOTAL=1455036714\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|RESTART=yes\|TRAIN_ARGS=$EB --run-dir $W/run/G9E --pool-dir $W/run/G9E/pool $EO --resume $GI$" "$o"
 yes_ 64b2 '[ "$(cat "$N/runs/g9e/stub.calls")" = "park 1175374" ] && [ -f "$N/runs/g9p4-parked/PARKED.txt" ] && grep -q " $NV2_G9E_INIT_MD5 g9 1175374$" "$N/runs/g9e/G9E_STARTED" && [ ! -e "$N/runs/g9/HOLD" ] && [ ! -e "$N/runs/g9e/FAILED" ]'
-check 64b3 "G9E: first start: from cd@1350 .* cap 1455036714" "$(cat "$W/run/train.log")"; check 64b4 "queued successor .*afterany:1175374" "$(wdlog g9)"
+check 64b3 "G9E: first start: from cd@1350 .* cap 1455036714" "$(cat "$W/run/train.log")"; check 64b4 "1175374 nodex first start on nodex: .*MODE g9: g9e" "$(wdlog g9)"
 checkno 64b5 "frozen-best|--seed|P4-g9|G9P4|--cooldown|lr-schedule|ent-schedule|--kl-anchor-coef 0.1" "${o#*TRAIN_ARGS=}"
 o2=$(esrc 1175374); yes_ 64b6 '[ "$o2" = "$o" ] && [ "$(grep -c "first start" "$N/runs/g9e/STATUS")" = 1 ] && [ "$(grep -c park "$N/runs/g9e/stub.calls")" = 1 ]'
 rm -f "$W/.g9e-launches"
