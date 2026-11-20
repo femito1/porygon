@@ -1,0 +1,125 @@
+G9E PRE-REGISTRATION (final) — an exploiter against the deployment net cd@1350, on the A40 (run g9)
+Written 2026-11-20 by netv2 from the orchestrator's design docs/netv2/EXPLOITER-PREREG-DRAFT.md (ws/netv2 25e5efa, md5 8252472d).
+The decision rule, the step counts and the reading are the design's, unchanged. Cluster copy: runs/g9e/PREREG.txt (r--).
+C = /vol/bitbucket/fr1226/porygon-ws-netv2; paths below are relative to C.
+
+1. QUESTION
+How exploitable is the deployment net? Train an agent only against a frozen cd@1350 from cd@1350's own weights; measure how far
+above 50% it gets against cd@1350 (E1). A robust net closes the league / opponent-diversity route; an exploitable one gives a
+training opponent that punishes cd@1350's blind spots (stage 2 = its own PREREG).
+
+2. TRAINER CHECKS (src-24c633f = ws/netv2 24c633f, read-only; netv2's answers to the design's "netv2 checks")
+2a. --n-battles 0 with all battles vs the pool: ACCEPTED, no self-play share needed.
+    porygon/fastenv_v2.py build_env: pool share = pool_battles / (n_battles + pool_battles) = 16 / 16 = 1.0, so all 48 battles of
+    every fastenv worker are pool battles (round(48 x 1.0) = 48). --n-battles is read elsewhere only by the Showdown collector
+    (not used: --collector fastenv) and by the trainer's start log line. FastCollector._new_pool_battle draws r in [0, 1):
+    r < p_frozen = 1.0 always, so every pool battle plays a frozen net, uniform over <pool-dir>/frozen/*.pt. The lineage has
+    its own pool dir and no --frozen-best, so frozen/ holds only the copy of cd@1350 the trainer makes from --frozen
+    (frozen/01355036714.pt). Baselines (p 0) and snapshots are never drawn. Expected start line (stdout.log):
+    "fastenv: 8 workers x 48 battles (48 pool battles per worker: frozen net with p 1.0, baseline bot with p 0.0, ...)".
+    Consequence (not a change): each battle gives the learner one side instead of two, so steps/s will be below G9-P4's
+    ~1.55k (the 100M reading comes later than the design's 18-19 h if so; the step counts do not change).
+2b. The frozen opponent's sampling temperature: NOT settable. Trainer._opp_sample (used by _opp_act and _opp_act_many /
+    --stacked-opp) samples softmax(logits) at T 1.0; there is no flag. The opponent therefore plays at T 1.0 (the design's
+    fallback). The learner also samples at T 1.0 in training. The decisive reading E1 is at T 0.5 (both sides) as designed;
+    E1 at T 1.0 (the training condition) is recorded as information.
+2c. Optimizer state of runs/g9q-cd1350/final/01355036714.pt (md5 6cf40c0c): KEPT (no --reset-optimizer).
+    The file holds args, cfg, counters (steps 1,355,036,714; best 0.89), ema, optimizer (AdamW, 2 groups, 176 state entries,
+    stored lr 7e-06), state_dict (read 11-20 17:4xZ). The stored lr is never used: train.py sets g["lr"] = wsd_lr(steps, --lr,
+    ...) for every group before every update (constant 7e-5 here: no --cooldown-start, warm-up long past). AdamW's moments
+    (exp_avg, exp_avg_sq) do not depend on the lr, so the state does not "belong to the cooled lr"; keeping it is what every
+    G9q restart does. The counters (steps, best) and the EMA carry over too: G9E's steps continue from S0 = 1,355,036,714, and
+    the eval guard compares with the inherited best 0.89 (see 4).
+
+3. DESIGN: ONE CHANGE (the opponent distribution); argv
+Lineage G9E (run dir $LOCAL/run/G9E, mirrored to runs/g9/<job>/G9E) on the A40 (run g9, MODE g9e of netv2.env v21), PY =
+bin/py-src-24c633f, November sets for the collector (PORYGON_PS = porygon-ws-fastenv/ps-2026-11), eval anchor P1.
+Init (first start): runs/g9q-cd1350/final/01355036714.pt (md5 6cf40c0c). Later starts: G9E's own newest state.
+Effective trainer argv vs G9q's live argv (job 1174225, /proc/<pid>/cmdline read 11-20 17:11Z; argparse: the last value wins;
+G9E's paths for its first job 1175374):
+  --n-battles              G9q 16  ->  G9E 0                         THE CHANGE: no self-play
+  --frozen                 G9q runs/pretrain/P3-g9-s2.pt  ->  G9E runs/g9q-cd1350/final/01355036714.pt   THE CHANGE
+  --p-frozen               G9q 0.67  ->  G9E 1.0                     THE CHANGE
+  --p-baseline             G9q 0.08  ->  G9E 0                       THE CHANGE
+  --frozen-best            G9q (on)  ->  G9E (absent)                THE CHANGE (no frozen-best)
+  --kl-anchor-coef         G9q 0.1  ->  G9E 0                        THE CHANGE (no KL anchor; G9q's beta is 0 too since its 50M
+                                                                     decay: --kl-anchor P3 stays as a monitor, as in G9q)
+  --resume                 G9q its own final  ->  G9E cd@1350 (first start), then its own state
+  --total-steps            G9q 3000000000  ->  G9E 1455036714 (= S0 + 100M; 1605036714 = S0 + 250M after CONTINUE)
+  --guard-entropy-min      G9q 0.5  ->  G9E 0.35                     netv2 decision: the cooled init starts at entropy 0.533,
+                                                                     next to G9q's 0.5 floor; 0.35 = the floor of every cooled
+                                                                     or annealed branch (cd*, G9r, G9qent). A guard, not training.
+  --snapshot-every         G9q 2.5M (default)  ->  G9E 25000000      netv2 decision, disk only: snapshots are never drawn at
+                                                                     p-frozen 1.0 (2a); one per 25M is kept for stage 2
+  --fastenv-workers        G9q 28  ->  G9E 8                         the GPU's job (10 CPUs), as G9-P4 / G9q2 on this A40
+  --snapshot-cache         G9q 192  ->  G9E 512 (72 on a GPU < 40 GB) as G9-P4 on this A40 (one opponent net in use)
+  --snapshot-cache-cpu     G9q 400  ->  G9E 200                      as G9-P4 on this A40
+  --run-dir / --pool-dir / --ports: per job and lineage
+Same in both: --format gen9randombattle --pool-battles 16 --anchor runs/pretrain/P1-g9h-dmg-s2.pt --max-hours 70.5 --no-bf16
+--n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-ptop-max 0.6
+--kl-anchor runs/pretrain/P3-g9-s2.pt --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --collector fastenv
+--fastenv-battles 48 --no-overlap --stacked-opp; defaults (both): ent-coef 0.01, vf-coef 0.5, clip-range 0.1, max-grad-norm 0.5,
+gamma 0.9999, gae-lambda 0.754, rollout 40960, weight-decay 0.01, ema-decay 0.999, checkpoint-every 5M, eval-every 2.5M.
+Guard trips: no fallback (an arm): runs/g9e/TRIPPED + runs/g9/HOLD (<= 4 h, nv2_pause), then the same config.
+
+4. STEPS, COOLDOWN
+S0 = 1,355,036,714 (cd@1350's counter). "100M" = the trainer's own stop at --total-steps S0 + 100M = 1,455,036,714 (the first
+update at or past it); the branch step S = that save's step. Cooldown (cd800 / cd1350's recipe): from the branch point, lineage
+G9Ecd100, the same argv + --cooldown-start S --total-steps S + 5M --final-lr-frac 0.1 (cosine to x0.1), entropy floor 0.35;
+its final (steps >= S + 5M) is published r-- as runs/g9e/cd100/final/<steps>.pt (md5 in runs/g9e/cd100/FINAL.md5). The
+exploiter is compared cooled, like its opponent. On CONTINUE (5): G9E (uncooled, constant lr) trains on to S0 + 250M =
+1,605,036,714, then the same cooldown (G9Ecd250, runs/g9e/cd250/) and the second reading. Nothing else extends it.
+
+5. PRE-REGISTERED READING (fixed; in-process spd_h2h duplicate pairs; both sides T 0.5 unless stated; new seeds)
+Tool: scripts/netv2_spd.sh (afc36cbe; wsp's spd_h2h ee76994 vendored), --v2-src src-p2, 8 workers, cuda, gen9randombattle;
+2000 pairs = pair ids 0..1999 in 20 shards of 100 (the same pairs as one 2000-pair run; a cut-off reading resumes at the first
+missing shard). Estimate and 95% interval: spd_h2h merge (pair mean, 1.96 x sd / sqrt(2000); a void game scores 0.5).
+E1 (decides) at 100M + cooldown: A = G9E-cd@100M vs B = cd@1350 (6cf40c0c), seed 9150101.
+  lower 95% > 55%  => EXPLOITABLE (final)
+  upper 95% < 55%  => ROBUST (final: stop the route)
+  otherwise        => CONTINUE: train to 250M (+ cooldown) and read once more, same 2000 pairs and seed 9150101:
+                      lower > 55 => EXPLOITABLE, else ROBUST (final).
+Information (no decision), at each reading, after E1:
+  E1 at T 1.0 (both sides; the training condition), seed 9150102;
+  G9E-cd vs G9q's newest mirrored checkpoint at the reading (uncooled; runs/r1/*/G9q/checkpoints/ckpt_*.pt, chosen once per
+  reading, recorded in rK/NETS.txt), seed 9150103;
+  G9E-cd vs cd@805 (runs/g9q-cd800/final/00805029873.pt, d0c5b6cf), seed 9150104;
+  (specificity: a cd@1350-specific gain is large in E1 and small in the other two)
+  G9E's in-training eval (vs P1 / heuristic / max_power, every 2.5M) at each 25M mark after S0 (the first eval at or past it).
+Consequence (design): EXPLOITABLE => stage 2 needs its own PREREG; ROBUST => the league route is closed; either way the A40 is
+for main (runs/g9e/DONE => the g9 job HOLDs round after round; main writes runs/g9/MODE, then rm runs/g9/HOLD).
+
+6. THE SWITCH AND THE MECHANISM (no agent needed)
+Switch: at the natural hand-over of the A40. netv2.env v21 is deployed 11-20 and runs/g9/MODE = g9e is written then; v21 maps
+MODE g9e to g9p4 in job 1173283 (G9-P4's last job: unchanged, ends 11-21 16:41:46Z, its deadline watch stops G9-P4 at ~16:27Z,
+saves and mirrors). Its queued successor 1175374 (a40, 10 CPUs, afterany) sources v21 at its start and runs G9E. Chosen over an
+in-allocation INLINE switch now because it touches no live trainer (no SIGINT, no bridge) and needs no agent; the cost is ~1 day.
+G9-P4 is parked first, as a POINTER park (scripts/netv2_g9e/park-p4.sh; the cluster disk is ~full, so nothing is copied): its
+newest mirrored state (final_model.pt, else its newest 5M checkpoint) must load with optimizer + counters at the saved step and
+no other ws-netv2-g9 job may be running; then runs/g9p4-parked/{PARKED.txt, POINTER, MD5SUMS}. v19+'s park guard HOLDs MODE g9p4
+while PARKED.txt exists; resuming G9-P4 = main / user decision (move runs/g9p4-parked aside, MODE g9p4). G9-P4 is at ~510M on
+11-20 17:10Z at ~1.55k sps, so its 1e9 cap is not reached first (~645M at the hand-over).
+The stage machine lives in netv2.env v21 (nv2_g9e_hold, inside v17's park guard) and runs at every source of every g9 job, so
+each successor picks up where the last job stopped (state in runs/g9e/ and the lineage mirrors):
+  park G9-P4 -> first start (runs/g9e/G9E_STARTED) -> train to the cap -> branch point (runs/g9e/cdK/BRANCH, r-- copy of G9E's
+  final at the cap) -> cooldown lineage G9EcdK -> publish its final -> readings: scripts/netv2_g9e/read.sh K, synchronously in
+  the g9 job while no trainer runs (~4 x 2000 pairs, ~40-60 min on the A40's 10 CPUs + GPU; a 45-min-watchdog toucher runs)
+  -> runs/g9e/rK/READING.txt (r--, written as soon as E1 is in) + INFO.txt + DONE, runs/g9e/READING.txt (r--) ->
+  CONTINUE: G9E trains on; FINAL: runs/g9e/DONE => HOLD rounds.
+The restart flag runs/g9/restart is re-armed at every G9E / cooldown launch, so the trainer's stop at a cap re-enters the
+stage machine inside the allocation (not after the job's deadline watch or a /tmp stop; a 5th launch within 30 min in one job
+= crash loop => FAILED). STATUS: runs/g9e/STATUS (every stage), runs/g9e/rK/STATUS. Failure: runs/g9e/FAILED (any stage:
+park, init, branch, publish, reading, crash loop) => the g9 job HOLDs round after round until main fixes it and removes FAILED
+(and runs/g9/HOLD). Note (existing watchdog rule): a successor that starts while runs/g9/HOLD exists exits at once, so a HOLD
+must be resolved before the holding job's 3-day end or the A40 allocation is released.
+
+7. FILES (md5 = first 8 hex)
+netv2.env v21 (live after deploy; r-- copy netv2.env.v21-g9e; backup netv2.env.bak-<stamp>; repo scripts/netv2_g9e/netv2.env.v21)
+scripts/netv2_g9e/park-p4.sh and read.sh (r--, md5s pinned in v21); mock-g9e.sh (laptop); PREREG.txt (this file, repo copy).
+The md5s of v21 and the two scripts are recorded in runs/g9e/ARMED.txt at deploy and in the ws/netv2 commit.
+Outputs: runs/g9e/{STATUS, FAILED, G9E_STARTED, TRIPPED, cd100/, cd250/, r100/, r250/, READING.txt, DONE}, runs/g9p4-parked/.
+
+8. EXPECTED TIMES (estimates; the readings' own times are in their files)
+G9E first start ~11-21 17:00-18:30Z (cold node start); 100M at ~1.1-1.5k sps = ~19-25 h => cap ~11-22 14:00Z-11-22 20:00Z;
+cooldown 5M ~1 h; readings ~1 h => runs/g9e/READING.txt (E1@100M) ~11-22 16:00Z-23:00Z. CONTINUE adds 150M (~28-38 h) +
+cooldown + readings => ~11-24.

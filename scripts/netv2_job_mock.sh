@@ -65,9 +65,13 @@ if os.environ.get("MOCK_WAIT") == "1":
 os.makedirs(rundir, exist_ok=True); os.makedirs(pooldir, exist_ok=True)
 with open(rundir + "/final_model.pt.tmp", "w") as f: f.write("trained-from:" + rd(resume) + "\n")
 os.replace(rundir + "/final_model.pt.tmp", rundir + "/final_model.pt")
+ss, q = "99,000,000", f"{M}/save-steps-{jid}"  # S19 (v21): a queue of save steps per job (one line per trainer call)
+if os.path.exists(q):
+    ls = open(q).read().split()
+    if ls: ss = ls[0]; open(q, "w").write("\n".join(ls[1:]))
 with open(rundir + "/train.log", "a") as f:  # the real trainer's start / update / save lines (the park script reads them)
-    f.write("2026-11-11 21:30:00 v2 trainer: mock, resume=" + resume + "\n2026-11-11 21:40:00 upd 9 steps 99,000,000 (+43000) sps 2200\n"
-            "2026-11-11 21:40:10 saved final_model.pt at 99,000,000 steps\n")
+    f.write("2026-11-11 21:30:00 v2 trainer: mock, resume=" + resume + "\n2026-11-11 21:40:00 upd 9 steps " + ss + " (+43000) sps 2200\n"
+            "2026-11-11 21:40:10 saved final_model.pt at " + ss + " steps\n")
 EOF
   # sbatch / squeue / scontrol: as before (log only) unless $MOCK/squeue.txt exists (the v12 watchdog scenarios S15):
   # then the scripts/netv2_wd_stubs versions (a queue in squeue.txt; sbatch prints the cluster's banner and registers
@@ -128,7 +132,7 @@ job() {  # job RUN_NAME JOBID CPUS PARTITION NAME [restart] -> runs the job scri
   ( cd "$M/nv2" && env -i HOME="$HOME" USER="${USER:-nand}" PATH="$M/bin:/usr/bin:/bin" MOCK="$M" NV2="$M/nv2" PY="$M/bin/python" \
       TMPDIR="$M/tmp" SLURM_SUBMIT_DIR="$M/nv2" SLURM_JOB_ID="$id" SLURM_JOB_NAME="$name" SLURM_JOB_PARTITION="$part" \
       SLURM_CPUS_ON_NODE="$cpus" SLURM_CPUS_PER_TASK=6 SLURM_MEM_PER_NODE="$([ "$part" = a16 ] && echo 65536 || echo 98304)" \
-      NODE_BIN=/nonexistent NV2_PARK_PY="$M/bin/parkpy" NV2_SWAP_SLEEP=1 NV2_SWAP_ITERS="${MOCK_SWAP_ITERS:-240}" ${MOCK_END:+SLURM_JOB_END_TIME=$MOCK_END NV2_DEADLINE_POLL_S=1 NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} MOCK_WAIT="${MOCK_WAIT:-}" ${MOCK_HOLD_ROUNDS:+NV2_G9T_HOLD_ROUNDS=$MOCK_HOLD_ROUNDS NV2_HOLD_ITERS=0} NV2_TMPWATCH_POLL_S="${MOCK_POLL:-0}" NV2_WD_RETRY_S=0 ${MOCK_POLL:+NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} \
+      NODE_BIN=/nonexistent NV2_PARK_PY="$M/bin/parkpy" NV2_SWAP_SLEEP=1 NV2_SWAP_ITERS="${MOCK_SWAP_ITERS:-240}" ${MOCK_END:+SLURM_JOB_END_TIME=$MOCK_END NV2_DEADLINE_POLL_S=1 NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} MOCK_WAIT="${MOCK_WAIT:-}" ${MOCK_EXTRA_ENV:-} ${MOCK_PARK_ROUNDS:+NV2_PARK_HOLD_ROUNDS=$MOCK_PARK_ROUNDS} ${MOCK_HOLD_ROUNDS:+NV2_G9T_HOLD_ROUNDS=$MOCK_HOLD_ROUNDS NV2_HOLD_ITERS=0} NV2_TMPWATCH_POLL_S="${MOCK_POLL:-0}" NV2_WD_RETRY_S=0 ${MOCK_POLL:+NV2_DEADLINE_PAT=bin/python.-u.-m.porygon.v2.train} \
       setsid -w bash -c 'echo $$ > "$MOCK/sid-$SLURM_JOB_ID"; exec bash "$MOCK/nv2/scripts/slurm_train_v2.sbatch" "$1"' _ "$run" > "$M/job-$id.out" 2>&1 )
   local rc=$? sid; sid=$(cat "$M/sid-$id" 2>/dev/null); echo "exit $rc" > "$M/rc-$id"
   if [ -n "$sid" ]; then /bin/sleep 1; pkill -s "$sid" 2>/dev/null; fi  # leftovers of this mock job only (its own session)
@@ -648,6 +652,34 @@ if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ] && [ -z "${MOCK_S
   job g9 1300300 10 a40 ws-netv2-g9 > /dev/null
   expect "S18c no trainer call, exit 0, no sbatch" "^0 exit 0 0$" "$(cnt ws-netv2-1300300 "$M/calls.log") $(job_rc 1300300) $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0)"
   rm -f "$G/HOLD"; chmod u+w "$P4"; rm -rf "$P4" "$M/nv2/runs/g9p4" "$M/nv2/runs/g9p4-parked" "$M/nv2/runs/g9q2-parked"
+  # S19 (v21, 2026-11-20; runs/g9e/PREREG.txt; skipped with MOCK_SKIP_V21=1): the G9E stage machine end to end through
+  # the real job script in ONE fresh A40 job 1175374 with MODE g9e (no restart flag at the start: v21 re-arms it at every
+  # launch): park (stub) -> G9E from cd@1350 to S0 + 100M -> cooldown G9Ecd100 from the branch point -> reading r100 (stub
+  # CONTINUE) -> G9E on to S0 + 250M -> cooldown G9Ecd250 -> reading r250 (stub ROBUST) -> DONE => HOLD rounds (mock cap: exit 3)
+  if [ -z "${MOCK_SKIP_V21:-}" ]; then
+    echo "== S19: a fresh A40 job 1175374 with MODE g9e: the whole G9E pipeline in one allocation (stub saves / scripts)"
+    p4tree18; echo g9e > "$G/MODE"; echo "2026-11-16T21:10:00 x g9 1173274" > "$M/nv2/runs/g9p4/G9P4_STARTED"; echo 46068 > "$M/gpu_mib-1175374"
+    GI=$M/nv2/runs/g9q-cd1350/final/01355036714.pt; mkdir -p "$(dirname "$GI")" "$M/nv2/scripts/netv2_g9e" "$M/nv2/runs/g9e"; echo cd1350 > "$GI"; chmod a-w "$GI"
+    SE=$M/nv2/scripts/netv2_g9e
+    printf '#!/bin/bash\necho "park $SLURM_JOB_ID" >> "$NV2/runs/g9e/stub.calls"; mkdir -p "$NV2/runs/g9p4-parked"; echo parked > "$NV2/runs/g9p4-parked/PARKED.txt"\n' > "$SE/park-p4.sh"
+    printf '#!/bin/bash\nk=$1; echo "read $k" >> "$NV2/runs/g9e/stub.calls"; R=$NV2/runs/g9e/r$k; mkdir -p "$R"; v=CONTINUE; [ "$k" = 250 ] && v=ROBUST\nprintf "hdr\\nE1@%%sM VERDICT %%s\\n" "$k" "$v" > "$R/READING.txt"; printf "hdr\\nFINAL: %%s\\n" "$v" > "$NV2/runs/g9e/READING.txt"; touch "$R/DONE"; [ "$v" = CONTINUE ] || touch "$NV2/runs/g9e/DONE"\n' > "$SE/read.sh"
+    chmod a-w "$SE"/*.sh; printf '1,455,040,000\n1,460,081,000\n1,605,050,000\n1,610,090,000\n' > "$M/save-steps-1175374"
+    rm -f "$M/sbatch.log" "$G/restart"
+    MOCK_HOLD_ROUNDS=1 MOCK_PARK_ROUNDS=1 MOCK_EXTRA_ENV="NV2_G9E_INIT_MD5=$(md5sum < "$GI" | cut -c1-8) NV2_G9E_PARK_MD5=$(md5sum < "$SE/park-p4.sh" | cut -c1-8) NV2_G9E_READ_MD5=$(md5sum < "$SE/read.sh" | cut -c1-8)" job g9 1175374 10 a40 ws-netv2-g9 > /dev/null
+    c9=$(grep "ws-netv2-1175374/" "$M/calls.log"); sed 's/^/    /' <<< "$c9" | cut -c1-200; L9=$T/ws-netv2-1175374/run; E9=$M/nv2/runs/g9e
+    expect "S19 4 trainer calls; the job ends in the finished HOLD (mock cap: exit 3)" "^4 exit 3$" "$(cnt ws-netv2-1175374 "$M/calls.log") $(job_rc 1175374)"
+    expect "S19 call 1: G9E from cd@1350, wrapper, November sets" "^call resume=$GI \[cd1350\] run_dir=$L9/G9E pool_dir=$L9/G9E/pool .*anchor=$P1 ps=$NOV $PP24" "$(sed -n 1p <<< "$c9")"
+    expect "S19 call 2: G9Ecd100 from the branch point (G9E's save at the cap)" "^call resume=$E9/cd100/branch-point-01455040000.pt \[trained-from:cd1350\] run_dir=$L9/G9Ecd100 " "$(sed -n 2p <<< "$c9")"
+    expect "S19 call 3: G9E on from its own save at the 100M cap" "^call resume=$L9/G9E/final_model.pt \[trained-from:cd1350\] run_dir=$L9/G9E " "$(sed -n 3p <<< "$c9")"
+    expect "S19 call 4: G9Ecd250 from the 250M branch point" "^call resume=$E9/cd250/branch-point-01605050000.pt \[trained-from:trained-from:cd1350\] run_dir=$L9/G9Ecd250 " "$(sed -n 4p <<< "$c9")"
+    a9=$(grep '^1175374 ' "$M/argv.log")
+    expect "S19 argv 1: the exploiter recipe, --total-steps S0 + 100M" "^1175374 -u -m porygon.v2.train .* --total-steps 1455036714 --max-hours 70.5 --no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.35 --guard-ptop-max 0.6 --kl-anchor $M/nv2/runs/pretrain/P3-g9-s2.pt --kl-anchor-coef 0 .* --frozen $GI --p-frozen 1.0 --p-baseline 0 --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 0 --pool-battles 16 --run-dir $L9/G9E --pool-dir $L9/G9E/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --snapshot-every 25000000 --resume $GI$" "$(sed -n 1p <<< "$a9")"
+    expect "S19 argv 2: cooldown 5M cosine x0.1 from the branch step" " --total-steps 1460040000 .* --cooldown-start 1455040000 --final-lr-frac 0.1 --resume $E9/cd100/branch-point-01455040000.pt$" "$(sed -n 2p <<< "$a9")"
+    expect "S19 argv 3 / 4: cap S0 + 250M, then its cooldown" "--total-steps 1605036714 .* --resume $L9/G9E/final_model.pt \| .*--total-steps 1610050000 .* --cooldown-start 1605050000 --final-lr-frac 0.1 --resume $E9/cd250/branch-point-01605050000.pt$" "$(sed -n 3p <<< "$a9") | $(sed -n 4p <<< "$a9")"
+    expect "S19 stubs: one park, the two readings in order; finals published r--; DONE + HOLD; one sbatch" "^park 1175374 read 100 read 250 \| r-- r-- \| DONE HOLD \| 1$" "$(tr '\n' ' ' < "$E9/stub.calls")| $(stat -c %A "$E9"/cd100/final/01460081000.pt | cut -c2-4) $(stat -c %A "$E9"/cd250/final/01610090000.pt | cut -c2-4) | $([ -f "$E9/DONE" ] && echo DONE) $([ -f "$G/HOLD" ] && echo HOLD) | $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0)"
+    expect "S19 train.log: the finished HOLD round" "MODE g9e is finished \(FINAL: ROBUST\): the A40 is for main, round 1: HOLD" "$(cat "$G"/*-1175374/train.log 2>/dev/null; cat "$L9/train.log" 2>/dev/null)"
+    chmod -R u+w "$M/nv2/runs/g9e" "$M/nv2/scripts/netv2_g9e" "$M/nv2/runs/g9q-cd1350"; rm -rf "$M/nv2/runs/g9e" "$M/nv2/scripts/netv2_g9e" "$M/nv2/runs/g9q-cd1350" "$M/nv2/runs/g9p4-parked" "$M/save-steps-1175374" "$G/HOLD" "$G/restart"
+  fi
 fi
 rm -f "$M"/pending-inline* "$M"/gpu_mib-* "$M"/break-*
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
