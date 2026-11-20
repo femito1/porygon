@@ -30,14 +30,15 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen4 | raw v2 network R1b-F@300M, no search | 55.6 [51.5, 59.7] (400, not confirmed at 1000) [M] | — | v2g4-10 |
 | gen4 | raw v1 network @600M (T 0.5) | 46.2 [42.4, 50.0] (600) [M] | — | v1-25 |
 | gen9 | raw v2 network G9q-cd@605M | **58.8 [55.9, 61.7]** (1000, CONFIRMED) [M] | 52.5 [49.6, 55.4] (1000, not confirmed) | g9q-17/16 |
-| gen9 | raw v2 network G9q-cd@805M (current deployment net) | **57.8 [55.0, 60.6]** (1000, CONFIRMED) [M]; 56.90 [53.94, 59.86] on the Stage 3 harness | **55.5 [52.7, 58.3]** (1000, Milestone 1 CONFIRMED) | g9q-24/23, ns-19 |
-| gen9 | **lookahead2 on G9q-cd@805M (δ 0.005, K 8): the gen9 benchmark bot since 11-17 (LA2-H ADOPTED)** | **58.20 [55.29, 61.11]** (1000) [M]; paired gain over its raw net +1.30 [−2.71, +5.31] NOT SHOWN | — (vs its raw net on cd@605: 53.17 [50.59, 55.73], Bet 1 GO); vs the previous benchmark hybrid **54.00 [51.18, 56.82]** | ns-18/20/14/24 |
+| gen9 | raw v2 network G9q-cd@805M (deployment net 11-16 → 11-19) | **57.8 [55.0, 60.6]** (1000, CONFIRMED) [M]; 56.90 [53.94, 59.86] on the Stage 3 harness | **55.5 [52.7, 58.3]** (1000, Milestone 1 CONFIRMED) | g9q-24/23, ns-19 |
+| gen9 | **lookahead2 on G9q-cd@1350M (δ 0.0075, K 8): the gen9 benchmark bot since 11-19 (LA2-1350 ADOPTED, non-inferior)** | not yet measured (next: fixed 200k Foul Play iterations) | vs lookahead2 on cd@805 51.20 [48.36, 54.04] (1000) | ns-26 |
+| gen9 | raw v2 network G9q-cd@1350M (deployment net since 11-19) | **59.1 [56.2, 62.0]** (906, CONFIRMED) [M] | beats cd@805 in-process 52.05 [50.45, 53.62] (MUE) | g9q-30/29 |
+| gen9 | lookahead2 on G9q-cd@805M (δ 0.005, K 8): the gen9 benchmark bot 11-17 → 11-19 (LA2-H ADOPTED) | **58.20 [55.29, 61.11]** (1000) [M]; paired gain over its raw net +1.30 [−2.71, +5.31] NOT SHOWN | — (vs its raw net on cd@605: 53.17 [50.59, 55.73], Bet 1 GO); vs the previous benchmark hybrid **54.00 [51.18, 56.82]** | ns-18/20/14/24 |
 | gen9 | hybrid H(δ 0.0212) + G9p-cd@104.71M (benchmark bot 11-11 → 11-17) | 56.2 [53.4, 59.0] (1000) [M] | 55.0 [52.0, 58.0] (1000) | ns-07/05 |
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
 
 Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7% (gen9); a Jaxcalibur-level bot ≈ 75%
-(`.orchestra/research/REPORT.md`). **Pending at compilation:** ExIt-LA2 stage 1 (`$F/runs/exit-la2/VERDICT.txt`), LA2-1350 (lookahead2 on cd@1350 vs the
-benchmark bot, `$F/runs/la2-1350/VERDICT.txt`), G9-P4 later readings. F1350 done (g9q-30), R1350 (g9q-29). Done since: fpcal (fpc-02…04), scale gate T1 (ns-25).
+(`.orchestra/research/REPORT.md`). **Pending at compilation:** G9-P4 later readings. Done since: ExIt-LA2 stage 1 HARMFUL (ns-27…29), LA2-1350 ADOPTED (ns-26), F1350 done (g9q-30), R1350 (g9q-29). Done since: fpcal (fpc-02…04), scale gate T1 (ns-25).
 `$F` = `/vol/bitbucket/fr1226/porygon-ws-fastenv`, `$C` = `/vol/bitbucket/fr1226/porygon-ws-netv2`.
 
 ## Results by theme
@@ -308,7 +309,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | bn-01 | 2026-11-18 | BIGNET E1A: 2×-wide BC net (D384L4, 11.6M) vs BC-P4 (5.8M), same data / recipe / steps | D384L4 vs BC-P4 (T 0.5) | spd_h2h on the GPU Dojo VM, duplicate pairs | 8000 / 4000 | 50.13 [49.09, 51.17] [M] | BIGNET-PREREG.md (4597222b) | NO DIFFERENCE SHOWN ⇒ stop at this size; held-out policy CE 1.13692 vs 1.13794 (−0.001) | `docs/thesis/data/bignet/RESULT.txt` |
 | bn-02 | 2026-11-18 | BIGNET E2A (info): D384L4 at matched T4 step time vs BC-P4 | D384L4 @97k steps vs BC-P4 | same | 4000 / 2000 | 47.99 [46.56, 49.41] [M] | BIGNET-PREREG.md (4597222b) | bigger worse at matched compute | same |
 
-### Network + search: hybrid, V3, lookahead2, NNUE, deepen (19 rows)
+### Network + search: hybrid, V3, lookahead2, NNUE, deepen (23 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -332,6 +333,10 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | ns-22 | 2026-11-17 | scale gate T3 (info): raw net vs deepen D1 | raw cd@805 vs deepen D1 | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) (helper) | 400 / 200 | 46.17 [40.99, 52.01] [M] | SCALE-GATE-PREREG.md (9fd3960d) | FUTILITY (naive 44.00 [39.80, 48.20]) | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/scale-gate/VERDICT-B.txt` |
 | ns-24 | 2026-11-17 | LA2-H: lookahead2 vs the benchmark hybrid | lookahead2 on G9q-cd@805M (δ 0.005, K 8) vs H(δ 0.0212) + G9p-cd@104.71M | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) | 1000 / 500 | **54.00 [51.18, 56.82]** [M] | LA2-H-PREREG.md (ee8f1bd6) | **ADOPTED**: lookahead2 = gen9 benchmark bot | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-h/VERDICT.txt` |
 | ns-25 | 2026-11-19 | scale gate T1 (decides): deepen D4 vs D1 | D4 (4,096 extra leaves) vs D1 (1,024), cd@805 | fastenv Stage 3 slot harness | 1200 / 600 | 51.72 [49.16, 54.40] [M] (median-unbiased) | SCALE-GATE-PREREG.md (9fd3960d) | **FUTILITY ⇒ FLAT: stop the route** | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/scale-gate/VERDICT.txt` |
+| ns-26 | 2026-11-19 | LA2-1350 adoption: lookahead2 on cd@1350 (δ* 0.0075) vs the benchmark bot lookahead2 on cd@805 | lookahead2 cd@1355.04M vs lookahead2 cd@805.03M | fastenv slot harness (Showdown), duplicate pairs | 1000 / 500 | 51.20 [48.36, 54.04] [M] | LA2-1350-PREREG.md (d2308e2e) | ADOPTED (NON-INFERIOR, margin 3) | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-1350/VERDICT.txt` |
+| ns-27 | 2026-11-19 | ExIt-LA2 T1: cd@805 fine-tuned toward lookahead2's played policy (E) vs own-policy fine-tune (C) | E vs C (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 15848 / 7924 | 48.17 [47.47, 48.87] [M] | EXIT-LA2-PREREG.md (a8d0fb5d) | HARMFUL | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/exit-la2/VERDICT.txt` |
+| ns-28 | 2026-11-19 | ExIt-LA2 T2: E vs unmodified cd@805 (S) | E vs S (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 15834 / 7917 | 48.14 [47.45, 48.83] [M] | EXIT-LA2-PREREG.md (a8d0fb5d) | HARMFUL | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/exit-la2/VERDICT.txt` |
+| ns-29 | 2026-11-19 | ExIt-LA2 T3 (info): C vs S | C vs S (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 7854 / 3927 | 49.41 [48.46, 50.37] [M] | EXIT-LA2-PREREG.md (a8d0fb5d) | info | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/exit-la2/VERDICT.txt` |
 | la2-len1 | 2026-11-19 | LA2-FP by game length (post hoc, informational) | lookahead2 − raw vs Foul Play, paired, by team-pair mean length | LA2-FP games | 500 pairs | short (<25 turns, 133 pairs) −3.0 ± 7.7; long (367) +2.9 ± 4.7; short − long −5.9 ± 9.1 [M] | not pre-registered | lookahead2 does not fix the short-game weakness | `/vol/bitbucket/fr1226/porygon-ws-fastenv/analysis/la2-fp-by-length/result.txt` |
 | ns-23 | 2026-11-17 | deepen microbench: wall time per decision at budget 1x / 4x / 8x | deepen b1024 / b4096 / b8192 vs lookahead2 0.94 s | 120 positions |  | 5.0 [M] | - | info | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/dbench2-20261117/RESULT` |
 
