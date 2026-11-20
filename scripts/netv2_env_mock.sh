@@ -1150,6 +1150,93 @@ q2tree; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300310 w
 p4tree; W=$ROOTM/wd-1300200; p4bridge; o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1300200 ws-netv2-g9); check 63d "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--run-dir $W/run/G9P4 " "$o"
 chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
+if [ -z "${MOCK_SKIP_V21:-}" ] && [ -z "${MOCK_SKIP_V20:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 64 (v21, 2026-11-20; runs/g9e/PREREG.txt): MODE g9e = the exploiter G9E on the A40: job 1173283 keeps G9-P4; the
+# successor parks G9-P4 (stub park-p4.sh), first start from cd@1350 vs it only; cap 100M -> cooldown branch -> publish ->
+# reading (stub read.sh) -> CONTINUE -> 250M -> cooldown -> FINAL => HOLD rounds (MODE re-read); FAILED / bad init /
+# park failure / no wrapper => HOLD; guard trip => TRIPPED + HOLD, same args; restart re-arm, deadline, crash-loop cap.
+g9etree() {  # p4tree + G9-P4 started (bridge) + MODE g9e + cd@1350 r-- + stub scripts (md5 pinned through the mock overrides)
+  p4tree; W=$ROOTM/wd-1300200; p4bridge; echo g9e > "$N/runs/g9/MODE"; rm -f "$N/runs/g9/restart"
+  echo "2026-11-16T21:10:00 $(cat "$N/runs/g9p4/P4.md5") g9 1173274" > "$N/runs/g9p4/G9P4_STARTED"  # G9-P4 started long ago
+  GI=$N/runs/g9q-cd1350/final/01355036714.pt; mkdir -p "$N/runs/g9q-cd1350/final" "$N/scripts/netv2_g9e"; rm -f "$GI"; echo cd1350 > "$GI"; chmod a-w "$GI"
+  export NV2_G9E_INIT_MD5=$(md5sum < "$GI" | cut -c1-8)
+  S=$N/scripts/netv2_g9e; chmod -R u+w "$S"; rm -f "$S"/*
+  printf '#!/bin/bash\necho "park $SLURM_JOB_ID" >> "$NV2/runs/g9e/stub.calls"\nif [ -n "${MOCK_PARK_FAIL:-}" ]; then echo "$(date) park-p4: stub failure" >> "$NV2/runs/g9e/FAILED"; exit 1; fi\nmkdir -p "$NV2/runs/g9p4-parked"; echo "G9P4 PARKED (stub)" > "$NV2/runs/g9p4-parked/PARKED.txt"\n' > "$S/park-p4.sh"
+  printf '#!/bin/bash\nk=$1; echo "read $k $SLURM_JOB_ID" >> "$NV2/runs/g9e/stub.calls"; R=$NV2/runs/g9e/r$k; mkdir -p "$R"\nv=$(cat "$NV2/runs/g9e/stub.verdict$k"); echo hdr > "$R/READING.txt"; echo "E1@${k}M VERDICT $v (stub)" >> "$R/READING.txt"\n{ echo hdr; if [ "$v" = CONTINUE ]; then echo "INTERIM: CONTINUE"; else echo "FINAL: $v"; fi; } > "$NV2/runs/g9e/READING.txt"\ntouch "$R/DONE"; if [ "$v" != CONTINUE ]; then echo "FINAL: $v" > "$NV2/runs/g9e/DONE"; fi\n' > "$S/read.sh"
+  chmod a-w "$S"/*.sh; export NV2_G9E_PARK_MD5=$(md5sum < "$S/park-p4.sh" | cut -c1-8) NV2_G9E_READ_MD5=$(md5sum < "$S/read.sh" | cut -c1-8)
+  mkdir -p "$N/runs/g9e"; rm -rf "$N/runs/g9p4-parked"
+}
+esrc() {  # esrc JOB: a source in job JOB on an A40 (LOCAL wd-JOB; its first source runs the watchdog) -> RC|TOTAL|PY|PS|RESTART|TRAIN_ARGS
+  local job=$1
+  mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log"; for x in G9E G9Ecd100 G9Ecd250 G9P4 G9q2 G9q; do touch "$ROOTM/wd-$job/.toucher-$x"; done
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=g9; SLURM_JOB_ID=$job; SLURM_JOB_NAME=ws-netv2-g9
+    SLURM_JOB_PARTITION=a40; SLURM_CPUS_ON_NODE=10; SLURM_MEM_PER_NODE=65536; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-46068}; NV2_PARK_HOLD_ROUNDS=${NV2_PARK_HOLD_ROUNDS:-}
+    source "$ENVF"; echo "TOTAL=${TOTAL:-unset}|PY=${PY:-unset}|PS=${PORYGON_PS:-unset}|RESTART=$([ -e "$N/runs/g9/restart" ] && echo yes || echo no)|TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
+  echo "RC=$?|$(grep '^TOTAL=' "$ROOTM.wdout" || true)"
+}
+saved() { mkdir -p "$1"; echo "${3:-net}" > "$1/final_model.pt"; echo "2026-11-22 10:00:00 saved final_model.pt at $2 steps" >> "$1/train.log"; }
+EB="--no-bf16 --n-epochs 3 --batch-size 4096 --lr 7e-5 --eval-async --guard-anchor-drop 0.15 --guard-entropy-rel 1.5 --guard-entropy-min 0.35 --guard-ptop-max 0.6 --kl-anchor $P3 --kl-anchor-coef 0 --kl-anchor-decay-steps 50000000 --critic-warmup-steps 1000000 --frozen $N/runs/g9q-cd1350/final/01355036714.pt --p-frozen 1.0 --p-baseline 0 --collector fastenv --fastenv-workers 8 --fastenv-battles 48 --no-overlap --n-battles 0 --pool-battles 16"
+EO="--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --snapshot-every 25000000"
+# 64a: job 1173283 (G9-P4's last job) with MODE g9e = MODE g9p4 exactly (a restart in place); no G9E state, no restart flag
+g9etree; P4J=$ROOTM/wd-1173283; mkdir -p "$P4J/run/G9P4/pool"; touch "$P4J/.nv2-watchdog"; echo p4f > "$P4J/run/G9P4/final_model.pt"
+o4=$(echo g9p4 > "$N/runs/g9/MODE"; esrc 1173283); o=$(echo g9e > "$N/runs/g9/MODE"; esrc 1173283)
+yes_ 64a '[ "$o" = "$o4" ] && [ -n "$o" ]'; check 64a2 "^RC=0\|TOTAL=1000000000\|.*RESTART=no\|TRAIN_ARGS=.*--run-dir $P4J/run/G9P4 .*--resume $P4J/run/G9P4/final_model.pt$" "$o"
+yes_ 64a3 '[ ! -e "$N/runs/g9e/G9E_STARTED" ] && [ ! -e "$N/runs/g9e/stub.calls" ] && [ ! -e "$N/runs/g9p4-parked" ] && [ ! -e "$N/runs/g9/HOLD" ]'
+echo "collapse: entropy" > "$P4J/run/G9P4/GUARD_TRIPPED"; echo "1 x" > "$N/runs/g9p4/FU.started"; o=$(esrc 1173283)
+yes_ 64a4 '[ -f "$N/runs/g9/HOLD" ] && ls "$P4J"/run/G9P4/GUARD_TRIPPED.second-* > /dev/null 2>&1'; rm -f "$N/runs/g9/HOLD" "$N/runs/g9p4/FU.started"
+# 64b: the successor 1175374's first source: park (stub) -> first start from cd@1350 -> train to S0 + 100M; restart re-armed
+g9etree; W=$ROOTM/wd-1175374; GI=$N/runs/g9q-cd1350/final/01355036714.pt; o=$(esrc 1175374)
+check 64b "^RC=0\|TOTAL=1455036714\|PY=$N/bin/py-src-24c633f\|PS=$NOV\|RESTART=yes\|TRAIN_ARGS=$EB --run-dir $W/run/G9E --pool-dir $W/run/G9E/pool $EO --resume $GI$" "$o"
+yes_ 64b2 '[ "$(cat "$N/runs/g9e/stub.calls")" = "park 1175374" ] && [ -f "$N/runs/g9p4-parked/PARKED.txt" ] && grep -q " $NV2_G9E_INIT_MD5 g9 1175374$" "$N/runs/g9e/G9E_STARTED" && [ ! -e "$N/runs/g9/HOLD" ] && [ ! -e "$N/runs/g9e/FAILED" ]'
+check 64b3 "G9E: first start: from cd@1350 .* cap 1455036714" "$(cat "$W/run/train.log")"; check 64b4 "queued successor .*afterany:1175374" "$(wdlog g9)"
+checkno 64b5 "frozen-best|--seed|P4-g9|G9P4|--cooldown|lr-schedule|ent-schedule|--kl-anchor-coef 0.1" "${o#*TRAIN_ARGS=}"
+o2=$(esrc 1175374); yes_ 64b6 '[ "$o2" = "$o" ] && [ "$(grep -c "first start" "$N/runs/g9e/STATUS")" = 1 ] && [ "$(grep -c park "$N/runs/g9e/stub.calls")" = 1 ]'
+rm -f "$W/.g9e-launches"
+# 64c: G9E saved at the cap (restart in place) -> branch point (r--) + cooldown G9Ecd100: 5M cosine to x0.1
+saved "$W/run/G9E" 1,455,040,000 g9e-at-cap; rm -f "$N/runs/g9/restart"; o=$(esrc 1175374); BP=$N/runs/g9e/cd100/branch-point-01455040000.pt
+check 64c "^RC=0\|TOTAL=1460040000\|.*RESTART=yes\|TRAIN_ARGS=$EB --run-dir $W/run/G9Ecd100 --pool-dir $W/run/G9Ecd100/pool $EO --cooldown-start 1455040000 --final-lr-frac 0.1 --resume $BP$" "$o"
+yes_ 64c2 '[ -f "$BP" ] && [ ! -w "$BP" ] && cmp -s "$BP" "$W/run/G9E/final_model.pt" && grep -qx "$BP 1455040000 $(md5sum < "$BP" | cut -c1-8)" "$N/runs/g9e/cd100/BRANCH"'
+saved "$W/run/G9Ecd100" 1,458,000,000 cd-cut; o=$(esrc 1175374); check 64c3 "TOTAL=1460040000\|.*--cooldown-start 1455040000 --final-lr-frac 0.1 --resume $W/run/G9Ecd100/final_model.pt$" "$o"
+rm -f "$W/.g9e-launches"
+# 64d: the cooldown done -> cooled final published r-- -> reading r100 (stub: CONTINUE) -> G9E trains on to S0 + 250M
+saved "$W/run/G9Ecd100" 1,460,081,000 cooled100; echo CONTINUE > "$N/runs/g9e/stub.verdict100"; mkdir -p "$N/runs/g9e/r100"; o=$(esrc 1175374)
+check 64d "^RC=0\|TOTAL=1605036714\|.*RESTART=yes\|TRAIN_ARGS=$EB --run-dir $W/run/G9E --pool-dir $W/run/G9E/pool $EO --resume $W/run/G9E/final_model.pt$" "$o"
+CF=$N/runs/g9e/cd100/final/01460081000.pt
+yes_ 64d2 '[ -f "$CF" ] && [ ! -w "$CF" ] && [ "$(cat "$CF")" = cooled100 ] && grep -qx "01460081000.pt $(md5sum < "$CF" | cut -c1-8)" "$N/runs/g9e/cd100/FINAL.md5" && grep -q "^read 100 1175374$" "$N/runs/g9e/stub.calls" && [ ! -e "$N/runs/g9e/DONE" ] && [ ! -e "$N/runs/g9/HOLD" ]'
+o2=$(esrc 1175374); yes_ 64d3 '[ "$o2" = "$o" ] && [ "$(grep -c "^read" "$N/runs/g9e/stub.calls")" = 1 ]'
+# 64e: a fresh successor (1175400) with G9E's mirrored final at the 250M cap -> cooldown 250 from that final
+MJ=$N/runs/g9/20261123-120000-1175374; saved "$MJ/G9E" 1,605,050,000 g9e-250; touch -d '2026-11-24 10:00' "$MJ/G9E/final_model.pt"
+mkdir -p "$MJ/G9E/pool/frozen"; W2=$ROOTM/wd-1175400; o=$(esrc 1175400); BP2=$N/runs/g9e/cd250/branch-point-01605050000.pt
+check 64e "^RC=0\|TOTAL=1610050000\|.*RESTART=yes\|TRAIN_ARGS=$EB --run-dir $W2/run/G9Ecd250 --pool-dir $W2/run/G9Ecd250/pool $EO --cooldown-start 1605050000 --final-lr-frac 0.1 --resume $BP2$" "$o"
+yes_ 64e2 '[ "$(cat "$BP2")" = g9e-250 ] && [ "$(grep -c park "$N/runs/g9e/stub.calls")" = 1 ]'
+# 64f: its cooldown done -> reading r250 (stub: ROBUST) -> runs/g9e/DONE => HOLD rounds (the A40 for main), no launch
+saved "$W2/run/G9Ecd250" 1,610,090,000 cooled250; echo ROBUST > "$N/runs/g9e/stub.verdict250"; o=$(NV2_PARK_HOLD_ROUNDS=2 esrc 1175400)
+check 64f "^RC=3\|$" "$o"; yes_ 64f2 '[ -f "$N/runs/g9/HOLD" ] && [ -f "$N/runs/g9e/DONE" ] && [ "$(grep -c "MODE g9e is finished (FINAL: ROBUST): the A40 is for main, round" "$W2/run/train.log")" = 2 ] && [ -f "$N/runs/g9e/cd250/final/01610090000.pt" ]'
+# 64g: finished + main writes MODE (here by an INLINE_CMD during the HOLD round) => the new mode is dispatched
+rm -f "$N/runs/g9/HOLD"; echo "echo g9 > $N/runs/g9/MODE" > "$N/runs/g9/INLINE_CMD"; o=$(NV2_PARK_HOLD_ROUNDS=3 esrc 1175400)
+check 64g "^RC=0\|TOTAL=1000000000\|.*TRAIN_ARGS=.*--kl-anchor $P1 --kl-anchor-coef 0.1 " "$o"; checkno 64g2 "G9E|cd1350" "$o"
+yes_ 64g3 '[ "$(grep -c "^read" "$N/runs/g9e/stub.calls")" = 2 ]'; rm -f "$N/runs/g9/HOLD"
+# 64h-k: FAILED present / a failing park / a bad init / no wrapper => HOLD rounds, no first start
+g9etree; echo "x" > "$N/runs/g9e/FAILED"; o=$(NV2_PARK_HOLD_ROUNDS=1 esrc 1175374); check 64h "^RC=3\|$" "$o"
+yes_ 64h2 '[ -f "$N/runs/g9/HOLD" ] && grep -q "MODE g9e: runs/g9e/FAILED (x)" "$ROOTM/wd-1175374/run/train.log" && [ ! -e "$N/runs/g9e/stub.calls" ]'
+g9etree; o=$(MOCK_PARK_FAIL=1 NV2_PARK_HOLD_ROUNDS=1 esrc 1175374); check 64i "^RC=3\|$" "$o"
+yes_ 64i2 '[ -f "$N/runs/g9e/FAILED" ] && [ ! -e "$N/runs/g9e/G9E_STARTED" ] && [ ! -e "$N/runs/g9p4-parked" ] && [ -f "$N/runs/g9/HOLD" ]'
+g9etree; o=$(NV2_G9E_INIT_MD5=deadbeef NV2_PARK_HOLD_ROUNDS=1 esrc 1175374); check 64j "^RC=3\|$" "$o"
+yes_ 64j2 '[ ! -e "$N/runs/g9e/G9E_STARTED" ] && grep -q "MODE g9e: no valid init" "$ROOTM/wd-1175374/run/train.log"'
+g9etree; mv "$N/bin/py-src-24c633f" "$N/bin/py-x"; o=$(NV2_PARK_HOLD_ROUNDS=1 esrc 1175374); mv "$N/bin/py-x" "$N/bin/py-src-24c633f"
+check 64k "^RC=3\|$" "$o"; yes_ 64k2 'grep -q "MODE g9e but no .*py-src-24c633f" "$ROOTM/wd-1175374/run/train.log" && [ ! -e "$N/runs/g9e/G9E_STARTED" ]'
+# 64l: a guard trip of G9E => TRIPPED + HOLD, then the same config
+g9etree; W=$ROOTM/wd-1175374; esrc 1175374 > /dev/null; saved "$W/run/G9E" 1,400,000,000 tripped; echo "eval score 60% < best 80% - 15%" > "$W/run/G9E/GUARD_TRIPPED"
+o=$(esrc 1175374); check 64l "^RC=0\|TOTAL=1455036714\|.*TRAIN_ARGS=$EB --run-dir $W/run/G9E --pool-dir $W/run/G9E/pool $EO --resume $W/run/G9E/final_model.pt$" "$o"
+yes_ 64l2 'grep -q "eval score" "$N/runs/g9e/TRIPPED" && [ -f "$N/runs/g9/HOLD" ] && ls "$W"/run/G9E/GUARD_TRIPPED.ab-* > /dev/null 2>&1'; rm -f "$N/runs/g9/HOLD"
+# 64m: restart re-arm: not after the deadline watch; the 5th launch within 30 min => FAILED, not re-armed
+rm -f "$N/runs/g9/restart"; touch "$W/DEADLINE"; o=$(esrc 1175374); check 64m "RESTART=no\|" "$o"; rm -f "$W/DEADLINE"
+rm -f "$W/.g9e-launches"; for i in 1 2 3 4; do esrc 1175374 > /dev/null; done; rm -f "$N/runs/g9/restart"; o=$(esrc 1175374)
+check 64m2 "^RC=0\|.*RESTART=no\|" "$o"; yes_ 64m3 'grep -q "crash loop" "$N/runs/g9e/FAILED"'
+chmod -R u+w "$N/runs/pretrain" "$N/runs/g9q-cd1350" "$N/runs/g9e" "$N/scripts/netv2_g9e" 2> /dev/null; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked" "$N/runs/g9e" "$N/runs/g9q-cd1350" "$N/scripts/netv2_g9e"
+rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD" "$N/runs/g9/restart" "$N/runs/g9/INLINE_CMD"; echo g9q2 > "$N/runs/g9/MODE"; unset NV2_G9E_INIT_MD5 NV2_G9E_PARK_MD5 NV2_G9E_READ_MD5
+fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY
 rm -f "$N/bin/py-src-24c633f" "$N/bin/py-src-4f18108" "$ROOTM.r1" "$ROOTM.g9"
