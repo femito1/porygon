@@ -213,7 +213,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | 515851 | 2026-11-08 | prior_weight=0.0 eval_config=gen9_stock_x2.json oracle=None | 400 / 200 | 51.2 [46.3, 56.1] [M] | info |
 | 515852 | 2026-11-08 | prior_weight=0.0 eval_config=eval_gen9_r1.json oracle=None | 365 / 182 | 56.3 [51.3, 61.3] [M] | info |
 
-### v2 network, gen4 (R1b / R1b-F) (10 rows)
+### v2 network, gen4 (R1b / R1b-F) (11 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -228,6 +228,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | v2g4-09 | 2026-11-14 | R1b-F @300M vs v1@500M (best v1) | R1b-F @300M vs v1 @500M | Showdown duplicate server (netv2 h2h) | 1008 / 504 | 60.7 [58.1, 63.3] [M] | g4r1bf/NOTES.txt (300M watch) (6ae5d289) | >= 60% => candidate prior | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/h2h-20261114-154746-1136569/result.txt` |
 | v2g4-13 | 2026-11-16 | R1b-F hold #1: guard trip @390.2M vs R1b-F@300M | R1b-F trip @390.2M vs R1b-F @300M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2000 / 1000 | 49.9 [47.9, 51.9] [M] | g4r1bf/HOLD-PREREG.txt (af0441c6) | CONTINUE (not clearly worse; not better) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold1/VERDICT.txt` |
 | v2g4-14 | 2026-11-17 | R1b-F hold #2: guard trip @437.7M vs R1b-F@300M | R1b-F trip @437.73M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator, duplicate pairs | 2000 / 1000 | 53.0 [51.0, 55.0] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE (better than @300M; hold #1 @390M was 49.9) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold2/VERDICT.txt` |
+| v2g4-15 | 2026-11-20 | R1b-F hold #3: guard trip @552.7M vs R1b-F@300M | R1b-F trip @552.68M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 2000 / 1000 | 55.2 [53.2, 57.2] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold3/VERDICT.txt` |
 
 ### v2 network, gen9 (G9s, G9p, G9q milestones) (29 rows)
 

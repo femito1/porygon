@@ -125,6 +125,7 @@ and cluster dir; a shared benchmark-slot ledger (`.orchestra/PLAN.md`).
 | 11-15 | stale R1b-F follow-up rule could reset 360M → 7.5M | disarmed (`runs/r1/FU.started`) | memory |
 | 11-17 | **G9q step cap**: stop at 1.0B, A30 allocation lost | netv2.env v20 (cap 3e9), STALE/STEPCAP alerts | ORCHESTRATOR.md |
 | 11-19 | Foul Play websocket handshake timeouts at harness start (slow shared disk), 0 games: fpcal arm L 1174394 (dove04), F1350 1228320 (dove01) | voided, replayed with the same seed (PLAN rule); not node-specific | `$C/runs/conf1350-void1/NOTES.txt` |
+| 11-18 → 11-20 | R1b-F hold chain (a job step) died with its job at a hand-over; a later trip waited 1.7 h for a decision | relaunched in the new job (hold-chain-r3.sh); job-step chains must be re-armed after every hand-over | `$C/runs/g4r1bf-hold-chain/NOTES-r3.txt` |
 
 ## Standing user decisions (index)
 2026-10-19 Wang recipe · 10-2x maximum speed, accept FairShare cost, no heavy jobs on the laptop · 11-08 goal (best gen9/gen4
@@ -148,3 +149,4 @@ random stuff loop" (undated, memory `benchmark-method.md`). [M memory / PLAN.md 
 - 2026-11-19 22:23Z — **LA2-1350 ADOPTED (NON-INFERIOR)**: lookahead2 on cd@1350 (δ* 0.0075) vs lookahead2 on cd@805 51.20 [48.36, 54.04] (1000 g, 6.8 h) ⇒ gen9 benchmark bot = lookahead2 on G9q-cd@1350 (ns-26).
 - 2026-11-19 23:32Z — **ExIt-LA2 stage 1 HARMFUL**: cd@805 fine-tuned toward lookahead2's played policy loses to its own-policy control 48.17 [47.47, 48.87] and to cd@805 48.14 [47.45, 48.83] (≈ 15.8k games each); the policy moved (r_E 0.347), the value did not; the own-policy fine-tune alone ≈ neutral (49.41) (ns-27…29). Stage 2 not run; the ExIt-LA2 route as designed stops.
 - 2026-11-20 11:23Z — A30 job 1174222 (G9q) reached its limit; successor 1174225 (clapper) resumed exactly (upd 35338 @ 1,521,187,377 → upd 35339 @ 1,521,230,075) [M `runs/r1/20261120-114114-1174225/G9q/train.log`]; restart flag re-armed 14:35Z.
+- 2026-11-20 14:56Z — R1b-F second guard trip (eval 74.5% < best 85.5% − 10%) ⇒ HOLD. The pre-registered hold chain had died with job 1137378 at the 11-18 hand-over; the orchestrator relaunched it 16:37Z in 1173311 (two-line copy: pending trip unseen, k=2). 16:43Z HOLD #3 CONTINUE: trip@552.7M vs @300M 55.2 [53.2, 57.2] (v2g4-15); trainer relaunched same config. Third CONTINUE in a row: the eval-score guard is noisy.
