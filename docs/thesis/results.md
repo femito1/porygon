@@ -356,7 +356,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | cal-04 | 2026-11-16 | value calibration: v2 net P(win) vs evaluate() on held-out human positions | v2 net AUC 0.752 vs evaluate() AUC 0.718 | offline (NNUE step 2) |  | net is the better leaf [M] | - | net is the better leaf | `docs/netsearch/NNUE-LEAVES-NOTE.md line 16` |
 | cal-05 | 2026-11-16 | fpcal: raw cd@805 vs Foul Play at fixed 50k / 800k iterations | raw cd@805 vs Foul Play L 50k / H 800k it. | Foul Play gen9, seed 8800222 | 2000 / 1000 | pending (job 1173956) [E] | wsp fpcal/PREREG.txt (5a68f926) | pending (job 1173956) | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt (not yet written)` |
 
-### Diagnostics (6 rows)
+### Diagnostics (7 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -381,6 +381,7 @@ server. The README rows "R1b-F @150M vs v1@500M 56.4% ± 2.8%" and "R1b-F @100M 
 1.6%" and G9t-cd "48.1% ± 1.4%" in the README are the all-pairs naive numbers, the decisions of record are the
 sequential tests in rows g9q-05 / g9q-10.
 | dg-06 | 2026-11-20 | VTG probe: value vs policy trunk-gradient norm (G9q recipe) | G9q-cd@1350 / G9q@1540M | fixed weights, fresh self-play rollouts | 100 / 240 minibatches | value/policy 3.8% [3.5, 4.3] (cd@1350), 2.8% [2.5, 3.1] (@1540M) [M] | - | no value swamping ⇒ no G9v arm; clipping in 100% of minibatches | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/vtg-probe/RESULT.txt` |
+| dg-07 | 2026-11-21 | Win rate vs Foul Play by game length, raw cd@1350 | < 25 vs ≥ 25 turns | F1350 games | 905 | 51.3 [45.7, 56.9] vs 63.0 [59.1, 66.8] [D] (cd@805: 48.4 / 62.9) | - | short-game gap persists | `$C/runs/foulplay-net-20261119-124055-1238699/results.jsonl` |
 
 ## Voided, failed or smoke runs (not results)
 - Smokes (2–8 games, harness checks only): `$F/runs/netsearch-smoke-20261109-*-841429` (3), `netsearch-fpsmoke-20261110-
