@@ -1,16 +1,20 @@
 """The mechanical parts of an LA2-H-style adoption test (lookahead2_adopt.sbatch; LA2-1350 = docs/netsearch/
-LA2-1350-PREREG.md): the gate on netv2's confirmation file, the smoke's checks, the pre-registered reading and the
-VERDICT text. Pure functions of files, standard library only (the cluster venv or a laptop python3).
+LA2-1350-PREREG.md; la2_2030.sbatch = LA2-2030-PREREG.md): the gate on netv2's confirmation file, the smoke's checks,
+the pre-registered reading and the VERDICT text, and LA2-2030's FP200 measurement text. Pure functions of files,
+standard library only (the cluster venv or a laptop python3).
 
-    python lookahead2_adopt.py gate RESULTS.txt [--md5 6cf40c0c]   # exit 0 = PLAY, 3 = WITHDRAWN (one line out)
-    python lookahead2_adopt.py smoke RUN [--games 4]                # one line: PASS ... / FAIL ...
-    python lookahead2_adopt.py reading LO                           # the reading for a lower 95% bound (fraction)
-    python lookahead2_adopt.py verdict RUN --delta D [--label ...]   # VERDICT.txt on stdout (line 1 = the reading)
+    python lookahead2_adopt.py gate RESULTS.txt [--md5 6cf40c0c] [--name F1350]  # exit 0 = PLAY, 3 = WITHDRAWN
+    python lookahead2_adopt.py smoke RUN [--games 4] [--fp]          # one line: PASS ... / FAIL ...
+    python lookahead2_adopt.py reading LO                            # the reading for a lower 95% bound (fraction)
+    python lookahead2_adopt.py verdict RUN --delta D [--label ...]    # VERDICT.txt on stdout (line 1 = the reading)
+    python lookahead2_adopt.py fp200 RUN --delta D --iters N --seed S [--voids V]   # FP200.txt (line 1 = the number)
 """
 import argparse
 import json
 import math
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 GATE_OK = "CONFIRMED (lower 95% bound > 50%)"  # netv2 conf1350.sbatch reading(): the only confirmed wording
@@ -22,23 +26,24 @@ LO_BETTER, LO_NON_INFERIOR = 0.50, 0.47  # lower 95% bound of the pair means, st
 MIN_PAIRS, VOID_FALLBACKS = 450, 0.02  # the LA2-H void rule
 
 
-def gate(path: Path, md5: str | None = None) -> tuple[bool, str]:
+def gate(path: Path, md5: str | None = None, name: str = "F1350") -> tuple[bool, str]:
     """PLAY iff line 2 of netv2's RESULTS.txt contains GATE_OK (and not "NOT CONFIRMED"), and line 1 names the net's
-    md5 when one is given. Anything else (NOT CONFIRMED, FAILED, missing, unreadable) withdraws, with the reason."""
+    md5 when one is given. Anything else (NOT CONFIRMED, FAILED, missing, unreadable) withdraws, with the reason.
+    `name` is the confirmation's name in the messages (F1350, F2030)."""
     if not path.is_file():
-        return False, f"{path} missing (F1350 wrote no RESULTS.txt)"
+        return False, f"{path} missing ({name} wrote no RESULTS.txt)"
     lines = path.read_text(errors="replace").splitlines()
     if len(lines) < 2:
         return False, f"{path} has no line 2"
     l1, l2 = lines[0].strip(), lines[1].strip()
     if "NOT CONFIRMED" in l2:
-        return False, f"F1350 NOT CONFIRMED: {l2}"
+        return False, f"{name} NOT CONFIRMED: {l2}"
     if GATE_OK not in l2:
         why = "FAILED" if "FAILED" in l2 else "no CONFIRMED reading"
-        return False, f"F1350 {why}: {l2}"
+        return False, f"{name} {why}: {l2}"
     if md5 and f"md5 {md5}" not in l1:
-        return False, f"F1350 line 1 does not name the net md5 {md5}: {l1}"
-    return True, f"F1350 CONFIRMED: {l2}"
+        return False, f"{name} line 1 does not name the net md5 {md5}: {l1}"
+    return True, f"{name} CONFIRMED: {l2}"
 
 
 def reading(lo: float) -> str:
@@ -51,8 +56,44 @@ def reading(lo: float) -> str:
     return NOT_ADOPTED
 
 
-def smoke(run: Path, games: int) -> tuple[bool, str]:
-    """The smoke's mechanical checks (LA2-H's, plus the lookahead opponent's as in the scale gate's smoke)."""
+ITERS_COUNTS = re.compile(r"\(([^()]*)\)\s*$")
+
+
+def iters_counts(text: str) -> Counter:
+    """The counts of one ITERS_OK line (fp_iters_check.py: "all iteration counts OK (1000 single-option 3, N 130,
+    N/2 25, decisions 70)")."""
+    c: Counter = Counter()
+    m = ITERS_COUNTS.search(text.strip())
+    for part in (m.group(1).split(", ") if m and m.group(1) else []):
+        key, _, v = part.rpartition(" ")
+        if key and v.isdigit():
+            c[key] += int(v)
+    return c
+
+
+def iters_status(run: Path) -> tuple[bool, Counter, list[str]]:
+    """Foul Play's fixed-iteration check over a run's blocks: OK iff every block has ITERS_OK and none (nor the run)
+    has ITERS_MISMATCH, and full-budget states ("N") were seen. Returns (ok, summed counts, problems)."""
+    blocks = sorted(run.glob("arm-*/block-*"))
+    total: Counter = Counter()
+    bad = [] if blocks else ["no blocks"]
+    if (run / "ITERS_MISMATCH").exists():
+        bad.append("ITERS_MISMATCH: " + (run / "ITERS_MISMATCH").read_text(errors="replace").strip()[:300])
+    for b in blocks:
+        if (b / "ITERS_MISMATCH").exists():
+            bad.append(f"{b.parent.name}/{b.name} ITERS_MISMATCH")
+        elif not (b / "ITERS_OK").exists():
+            bad.append(f"{b.parent.name}/{b.name} no ITERS_OK")
+        else:
+            total += iters_counts((b / "ITERS_OK").read_text(errors="replace"))
+    if not bad and total["N"] == 0:
+        bad.append("no full-budget state checked")
+    return not bad, total, bad
+
+
+def smoke(run: Path, games: int, fp: bool = False) -> tuple[bool, str]:
+    """The smoke's mechanical checks (LA2-H's, plus the lookahead opponent's as in the scale gate's smoke). fp: the
+    opponent is Foul Play at a fixed iteration count (no opponent search stats; its iteration check must pass)."""
     r = json.loads((run / "result.json").read_text())
     checks = {}
     for a in r["arms"]:
@@ -60,13 +101,18 @@ def smoke(run: Path, games: int) -> tuple[bool, str]:
         ev = "\n".join(p.read_text(errors="replace") for p in run.glob(f"arm-{k}/block-*/evaluate.log"))
         checks[f"arm {k} {games} games"] = a["games"] == games
         checks[f"arm {k} no Traceback"] = "Traceback" not in ev
-        for tag, s, g in ((f"arm {k}", a["stats_a"], a["gate"]), (f"arm {k} opponent", a["stats_b"], a["gate_opp"])):
+        sides = [(f"arm {k}", a["stats_a"], a["gate"])]
+        if not fp:
+            sides.append((f"arm {k} opponent", a["stats_b"], a["gate_opp"]))
+        for tag, s, g in sides:
             checks[f"{tag} searched/leaves > 0"] = s.get("searched", 0) > 0 and s.get("leaves", 0) > 0
             checks[f"{tag} gate rows"] = g["decisions"] > 0
             checks[f"{tag} failed worlds 0"] = s.get("failed_worlds", 0) == 0
             checks[f"{tag} fallbacks <= max(2, 2%)"] = s.get("fallbacks", 0) <= max(2, 0.02 * s.get("decisions", 0))
     checks["one arm"] = len(r["arms"]) == 1
     checks["no HARNESS_FAIL"] = not (run / "HARNESS_FAIL").exists()
+    if fp:
+        checks["Foul Play iteration check"] = iters_status(run)[0]
     ok = all(checks.values())
     return ok, ("PASS " if ok else "FAIL ") + "; ".join(f"{k} {'ok' if v else 'NO'}" for k, v in checks.items())
 
@@ -112,15 +158,55 @@ def verdict(run: Path, delta: str, label: str, bot_label: str, bot_delta: str = 
     return "\n".join(out)
 
 
+def fp200(run: Path, delta: str, label: str, iters: int, seed: str, voids: int = 0, voids_text: str = "") -> str:
+    """FP200.txt (LA2-2030 stage 2, a measurement): line 1 = the new benchmark bot's pair-mean 95% interval vs Foul
+    Play at a fixed iteration count, or VOID (HARNESS_FAIL, > 2% fallbacks, < 450 pairs, or Foul Play's iteration check
+    not passed on every block)."""
+    r = json.loads((run / "result.json").read_text())
+    arms = r["arms"]
+    if len(arms) != 1:
+        raise SystemExit(f"{run}: {len(arms)} arms (want 1)")
+    a = arms[0]
+    iok, counts, bad = iters_status(run)
+    hf = (run / "HARNESS_FAIL").exists()
+    if hf or bool(a["void"]) or a["pairs"] < MIN_PAIRS or not iok:
+        head = (f"VOID: harness failure, > {VOID_FALLBACKS:.0%} fallbacks, < {MIN_PAIRS} pairs or Foul Play's iteration "
+                f"check not passed ({a['pairs']} pairs, HARNESS_FAIL {'yes' if hf else 'no'}, fallback void "
+                f"{bool(a['void'])}, iteration check {'OK' if iok else '; '.join(bad)[:300]}); replay with the same seed "
+                "after the fix")
+    else:
+        head = (f"LA2-FP200: lookahead2({label}, δ* {delta}, K 8, T 0.5) vs Foul Play gen9 at a FIXED {iters} iterations "
+                f"per state: {pct(a['mean'])} ± {pct(a['hw'])} [{pct(a['lo'])}, {pct(a['hi'])}] ({a['pairs']} duplicate "
+                f"pairs, {a['games']} games); measurement, no decision rule")
+    return "\n".join([
+        head,
+        f"  arm {a['arm']}: {pct(a['mean'])} ± {pct(a['hw'])} [{pct(a['lo'])}, {pct(a['hi'])}] (pair means; {a['pairs']} "
+        f"pairs, {a['games']} games; won both {a['won_both']}, split {a['split']}, lost both {a['lost_both']}; "
+        f"incomplete {a.get('incomplete_pairs')}); {a['seconds'] / 3600:.2f} h",
+        f"  Foul Play iteration check (wsp fp_iters_check.py, every block): {'OK' if iok else 'NOT OK'} ("
+        + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + ")" + ("" if iok else f"; {'; '.join(bad)[:300]}"),
+        f"  overrides: {pct(a.get('override_rate'), 1)} of {a['gate']['decisions']} searched decisions; fallbacks "
+        f"{pct(a.get('fallback_rate_a'), 3)}",
+        f"  bot {a['spec']}",
+        f"  opponent {r['opponent']}; seed tag {seed} (block j: {seed}b<j>)",
+        f"  infrastructure voids replayed: {voids}{voids_text}",
+        "  per block: " + ", ".join(f"{b['block']} {b['pairs']} pairs {(b.get('seconds') or 0) / 3600:.2f} h"
+                                    for b in a.get("per_block", [])),
+        f"  run {run}",
+    ])
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gate")
     g.add_argument("results", type=Path)
     g.add_argument("--md5")
+    g.add_argument("--name", default="F1350")
     s = sub.add_parser("smoke")
     s.add_argument("run", type=Path)
     s.add_argument("--games", type=int, default=4)
+    s.add_argument("--fp", action="store_true", help="the opponent is Foul Play at a fixed iteration count")
     rd = sub.add_parser("reading")
     rd.add_argument("lo", type=float)
     v = sub.add_parser("verdict")
@@ -129,16 +215,27 @@ def main() -> int:
     v.add_argument("--label", default="G9q-cd@1355.04M")
     v.add_argument("--bot-label", default="G9q-cd@805.03M")
     v.add_argument("--bot-delta", default="0.005")
+    f = sub.add_parser("fp200")
+    f.add_argument("run", type=Path)
+    f.add_argument("--delta", required=True)
+    f.add_argument("--label", default="G9q-cd@2035.04M")
+    f.add_argument("--iters", type=int, required=True)
+    f.add_argument("--seed", required=True)
+    f.add_argument("--voids", type=int, default=0)
+    f.add_argument("--voids-text", default="")
     a = p.parse_args()
     if a.cmd == "gate":
-        ok, why = gate(a.results, a.md5)
+        ok, why = gate(a.results, a.md5, a.name)
         print(("PLAY: " if ok else "WITHDRAWN: ") + why.replace("|", "/"))
         return 0 if ok else WITHDRAWN_EXIT
     if a.cmd == "smoke":
-        print(smoke(a.run, a.games)[1])
+        print(smoke(a.run, a.games, a.fp)[1])
         return 0
     if a.cmd == "reading":
         print(reading(a.lo))
+        return 0
+    if a.cmd == "fp200":
+        print(fp200(a.run, a.delta, a.label, a.iters, a.seed, a.voids, a.voids_text))
         return 0
     print(verdict(a.run, a.delta, a.label, a.bot_label, a.bot_delta))
     return 0
