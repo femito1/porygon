@@ -32,7 +32,8 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 | gen9 | raw v2 network G9q-cd@605M | **58.8 [55.9, 61.7]** (1000, CONFIRMED) [M] | 52.5 [49.6, 55.4] (1000, not confirmed) | g9q-17/16 |
 | gen9 | raw v2 network G9q-cd@805M (deployment net 11-16 → 11-19) | **57.8 [55.0, 60.6]** (1000, CONFIRMED) [M]; 56.90 [53.94, 59.86] on the Stage 3 harness | **55.5 [52.7, 58.3]** (1000, Milestone 1 CONFIRMED) | g9q-24/23, ns-19 |
 | gen9 | **lookahead2 on G9q-cd@1350M (δ 0.0075, K 8): the gen9 benchmark bot since 11-19 (LA2-1350 ADOPTED, non-inferior)** | not yet measured (next: fixed 200k Foul Play iterations) | vs lookahead2 on cd@805 51.20 [48.36, 54.04] (1000) | ns-26 |
-| gen9 | raw v2 network G9q-cd@1350M (deployment net since 11-19) | **59.1 [56.2, 62.0]** (906, CONFIRMED) [M] | beats cd@805 in-process 52.05 [50.45, 53.62] (MUE) | g9q-30/29 |
+| gen9 | **raw v2 network G9q-cd@2030M (deployment net since 11-23)** | **60.8 [57.9, 63.7]** at FIXED 200k iterations (1000, CONFIRMED) [M] | beats cd@1350 in-process 51.99 [50.40, 53.56] (MUE) | g9q-32/31 |
+| gen9 | raw v2 network G9q-cd@1350M (deployment net 11-19 → 11-23) | **59.1 [56.2, 62.0]** (906, CONFIRMED) [M] | beats cd@805 in-process 52.05 [50.45, 53.62] (MUE) | g9q-30/29 |
 | gen9 | lookahead2 on G9q-cd@805M (δ 0.005, K 8): the gen9 benchmark bot 11-17 → 11-19 (LA2-H ADOPTED) | **58.20 [55.29, 61.11]** (1000) [M]; paired gain over its raw net +1.30 [−2.71, +5.31] NOT SHOWN | — (vs its raw net on cd@605: 53.17 [50.59, 55.73], Bet 1 GO); vs the previous benchmark hybrid **54.00 [51.18, 56.82]** | ns-18/20/14/24 |
 | gen9 | hybrid H(δ 0.0212) + G9p-cd@104.71M (benchmark bot 11-11 → 11-17) | 56.2 [53.4, 59.0] (1000) [M] | 55.0 [52.0, 58.0] (1000) | ns-07/05 |
 | gen9 | pure engine search (stock eval) | 51.6 [48.8, 54.4] (1000, Stage 3 harness) [M]; 51.72 [49.36, 54.08] (1508, gloria harness) [D] | — | ns-08, g9s-01 |
@@ -71,6 +72,7 @@ Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7%
 | g9q-17 | 2026-11-15 | raw G9q-cd@605M vs Foul Play gen9 (1000 g) | G9q-cd@605M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness | 1000 / 500 | 58.8 [55.9, 61.7] [M] | conf605/PREREG.txt (517b679c) | CONFIRMED (lower > 50%) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf605/RESULTS.txt` |
 | g9q-24 | 2026-11-16 | raw G9q-cd@805M vs Foul Play gen9 (1000 g, seed 8800222) | G9q-cd@805M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness | 1000 / 500 | 57.8 [55.0, 60.6] [M] | conf800/PREREG.txt (c6a38724) | CONFIRMED (= cd@605 within noise) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf800/RESULTS.txt` |
 | g9q-30 | 2026-11-19 | raw G9q-cd@1350M vs Foul Play gen9 (F1350, seed 8135222) | G9q-cd@1355.04M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness; 2 of 20 FP instances stopped accepting after 4–5 games | 906 / 453 | 59.1 [56.2, 62.0] [M] | g9q-cd1350/PREREG.txt (342e63f8) | CONFIRMED | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf1350/RESULTS.txt` |
+| g9q-32 | 2026-11-23 | raw G9q-cd@2030M vs Foul Play gen9 at FIXED 200k iterations (F2030, seed 8203222) | G9q-cd@2035.04M T 0.5 vs Foul Play gen9 @200k | fp9 harness + wsp fixed-iteration launcher, ITERS_OK | 1000 / 500 | **60.8 [57.9, 63.7]** [M] | g9q-cd2030/PREREG.txt (7a68bf3e) | CONFIRMED | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf2030/RESULTS.txt` |
 | ns-18 | 2026-11-17 | LA2-FP: lookahead2(cd@805, d 0.005) vs Foul Play gen9 | lookahead2 on G9q-cd@805M vs Foul Play gen9 (8f541f8) | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 58.2 [55.29, 61.11] [M] | LA2-FP-PREREG.md (1173284f) | Q1 headline | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 | ns-19 | 2026-11-17 | LA2-FP arm 2: raw cd@805 vs Foul Play gen9 (same pairs) | raw G9q-cd@805M T 0.5 vs Foul Play gen9 | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 56.9 [53.94, 59.86] [M] | LA2-FP-PREREG.md (1173284f) | positive | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 
@@ -230,7 +232,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | v2g4-14 | 2026-11-17 | R1b-F hold #2: guard trip @437.7M vs R1b-F@300M | R1b-F trip @437.73M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator, duplicate pairs | 2000 / 1000 | 53.0 [51.0, 55.0] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE (better than @300M; hold #1 @390M was 49.9) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold2/VERDICT.txt` |
 | v2g4-15 | 2026-11-20 | R1b-F hold #3: guard trip @552.7M vs R1b-F@300M | R1b-F trip @552.68M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 2000 / 1000 | 55.2 [53.2, 57.2] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold3/VERDICT.txt` |
 
-### v2 network, gen9 (G9s, G9p, G9q milestones) (29 rows)
+### v2 network, gen9 (G9s, G9p, G9q milestones) (30 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -263,6 +265,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | g9q-21 | 2026-11-15 | G9q still improving: cd@805 vs cd@605 | G9q-cd @805.03M vs G9q-cd @605.04M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2800 / 1400 | 52.46 [50.67, 54.22] [M] | g9q-cd800/PREREG.txt (1a1b9fa4) | IMPROVING | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd800/READING.txt` |
 | g9q-23 | 2026-11-16 | Milestone 1: raw G9q-cd@805M vs pure gen9 search (1000 g, seed 8800111) | G9q-cd@805M T 0.5 vs pure gen9 search | pure gen9 search (search:none, 4 x 1000 ms, stock eval), netv2 vs-search harness (21 workers, 5 concurrent) | 1000 / 500 | 55.5 [52.7, 58.3] [M] | conf800/PREREG.txt (c6a38724) | CONFIRMED: raw net beats our search | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf800/RESULTS.txt` |
 | g9q-29 | 2026-11-19 | G9q still improving: cd@1350 vs cd@805 (R1350) | G9q-cd @1355.04M vs G9q-cd @805.03M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3400 / 1700 | 52.05 [50.45, 53.62] [M] (naive 52.44, repeated CI [50.43, 54.45]) | g9q-cd1350/PREREG.txt (342e63f8) | IMPROVING (SUCCESS at look 17) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd1350/READING.txt` |
+| g9q-31 | 2026-11-23 | G9q still improving: cd@2030 vs cd@1350 (R2030) | G9q-cd @2035.04M vs G9q-cd @1355.04M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3600 / 1800 | 51.99 [50.40, 53.56] [M] (naive 52.22, repeated CI [50.25, 54.19]) | g9q-cd2030/PREREG.txt (7a68bf3e) | IMPROVING (SUCCESS at look 18) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd2030/READING.txt` |
 
 ### v2 PPO recipe arms (one change each) (13 rows)
 
@@ -356,7 +359,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | cal-04 | 2026-11-16 | value calibration: v2 net P(win) vs evaluate() on held-out human positions | v2 net AUC 0.752 vs evaluate() AUC 0.718 | offline (NNUE step 2) |  | net is the better leaf [M] | - | net is the better leaf | `docs/netsearch/NNUE-LEAVES-NOTE.md line 16` |
 | cal-05 | 2026-11-16 | fpcal: raw cd@805 vs Foul Play at fixed 50k / 800k iterations | raw cd@805 vs Foul Play L 50k / H 800k it. | Foul Play gen9, seed 8800222 | 2000 / 1000 | pending (job 1173956) [E] | wsp fpcal/PREREG.txt (5a68f926) | pending (job 1173956) | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/READING.txt (not yet written)` |
 
-### Diagnostics (7 rows)
+### Diagnostics (8 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -382,6 +385,7 @@ server. The README rows "R1b-F @150M vs v1@500M 56.4% ± 2.8%" and "R1b-F @100M 
 sequential tests in rows g9q-05 / g9q-10.
 | dg-06 | 2026-11-20 | VTG probe: value vs policy trunk-gradient norm (G9q recipe) | G9q-cd@1350 / G9q@1540M | fixed weights, fresh self-play rollouts | 100 / 240 minibatches | value/policy 3.8% [3.5, 4.3] (cd@1350), 2.8% [2.5, 3.1] (@1540M) [M] | - | no value swamping ⇒ no G9v arm; clipping in 100% of minibatches | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/vtg-probe/RESULT.txt` |
 | dg-07 | 2026-11-21 | Win rate vs Foul Play by game length, raw cd@1350 | < 25 vs ≥ 25 turns | F1350 games | 905 | 51.3 [45.7, 56.9] vs 63.0 [59.1, 66.8] [D] (cd@805: 48.4 / 62.9) | - | short-game gap persists | `$C/runs/foulplay-net-20261119-124055-1238699/results.jsonl` |
+| dg-08 | 2026-11-23 | Win rate vs Foul Play by game length, raw cd@2030 (fixed 200k) | < 25 vs ≥ 25 turns | F2030 games | 1000 | 53.4 [48.1, 58.6] vs 64.6 [60.9, 68.2] [D] | - | gap narrowing (48.4 → 51.3 → 53.4), persists | `/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/runs/foulplay-net-20261123-130543-1552777-200000/results.jsonl` |
 
 ## Voided, failed or smoke runs (not results)
 - Smokes (2–8 games, harness checks only): `$F/runs/netsearch-smoke-20261109-*-841429` (3), `netsearch-fpsmoke-20261110-
