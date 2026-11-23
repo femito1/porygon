@@ -7,13 +7,16 @@
 # local-login patch already applied (scripts/slurm_foulplay.sbatch applies it).
 #   foulplay_instances.sh FP_DIR FP_VENV FP_PYTHONPATH PORT FORMAT MS PARALLELISM LOGDIR NAME...
 # Logs: LOGDIR/<NAME>.log ("Waiting for a" = ready; one "restarting (exit N)" line per restart).
+# FPI_WRAP + FPI_ITERS in the environment (netsearch_slot.sh, foulplay:...,iters=N): run.py starts through wsp's
+# fixed-iteration launcher, `python FPI_WRAP --iters-per-s FPI_ITERS run.py ...` (as wsp's fp9_iters.sbatch does).
 FP=$1 VENV=$2 FPPATH=$3 PORT=$4 FORMAT=$5 MS=$6 PAR=$7 LOGDIR=$8; shift 8
+PRE=(); [ -z "${FPI_WRAP:-}" ] || PRE=("$FPI_WRAP" --iters-per-s "${FPI_ITERS:?FPI_ITERS with FPI_WRAP}")
 FATAL='run.py", line [0-9]*, in <module>'
 instance() {
   local name=$1 log=$LOGDIR/$1.log pid start size from g rc
   cd "$FP" || exit 1
   while true; do
-    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$FPPATH "$VENV/bin/python" run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$FPPATH "$VENV/bin/python" "${PRE[@]}" run.py --websocket-uri "ws://localhost:$PORT/showdown/websocket" \
       --ps-username "$name" --bot-mode accept_challenge --pokemon-format "$FORMAT" --search-time-ms "$MS" \
       --search-parallelism "$PAR" --run-count 1000000 --log-level INFO < /dev/null >> "$log" 2>&1 &
     pid=$!; start=$(stat -c %s "$log")

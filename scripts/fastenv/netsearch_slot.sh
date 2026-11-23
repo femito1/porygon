@@ -22,6 +22,11 @@
 # each, scripts/fastenv/foulplay_instances.sh; FP_DIR default /vol/bitbucket/fr1226/foul-play, its gen9 venv with
 # PYTHONPATH=$G/.engine-gen9:$G/src as the gen9 Foul Play benchmark), through scripts/vs_foulplay.py --player spec (one
 # player per instance on ONE engine pool). Defaults ms=1000, parallelism=1 (= the benchmark's Foul Play).
+# OPP=foulplay:...,iters=N (LA2-2030's FP200, 11-23): Foul Play runs through wsp's fixed-iteration launcher
+# (fp_fixed_iters.py: N MCTS iterations per 1000 ms of nominal budget instead of wall clock; NS_FP_WRAP, default wsp's
+# fpcal/code copy) and wsp's iteration check (fp_iters_check.py next to it) runs on each block's Foul Play logs every
+# 300 s and at the block's end: OK -> arm-K/block-J/ITERS_OK; a mismatch -> block-J/ITERS_MISMATCH + OUT/ITERS_MISMATCH,
+# the block's client is stopped and the run ends with HARNESS_FAIL (void).
 # Control: touch OUT/STOP = stop after the current block; OUT/STOP_NOW = kill the current block and stop.
 # Output: OUT/manifest.txt, OUT/looks.jsonl, OUT/result.txt + result.json (netsearch_slot.py report), arm-K/block-J/.
 set -uo pipefail
@@ -67,10 +72,20 @@ case "$OPP" in
     FP_MODE=1
     FP_DIR=${NS_FOULPLAY:-/vol/bitbucket/fr1226/foul-play}
     FP_OPTS=${OPP#foulplay}; FP_OPTS=${FP_OPTS#:}
-    FP_MS=1000 FP_PAR=1
+    FP_MS=1000 FP_PAR=1 FP_ITERS=
     for kv in ${FP_OPTS//,/ }; do
-      case "$kv" in ms=*) FP_MS=${kv#ms=} ;; parallelism=*) FP_PAR=${kv#parallelism=} ;; *) echo "unknown foulplay option $kv" >&2; exit 1 ;; esac
+      case "$kv" in
+        ms=*) FP_MS=${kv#ms=} ;; parallelism=*) FP_PAR=${kv#parallelism=} ;; iters=*) FP_ITERS=${kv#iters=} ;;
+        *) echo "unknown foulplay option $kv" >&2; exit 1 ;;
+      esac
     done
+    if [ -n "$FP_ITERS" ]; then
+      [[ "$FP_ITERS" =~ ^[0-9]+000$ ]] || { echo "foulplay iters=N: a multiple of 1000 (got '$FP_ITERS')" >&2; exit 1; }
+      FPI_WRAP=${NS_FP_WRAP:-/vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/code/fp_fixed_iters.py}
+      FPI_CHECK=$(dirname "$FPI_WRAP")/fp_iters_check.py
+      [ -f "$FPI_WRAP" ] && [ -f "$FPI_CHECK" ] || { echo "no $FPI_WRAP / $FPI_CHECK" >&2; exit 1; }
+      export FPI_WRAP FPI_ITERS=$FP_ITERS  # read by foulplay_instances.sh
+    fi
     FP_VENV=$FP_DIR/.venv FP_PYTHONPATH=
     [ "$GEN" != 9 ] || { FP_VENV=$FP_DIR/.venv-gen9; FP_PYTHONPATH=$G/.engine-gen9:$G/src; }
     ;;
@@ -120,6 +135,7 @@ fi
     if [ "$FP_MODE" = 1 ]; then
       echo "foulplay: $FP_DIR commit $(git -C "$FP_DIR" rev-parse HEAD 2>/dev/null || echo unknown) (dirty: $(git -C "$FP_DIR" status --porcelain 2>/dev/null | wc -l) files); venv $FP_VENV ($("$FP_VENV/bin/python" --version 2>&1)); PYTHONPATH=$FP_PYTHONPATH"
       echo "  search-time-ms $FP_MS, search-parallelism $FP_PAR, $CONC instances per block; login patch: $(grep -o 'patched for the Porygon benchmark[^)]*' "$FP_DIR/fp/websocket_client.py" | head -1)"
+      [ -z "$FP_ITERS" ] || echo "  FIXED $FP_ITERS iterations per 1000 ms of nominal budget: launcher $FPI_WRAP md5 $(md5sum < "$FPI_WRAP" | cut -c1-32), check $FPI_CHECK md5 $(md5sum < "$FPI_CHECK" | cut -c1-32)"
       echo "  poke_engine for Foul Play: $(cd "$FP_DIR" && PYTHONPATH=$FP_PYTHONPATH "$FP_VENV/bin/python" -c 'import poke_engine; print(poke_engine.__file__)' 2>&1 | tail -1)"
     fi
   fi
@@ -239,6 +255,16 @@ stop_fp() {  # kill the instances' session; compress their logs (chatty) before 
     > "$1/fp/restarts.txt" 2>&1
 }
 
+iters_check() {  # DIR: wsp's iteration check on the block's Foul Play logs (FP_ITERS set) -> DIR/ITERS_OK | ITERS_MISMATCH
+  local msg
+  [ -n "${FP_ITERS:-}" ] || return 0
+  if msg=$("$PY" -I "$FPI_CHECK" "$FP_ITERS" "$1"/fp/*.log 2>&1); then echo "$(date -u +%FT%TZ) $msg" > "$1/ITERS_OK"; return 0; fi
+  rm -f "$1/ITERS_OK"; echo "$(date -u +%FT%TZ) $msg" > "$1/ITERS_MISMATCH"
+  echo "$(date -u +%FT%TZ) arm $k block $j: $msg" >> "$OUT/ITERS_MISMATCH"
+  log "ITERS MISMATCH in arm $k block $j: $msg"
+  return 1
+}
+
 run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
   local dir=$1 seed=$2 spec=$3 n=$4 tag=$5 rc waited=0
   start_server "$dir" "$seed" || return 1
@@ -257,6 +283,11 @@ run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
   EVAL_G=$(pgid_of "$dir/client.pgid" "$EVAL_W")
   while kill -0 "$EVAL_W" 2>/dev/null; do
     sleep 10; waited=$((waited + 10))
+    if [ "$FP_MODE" = 1 ] && [ $((waited % 300)) = 0 ] && ! iters_check "$dir"; then
+      log "arm $k block $j: stopping the client (iteration check)"
+      [ -z "$EVAL_G" ] || kill -- -"$EVAL_G" 2>/dev/null; sleep 20; [ -z "$EVAL_G" ] || kill -9 -- -"$EVAL_G" 2>/dev/null
+      break
+    fi
     if [ -e "$OUT/STOP_NOW" ] || [ "$waited" -ge $((BLOCK_TIMEOUT_MIN * 60)) ]; then
       log "arm $k block $j: killing the client after ${waited}s ($( [ -e "$OUT/STOP_NOW" ] && echo STOP_NOW || echo timeout))"
       [ -z "$EVAL_G" ] || kill -- -"$EVAL_G" 2>/dev/null; sleep 20; [ -z "$EVAL_G" ] || kill -9 -- -"$EVAL_G" 2>/dev/null
@@ -265,6 +296,7 @@ run_block() {  # DIR SEED SPEC GAMES TAG: server + client for one block
   done
   wait "$EVAL_W"; rc=$?
   EVAL_W= EVAL_G=
+  [ "$FP_MODE" != 1 ] || [ -e "$OUT/ITERS_MISMATCH" ] || iters_check "$dir"  # the games since the last check
   [ "$FP_MODE" != 1 ] || stop_fp "$dir"
   stop_server
   return $rc
@@ -280,6 +312,10 @@ for ((j = 1; j <= BLOCKS; j++)); do
     play_block "$k" "$j"; rc=$?
     games=$(grep -vc '"status": "no_accept"' "$OUT/arm-$k/block-$j/results.jsonl" 2>/dev/null); games=${games:-0}
     log "arm $k block $j: client exit $rc, $games games: $(tail -1 "$OUT/arm-$k/block-$j/evaluate.log" 2>/dev/null)"
+    if [ -e "$OUT/ITERS_MISMATCH" ]; then
+      touch "$OUT/HARNESS_FAIL"; log "HARNESS FAILURE: Foul Play's iteration check failed in arm $k block $j (void)"
+      break 2
+    fi
     if [ "$rc" != 0 ] && [ "$games" -lt $((2 * BLOCK_PAIRS * 9 / 10)) ]; then
       [ -e "$OUT/STOP_NOW" ] || { touch "$OUT/HARNESS_FAIL"; log "HARNESS FAILURE in arm $k block $j: the run stops (void; replay after the fix)"; }
       break 2
