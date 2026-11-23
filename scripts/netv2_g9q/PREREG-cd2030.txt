@@ -1,0 +1,101 @@
+G9q-cd@2030M (next deployment-net candidate) + READING R2030 (G9q-cd@2030 vs G9q-cd@1350) + CONFIRMATION F2030
+(G9q-cd@2030 vs Foul Play gen9 at a FIXED 200,000 iterations per state, 1000 games, only on R2030 SUCCESS) —
+PRE-REGISTRATION, FINAL (netv2, 2026-11-23 ~12:15 UTC; main's item "repeat the cd@1350 pipeline one cooldown later",
+under the user's delegation; written before the branch and before any game; read-only copy runs/g9q-cd2030/PREREG.txt).
+Why: R1350 (cd@1350 vs cd@805, 545M more steps) was IMPROVING: SUCCESS 52.05 [50.45, 53.62]; F1350 59.1% +- 2.9%
+[56.2, 62.0] vs Foul Play gen9 (time-based 1 s per state). G9q has trained ~680M steps since cd@1350's branch point.
+This is the same pipeline one cooldown later: only the branch point, the opponent net, the seeds, the dirs and (by
+main's 11-19 rule for new headlines) Foul Play's budget change.
+
+BRANCH (= G9q-cd@1350's recipe exactly: runs/g9q-cd1350/PREREG.txt 342e63f8, scripts/netv2_g9q/cd1350-driver.sh 0ca711db):
+  Branch point = G9q's FIRST 5M checkpoint >= 2,030,000,000 steps = ckpt_02030019516.pt (written 11:42:38Z 11-23 in job
+  1483048's live dir /tmp/ws-netv2-1483048/run/G9q/checkpoints/, md5 62e8cc66). G9q keeps only its latest checkpoint, so
+  netv2 copied that file node-locally at 11:54Z (before this text, before anything else) to
+  /tmp/ws-netv2-1483048/cd2030-keep/ckpt_02030019516.pt (md5 62e8cc66, identical); the driver takes the earliest
+  checkpoint >= 2,030M among that keep dir and the live dir (= this one; it refuses a branch point at 2,030,019,516
+  whose md5 is not 62e8cc66), copies it to runs/g9q-cd2030/branch-point-<S>.pt (md5 in STATUS).
+  ONE INLINE_CMD of job 1483048 (A30, clapper; G9q's trainer is stopped meanwhile, ~45 min): G9q's live trainer argv as
+  recorded at the branch (runs/g9q-cd2030/trainer-argv.{bin,txt}) + the branch's own run / pool dirs (a copy of G9q's
+  local pool; snapshots and frozen bests newer than S moved out) + --resume <branch point> --cooldown-start S
+  --total-steps S + 5,000,000 --final-lr-frac 0.1 (cosine 7e-5 -> 7e-6) --guard-entropy-min 0.35; limit 2 h
+  (timeout -s INT).
+  Final net: runs/g9q-cd2030/final/<steps, 11 digits>.pt (r--; md5 in runs/g9q-cd2030/STATUS "final at ... (md5 ...)").
+  Refusals (runs/g9q-cd2030/FAILED, nothing queued): no read-only PREREG with the pinned md5; trainer argv with an
+  --lr-schedule flag or without --guard-ptop-max 0.6; not exactly one trainer, or its parent is not the job script;
+  any of INLINE_CMD / INLINE_CMD.running / HOLD / WAIT_FOR / CHAIN_STOPPED / PARKED in runs/r1; no top-level
+  final_model.pt; less than 3 h left in job 1483048. No final, or a final < S + 5M steps => FAILED. Stop before the
+  SIGINT: touch runs/g9q-cd2030/CD_STOP.
+  G9q main resumes afterwards (restart in place, same allocation). The driver verifies the relaunch exactly as for
+  cd@1350: a new 'v2 trainer:' line; the relaunched argv equals the recorded one with the --resume values masked, the
+  last --resume = $LOCAL/run/G9q/final_model.pt; the first 'upd' line after it continues the step counter
+  (0 < steps - saved < 200,000); then re-touches runs/r1/restart. A failed relaunch check writes
+  runs/g9q-cd2030/relaunch/FAILED (alert).
+  Driver: scripts/netv2_g9q/cd2030-driver.sh (= cd1350-driver.sh with S_MIN, dirs, names, PREREG md5 and the keep dir
+  + branch-point md5 pin changed; a setsid step in job 1483048, run from a node-local copy).
+
+READING R2030 (a measurement with one reading; it gates F2030 and nothing else):
+  A = G9q-cd@2030 (the one file in runs/g9q-cd2030/final/, md5 = the STATUS line), B = G9q-cd@1350
+  runs/g9q-cd1350/final/01355036714.pt (md5 6cf40c0c); both raw at T 0.5; duplicate pairs (teams swapped),
+  gen9randombattle, fastenv in-process; harness scripts/netv2_cmp_step.sh (md5 a80c7da2, unmodified; its "G9s" label
+  = A, "G9p" label = B; STEP 0 = no step constraint: each side's dir holds only its one net) with wsp's sequential
+  design runs/cmp/seq-gain.json (md5 f12fec7c: theta0 50 -> theta1 52%, alpha 0.025 per one-sided test, power 0.8,
+  looks every 100 pairs, n_max 2400 pairs = 4800 games; the boundaries meet at n_max, so each test decides). Both
+  one-sided tests run on the same pairs; the nested pair-id order is the reading of record (round-robin alongside).
+  Same harness, design and rule as R1350 and R800. Seed 8203061, NEW (grep check below).
+  READING: SUCCESS iff the test "cd2030 > cd1350" SUCCEEDS (its 95% repeated CI excludes 50% from above, i.e. the
+  lower 95% bound > 50%; valid at any look) => IMPROVING: G9q-cd@2030 is the NEW DEPLOYMENT-NET CANDIDATE and F2030
+  is released. Otherwise NOT SHOWN, stated with the reason: "cd2030 > cd1350" FUTILITY (a gain of >= 2 points is
+  unlikely) and whether "cd1350 > cd2030" SUCCEEDED (cd2030 weaker: a warning about the main run, for main);
+  cd@1350 stays the candidate and F2030 is cancelled (not played).
+  Reported with seq_monitor's median-unbiased estimate + 95% CI and the naive repeated CI at the decision look, and the
+  all-pairs merge line.
+  Placement (changed from R1350 only so that the chain survives data's host hand-over 1174320 -> 1545813 at 11-23
+  18:13Z): the chain scripts/netv2_g9q/r2030-chain.sh is a 1-CPU setsid step in G9q's job 1483048 (ends 11-26); it
+  waits <= 10 h for the final (FAILED if runs/g9q-cd2030/FAILED appears first), then runs the unmodified harness as an
+  srun --overlap step (6 CPUs, 14G, the job's GPU, 5 workers, limit 6 h) in the RUNNING ws-data-host job with the most
+  time left, which must have >= 1.5 h left (else it waits <= 24 h for one; R1350's 1700 pairs took ~12 min). If that
+  host job ends during the h2h, the chain starts the harness once more in the next host job: the harness skips the
+  100-pair shards already complete (written atomically, fixed per-shard seeds), so the pairs and the looks are exactly
+  those of an uninterrupted run. A second loss, a harness error or the 6 h limit => runs/g9q-cd2030/r2030/FAILED.
+
+CONFIRMATION F2030 (fixed n, no looks, nothing pooled in; = runs/conf1350 F1350 with the net, the seed and Foul Play's
+  budget changed): raw G9q-cd@2030 (the same file and md5 as R2030's A) vs FOUL PLAY GEN9, 1000 games (500 pairs),
+  Foul Play at a FIXED 200,000 MCTS iterations per 1000 ms state (main's 11-19 rule for new headlines; 2 states x
+  200,000 normally, 4 x 100,000 early; 1,000 on a single-option state), through wsp's fixed-iteration launcher
+  /vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/code/fp9_iters.sbatch (md5 82a207a6 = data's fp9 harness 7476be8b + the
+  iteration budget; K = 20 Foul Play instances x 50 games, parallelism 1) with fp_fixed_iters.py (f9c32cdf) and its
+  iteration check fp_iters_check.py (a1ff4886): a logged per-state count other than those voids the run
+  (ITERS_MISMATCH => FAILED-ii, not replayed). Invoked as wsp's fpcal_rerunL.sbatch does:
+  `cd $C && SLURM_SUBMIT_DIR=$C bash fp9_iters.sbatch NET 1000 --gen 9 --seed 8203222 --fp-iters 200000 --temperature 0.5`
+  (run dir /vol/bitbucket/fr1226/porygon-ws-wsp/fpcal/runs/foulplay-net-<date>-<job>-200000/, the launcher's own
+  location); 95% interval from the pair means (the harness's result.txt line).
+  INFRASTRUCTURE VOID: if the harness exits with "Foul Play instance i did not start" after websocket "timed out during
+  handshake" lines and 0 games played, the attempt is VOID (runs/conf2030/VOID-1, STATUS) and is replayed ONCE,
+  automatically, in the same job with the same seed and settings. A second void => FAILED-ii (nothing read).
+  ONE slot job (24 CPUs, `training`, --time 8:00:00), scripts/netv2_conf2030/conf2030.sbatch, submitted now HELD
+  (sbatch --hold, no dependency: the slot is free and nothing else is queued for it); ledger CLAIM line in
+  $C/LEDGER-OUTBOX.md at submission (under its flock). r2030-chain.sh releases it (scontrol release) on R2030 SUCCESS
+  and cancels it (scancel; WITHDRAWN line to the outbox) on NOT SHOWN; on an R2030 FAILED it stays held for main. The
+  job itself refuses to play unless runs/g9q-cd2030/READING.txt says SUCCESS and the net's md5 matches (FAILED-net,
+  RELEASE line). RELEASE line to $C/LEDGER-OUTBOX.md at the end. ETA ~2 h of games (F1350: 1 h 50 min).
+  READING: "the raw net beats Foul Play gen9 at 200k iterations" CONFIRMED iff the lower 95% bound > 50%; else NOT
+  CONFIRMED (stated with the point estimate and interval). Quoted alongside for context only (not paired tests, no
+  difference claims): cd@1350 59.1 [56.2, 62.0] (time-based 1 s per state); fpcal cd@805 61.3 / 57.8 / 54.9 at 50k /
+  ~210k time-based / 800k iterations per state.
+
+WHAT EACH OUTCOME MEANS
+  - R2030 SUCCESS and F2030 CONFIRMED => G9q-cd@2030 is the new deployment-net candidate (raw benchmark net in place of
+    cd@1350 / cd@805). Adopting lookahead2 on it is an LA2-H-style follow-up (fastenv), not part of this text.
+  - R2030 SUCCESS but F2030 NOT CONFIRMED => the net-vs-net gain did not carry to Foul Play; no switch; main decides.
+  - R2030 NOT SHOWN => cd@1350 stays the candidate; G9q keeps training (constant lr); F2030 is not played.
+  - Any FAILED => nothing is read; the stage is rerun under this same pre-registration (new attempt, same seeds) by
+    main's decision.
+  The readings go to the orchestrator, numbers re-read from the files.
+
+Seeds 8203061 (R2030) / 8203222 (F2030), NEW: grep-checked 2026-11-23 ~12:10 UTC as whole words in the record files
+  under porygon-ws-{netv2,data,fastenv,wsp} (depth <= 4: PREREG*, NETS.txt, *.env*, manifest*, RESULT*, READING*,
+  VERDICT*, *.sh, *.sbatch, NOTES*, *.meta.json, STATUS, *argv*.txt, notes.log, result.txt) and gloria/runs manifests
+  (depth <= 3), and in the laptop's .orchestra/, docs/ and the worktrees' scripts/ and docs/: no hit.
+Outputs: runs/g9q-cd2030/{STATUS, FAILED, final/, branch-train.log, trainer-argv.*, relaunch/}, runs/g9q-cd2030/r2030/
+  {STATUS, RESULT.txt, NETS.txt, run.log, FAILED}, runs/g9q-cd2030/READING.txt (r--); runs/conf2030/{STATUS,
+  RESULTS.txt (r--), FAILED-<stage>, VOID-<n>}, run dir(s) in porygon-ws-wsp/fpcal/runs/foulplay-net-*-<job>-200000/.
