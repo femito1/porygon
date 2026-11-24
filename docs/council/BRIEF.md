@@ -57,6 +57,8 @@ Be the strongest Pokémon Showdown random-battle bot in **gen9** (primary) and *
 - **Search → net (expert iteration):**
   - search labels from a teacher weaker than the net (bc-12…14, v1-12);
   - ExIt-LA2, fine-tuning toward lookahead2's played policy: HARMFUL, 48.17 vs control (ns-27, ns-28).
+  - ExIt with a soft completed-Q target on the same data (council P2, 11-24): no harm, no gain: 50.20 vs control (ns-33),
+    50.09 vs parent (ns-34) ⇒ the ExIt-LA2 line is closed in both forms.
 - **Recipe arms, one change each, cooled vs cooled:**
   - lr annealing G9r (g9q-04/05); GAE λ 0.5 G9t (g9q-09/10); entropy schedule G9qent (g9q-22);
   - bf16 (g9q-20); EMA weights (v2g9-18); actor-stream overlap (v2g9-21).
