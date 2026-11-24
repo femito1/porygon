@@ -12,7 +12,9 @@ For the fresh agent who runs the council. Prepared 2026-11-24 by the previous or
 
 User decisions:
 - both generations are in scope (gen9 primary);
-- token budget **5M to start**; the user can raise it;
+- token budget **5M to start**; the user can raise it. **Raised to 30M GROSS on 2026-11-24** (after the projection: gross
+  counts every token each model request processes, cached context re-read on every tool call included, ≈ 90% of a long
+  call; R1–R3 projected ≈ 12–20M gross, ≈ 1.5–2M fresh). `BUDGET.tsv` logs both `total` (gross) and `fresh`;
 - outputs in the format best for agents (the user will not read the debate, only your short summary);
 - Lean only after checking disk space (see below);
 - the user starts you fresh; nothing ran before you except a CLI smoke test (`test-run/`).
@@ -27,7 +29,7 @@ The council is your main project; the campaign keeps running alongside it.
 ## Members (all verified working 2026-11-24, `test-run/`)
 | member | model | CLI (headless, read-only) | notes |
 |---|---|---|---|
-| `opus` | Claude Opus 5.5 | `claude -p --model opus`, Edit/Write disallowed, read tools + websearch MCP allowed | ≈ 115k tokens of fixed overhead per call |
+| `opus` | Claude Opus 5.5 | `claude -p --model opus --tools Read,Grep,Glob,Bash,WebFetch --permission-mode dontAsk`, Bash allowlist (ls/cat/grep/head/tail/wc/sed -n) + websearch MCP | ≈ 38k tokens of context per model request (115k for the 3-request TEST) |
 | `astra` | GPT-6.2 Astra (`databricks-gpt-6-2-astra`) | `codex exec -s read-only` | model comes from `~/.codex/config.toml` |
 | `carbon` | Gemini 4 Carbon | `agy -p --model "Gemini 4 Carbon" --sandbox --effort high` | the id `gemini-4-carbon` is retired (403): use the label |
 
@@ -45,8 +47,8 @@ The council is your main project; the campaign keeps running alongside it.
   modes, formal check).
 - `council.sh`: the runner, with `setup | test | round R1|R2|R3 [member…] | budget | verify`.
   - The three members run in parallel; finished outputs are skipped (resume-safe; `FORCE=1` redoes one).
-  - Token accounting goes to `BUDGET.tsv`; no new call starts once the total reaches `COUNCIL_TOKEN_CAP` (5,000,000).
-  - The per-call timeout is `COUNCIL_TIMEOUT_S` (5400).
+  - Token accounting goes to `BUDGET.tsv`; no new call starts once the gross total reaches `COUNCIL_TOKEN_CAP` (default 30,000,000; `COUNCIL_CAP_BASIS=fresh` switches the basis).
+  - The per-call timeout is `COUNCIL_TIMEOUT_S` (7200).
 - `verify_citations.py`: flags cited row ids that do not exist, and numbers next to an id that do not match the row.
 - `evidence/`: copies of the git-excluded literature report, campaign rules and the loss-pattern report.
 - `rounds/`, `BUDGET.tsv`: per-session working files (git-ignored while running). Archive them at the end (step 7).
@@ -130,6 +132,10 @@ The council is your main project; the campaign keeps running alongside it.
 ## Known facts about the tooling
 - The worktree must be at a commit that contains `docs/council/BRIEF.md` (`setup` checks this).
 - `.council/` (prompt files) is in `.git/info/exclude`, so it never shows as an edit.
-- Opus calls cost ≈ 115k tokens before any work; Astra ≈ 42k; Carbon ≈ 35k (TEST round).
+- TEST round (3 requests each): Opus 115k gross / 42k fresh, Astra 42k / 14k, Carbon 35k / 17k. Gross grows with every
+  tool call (each request re-reads the whole context): a 43–62-request codex session cost 2.4–3.5M gross.
+- **Permission fix (2026-11-24):** the user's Claude default mode is `bypassPermissions`, under which `--allowedTools`
+  restricts nothing; the opus call therefore passes `--permission-mode dontAsk` (calls outside the allowlist are denied)
+  and `--tools` (no Agent / SendMessage / Artifact tools). Verified with a haiku check: `touch` denied, `ls` allowed.
 - `agy` print mode returns `status`, `response` and `usage.total_tokens` in its JSON; `codex exec --json` reports usage on
   `turn.completed`.
