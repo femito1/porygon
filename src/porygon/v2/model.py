@@ -507,10 +507,13 @@ def model_keys(gen: int) -> list[str]:
 
 
 def save(net: Net, path, **extra) -> Path:
-    """Atomic write of {format, spec, gen, cfg, state_dict, **extra}."""
+    """Atomic write of {format, spec, gen, cfg, state_dict, **extra}; a spec v2.2a policy (`net.own_tera_visible`)
+    also gets `own_tera_visible: True` (absent = v2.1: every older file)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
+    if getattr(net, "own_tera_visible", False):
+        extra = {"own_tera_visible": True, **extra}
     torch.save({"format": "porygon.v2", "spec": SPEC_VERSION, "gen": net.gen, "cfg": dict(net.cfg),
                 "state_dict": net.state_dict(), **extra}, tmp)
     os.replace(tmp, path)
@@ -538,6 +541,8 @@ def net_from_checkpoint(ck: dict, device="cpu") -> Net:
     if missing or unexpected:
         print(f"warning: damage-layer buffers differ from the checkpoint ({len(missing)} missing, "
               f"{len(unexpected)} unexpected); using the current damage layer")
+    if ck.get("own_tera_visible"):  # spec v2.2a policy (porygon.v2.spec.OWN_TERA_SPEC); absent = v2.1
+        net.own_tera_visible = True
     return net.to(device)
 
 

@@ -204,13 +204,25 @@ def _mon_common(out: dict, i: int, mon: Pokemon, battle: AbstractBattle, mine: b
             n[EFFECT0 + k] = 1.0
 
 
-def _encode_own(out: dict, i: int, mon: Pokemon, battle: AbstractBattle) -> None:
+def request_tera(battle: AbstractBattle) -> dict[str, str]:
+    """Our mons' tera types by ident ('p1: Garchomp', = the battle.team key), lower case, from the last request
+    (= porygon.search.request_tera; poke-env fills mon.tera_type only at terastallization)."""
+    side = (battle.last_request or {}).get("side") or {}
+    return {p["ident"]: norm(p["teraType"]) for p in side.get("pokemon", []) if p.get("teraType") and "ident" in p}
+
+
+def _encode_own(out: dict, i: int, mon: Pokemon, battle: AbstractBattle, req_tera: str | None = None) -> None:
+    """`req_tera` (spec v2.2a only): this mon's tera type from our request; it sets tera / tera_p (else v2.1)."""
     gen = battle.gen
     _mon_common(out, i, mon, battle, True)
     n = out["mon_num"][i]
     level = mon.level or 80
     n[COL["level"]] = level / 100
-    if gen >= 9 and mon.tera_type is not None:
+    if gen >= 9 and req_tera:
+        t = TYPE_ID.get(req_tera, 0)
+        out["tera"][i] = t
+        out["tera_p"][i, t] = 1.0
+    elif gen >= 9 and mon.tera_type is not None:
         t = type_id(mon.tera_type)
         out["tera"][i] = t
         out["tera_p"][i, t] = 1.0
@@ -362,14 +374,16 @@ def empty(gen: int, aux: bool = False) -> dict[str, np.ndarray]:
     return {k: np.zeros(shape, dtype) for k, (shape, dtype) in spec.items()}
 
 
-def encode(battle: AbstractBattle) -> dict[str, np.ndarray]:
+def encode(battle: AbstractBattle, own_tera_visible: bool = False) -> dict[str, np.ndarray]:
+    """`own_tera_visible`: spec v2.2a (porygon.v2.spec.OWN_TERA_SPEC) for this policy; False = v2.1 exactly."""
     gen = battle.gen
     out = empty(gen)
     out["field_num"][:] = _field(battle)
     out["side_num"][0] = _side(battle.side_conditions, battle.turn)
     out["side_num"][1] = _side(battle.opponent_side_conditions, battle.turn)
-    for i, mon in enumerate(list(battle.team.values())[:6]):
-        _encode_own(out, i, mon, battle)
+    req = request_tera(battle) if own_tera_visible and gen >= 9 else {}
+    for i, (key, mon) in enumerate(list(battle.team.items())[:6]):
+        _encode_own(out, i, mon, battle, req.get(key))
     for i, mon in enumerate(list(battle.opponent_team.values())[:6]):
         _encode_opp(out, 6 + i, mon, battle)
     mask = SinglesEnv.get_action_mask(battle)

@@ -24,7 +24,7 @@ def _device(net: Net) -> torch.device:
 def policy_probs(net: Net, battle: AbstractBattle, temperature: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
     """(probabilities [A] over poke-env actions, legal mask [A]); probabilities are 0 off the mask.
     `temperature` < 1 sharpens (softmax of logits / T)."""
-    obs = encode(battle)
+    obs = encode(battle, own_tera_visible=getattr(net, "own_tera_visible", False))  # spec v2.1 / v2.2a per net
     out = net(obs_to_tensors([obs], _device(net)), aux=False)
     mask = obs["action_mask"]
     logits = out["logits"][0].double().cpu().numpy()  # float64: rng.choice needs probabilities summing to 1 ± 1e-8

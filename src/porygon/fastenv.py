@@ -100,7 +100,7 @@ def node_binary() -> str:
 class Worker:
     def __init__(self, index: int, fmt: str, battles: int, seed: int, encoder: str, shaping, node: str,
                  max_turns: int, duplicate: bool, bot: str, bot_battles: int, dyn_bots: str = "",
-                 wait_rows: bool = False):
+                 wait_rows: bool = False, own_tera: bool = False):
         self.index, self.battles = index, battles
         to_child_r, self.to_child = os.pipe()
         self.from_child, from_child_w = os.pipe()
@@ -109,7 +109,10 @@ class Worker:
                "--shaping", ",".join(map(str, shaping[:3])), "--max-turns", str(max_turns),
                "--duplicate", str(int(duplicate))] + (["--bot", bot, "--bot-battles", str(bot_battles)] if bot else []) \
             + (["--bots", dyn_bots] if dyn_bots else []) + (["--wait-rows", "1"] if wait_rows else [])
-        self.proc = subprocess.Popen(cmd, pass_fds=(to_child_r, from_child_w), stdin=subprocess.DEVNULL)
+        env = {k: v for k, v in os.environ.items() if k != "PORYGON_V22A"}  # encoder_v2.js: spec v2.2a iff "1"
+        if own_tera:
+            env["PORYGON_V22A"] = "1"
+        self.proc = subprocess.Popen(cmd, pass_fds=(to_child_r, from_child_w), stdin=subprocess.DEVNULL, env=env)
         os.close(to_child_r)
         os.close(from_child_w)
         self.buf = bytearray(1 << 20)
@@ -204,7 +207,7 @@ class FastEnv:
     def __init__(self, battle_format: str = "gen9randombattle", n_workers: int = 4, battles_per_worker: int = 64,
                  seed: int = 0, encoder: str | None = None, shaping=SHAPING, node: str | None = None,
                  max_turns: int = 1000, duplicate: bool = False, bot: str = "", bot_battles: int = 0,
-                 dyn_bots: str = "", wait_rows: bool = False):
+                 dyn_bots: str = "", wait_rows: bool = False, own_tera: bool = False):
         """bot: an env-side baseline ('heuristic' / 'max_power' = poke-env SimpleHeuristicsPlayer /
         MaxBasePowerPlayer, 'random') playing side two of the first bot_battles battles of every worker (those
         sides emit no rows); a comma list ('heuristic,max_power') assigns the bots to workers round-robin
@@ -214,7 +217,9 @@ class FastEnv:
         battle ends and the side emits no more rows (not even its terminal row). FastCollector uses it for netv2's
         pool mix.
         wait_rows: also emit WAIT rows (flag 16, no action) for a side waiting while its opponent decides alone:
-        its current obs (mask = action 0) and reward since its previous row, as poke-env's wait step."""
+        its current obs (mask = action 0) and reward since its previous row, as poke-env's wait step.
+        own_tera: the v2 encoder writes spec v2.2a rows (our own tera types from the request; porygon.v2.spec) for
+        BOTH sides of every battle; consumers give v2.1 policies `porygon.v2.spec.v21_view` of them."""
         encoder = encoder or os.environ.get("PORYGON_FASTENV_ENCODER", "v1")
         self.bots = [b for b in bot.split(",") if b] if bot else []
         self.dyn_bots = [b for b in dyn_bots.split(",") if b]
@@ -225,9 +230,10 @@ class FastEnv:
         self.restart_dead = False  # True: a dead worker is reported in `dead` (and restartable) instead of raising
         self.dead: list[tuple[int, str]] = []
         self.wait_rows = wait_rows
+        self.own_tera = bool(own_tera)
         self._new_worker = lambda i, s: Worker(i, battle_format, battles_per_worker, s, encoder, shaping, node,
                                                max_turns, duplicate, self.worker_bot(i), self.bot_battles,
-                                               ",".join(self.dyn_bots), wait_rows)
+                                               ",".join(self.dyn_bots), wait_rows, self.own_tera)
         self.workers = [self._new_worker(i, seed * 1000 + i) for i in range(n_workers)]
         self.span = 2 * battles_per_worker
         self._pending: dict[int, Batch] = {}  # worker -> batch whose decisions are not answered yet
