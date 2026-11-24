@@ -1,0 +1,4 @@
+utc	round	member	input	output	total	seconds	status
+2026-11-24T11:45:08Z	TEST	astra	42034	106	42140	7	ok
+2026-11-24T11:45:10Z	TEST	opus	115294	215	115509	9	ok
+2026-11-24T11:45:24Z	TEST	carbon	34027	1214	35241	23	ok
