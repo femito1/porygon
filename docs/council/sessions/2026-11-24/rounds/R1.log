@@ -1,0 +1,4 @@
+R1/carbon: ok, 185971 gross / 115119 fresh tokens, 81 s -> /home/nand/Documents/personal-projects/ShowdownAgent/docs/council/rounds/R1/carbon.md
+R1/opus: ok, 1430763 gross / 179946 fresh tokens, 369 s -> /home/nand/Documents/personal-projects/ShowdownAgent/docs/council/rounds/R1/opus.md
+R1/astra: ok, 4760524 gross / 211431 fresh tokens, 498 s -> /home/nand/Documents/personal-projects/ShowdownAgent/docs/council/rounds/R1/astra.md
+round R1 done (rc 0); ledger gross 6377258, fresh 506496; cap 30000000 (gross)

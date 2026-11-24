@@ -1,0 +1,145 @@
+## A1: Give the net the battle evidence it can't see, starting with speed order and lock evidence, in the existing shapes — REVISE
+- **Response to critiques:**
+  - **The oracle kill test is invalid (B, C): accepted.** I checked `fastenv/js/encoder_v2.js:28-30`. Own `tera` stays 0 and `aux_tera` stays −1 until a mon terastallizes, and the aux fields hold no exact stats. So copying the aux targets cannot build Arm O. C is also right that a frozen net fed `(terastallized=0, tera≠0)` measures how it copes with unfamiliar inputs, not how much the information is worth. I drop the oracle test. A frozen-net oracle could only ever be a diagnostic.
+  - **Bundling (B): accepted.** The round-1 arm changed the posterior and added history columns at the same time. A result could not tell which change mattered. History is now a separate, later branch, run only if this one passes.
+  - **The Net2Net claim (C): accepted.** Zero-initialised columns preserve the function only for new columns. Part (a) changes the existing `item_p` / `stats`, and through them `DamageFeatures`. Adding columns to `MON_NUM` would also break `OppStack` grouping, the BC-P4 shards and `v3leaf`. The revision stays inside the Spec v2.1 shapes, as C proposed, and the formal check is dropped.
+  - **"Repeated move ≠ Choice lock" (B): accepted.** I now use only `Evidence.unlocked` (`inference.py:98`). It records two different moves in one stint, which proves the mon holds no Choice item.
+  - **Damage evidence is deferred.** `hits` needs poke-engine damage ranges. The JS side has no evidence tracking at all: grepping `fastenv/js` for `unlocked|races` finds nothing. Porting a damage calculator to JS is the expensive part, so it waits.
+  - **B's evidence point: correct, and it sharpens the mechanism.** `damage.py:14` already gives `speed` = P(i moves first) from the item and ability bins (Scarf, `:522-525`). What is missing is the *observed* order. Filtering `item_p` by `races` feeds straight into that existing feature.
+  - **C's caveat is fair.** lookahead2 already uses `inference.py` (through `search.convert`) and still shows short −3.0 ± 7.7 (la2-len1). So set blindness is at most part of the short-game gap. I lower my estimate to B's.
+- **Revised proposal:**
+  - **lever:** network inputs (posterior fidelity), no shape change
+  - **generations:** both (gen9 first)
+  - **mechanism:**
+    - In `_encode_opp` (Python) and `encoder_v2.js`, filter the candidate sets through `inference.py`'s `speed_ok` (`races`) and the `unlocked` rule (`:580-593`).
+    - In JS, port `races`, `outran` and `speed(species, level, set)` onto the `tracker.js` SideTracker.
+    - `item_p`, `stats` and hence `DamageFeatures.speed` then carry the evidence. Tensor layout, aux targets and parameter count are unchanged.
+    - Frozen pool opponents keep the v2.1 encoding through a per-side encoder flag, so only the learner's observation changes.
+  - **evidence:**
+    - `encoder.py:9` / `:122`: no speed or damage evidence in the net's posterior.
+    - The search's sampler uses this evidence, with hidden item right 82–88% (dg-05).
+    - Short-game gap 53.4 vs 64.6 (dg-08).
+    - Foul Play and Jaxcalibur both treat set tracking as central.
+  - **predicted effect:** +0.7 points [−0.5, +2] for the raw gen9 net vs FP @200k. Under lookahead2 it is smaller, because the search's worlds already use the evidence.
+  - **cost:**
+    - 2–3 engineering days (JS port plus the 300-battle parity check).
+    - One 30M + 5M-cooldown fork, ≈ 6–7 A40 GPU-h. The control arm is shared with the adopted B1 (same parent, same seeds), so the control is not paid twice.
+    - ≈ 1 h on the Dojo VM. No slot hours. No risk to G9q.
+  - **kill test:**
+    - **Step 0, offline (B's design, rule fixed before reading):** use held-out self-play Showdown battles, with no Foul Play games. At each equal-priority race after the first one observed for a pair, score the observed order under `DamageFeatures.speed` computed with the filtered and with the unfiltered posterior.
+      - KILL if the filtered posterior changes `item_p` by TV ≥ 0.1 on < 2% of opponent-active decision rows.
+      - KILL if the log-loss on the next race does not improve, i.e. the paired bootstrap lower 95% of the improvement is ≤ 0.
+    - **Step 1:** parity on 300 battles must be 100.0% on every field (as ns-10). Then fork G9q@2030M twice, E and the shared control C, each 30M + 5M cooldown. Play in-process `spd_h2h`, both at T 0.5, 4,000 fixed duplicate pairs. GO iff E's pair-mean lower 95% bound is > 50.0%. Otherwise park.
+  - **scale-up if GO:**
+    - Repeat from a second seed.
+    - Run 1,000 paired games each for E and C vs FP @200k.
+    - Update `v3leaf` and re-derive δ* (ns-13 method).
+    - Only then open the separate Spec v2.2 branch: zero-initialised history columns, then damage `hits`.
+  - **failure modes / confounds:**
+    - The warm start sees sharper posteriors than it was trained on, which can cause a KL spike early in the fork. Log approximate KL against C.
+    - Trick Room, Tailwind, paralysis and priority must match `outran` exactly, or the filter rejects true sets. Guard: if every set is rejected, fall back to the unfiltered posterior, and log how often that happens.
+  - **formal check:** none
+
+## A2: Purify the deployed policy — WITHDRAW
+- **Response to critiques:** B and C are right.
+  - The campaign rule fixes raw nets at T 0.5, so this could not change the headline.
+  - My mechanism was wrong: the 0.35 entropy floor is a stop guard, not a loss term that pushes mass onto weak moves.
+  - C's arithmetic settles it. T 0.5 already squares the probabilities, so a 0.05 tail falls to ≈ 0.3% (and 0.10 to ≈ 1.2%). Colder settings collapse real 60/40 mixed decisions, the Protect, Sucker Punch and switch reads.
+  - Choosing the best of three arms without correction, plus an adoption rule that accepts a lower bound of −1.5, passes a null effect about half the time.
+  - The expected gain (+0.2) does not justify the slot run.
+
+## A3: Tactical sparring partners in the PPO league — WITHDRAW
+- **Response to critiques:**
+  - The engine-provenance question is the orchestrator's to rule on. B reads the brief as permitting poke-engine; C sees a contamination risk.
+  - The practical flaws are decisive on their own:
+    - The fastenv host sends binary Spec v2 arrays, not a protocol stream (C, `fastenv.py:38-45`). A search opponent inside pool workers would need a tracker, then a poke-env Battle, then `convert`, which is the 4–6 days I quoted plus integration risk.
+    - The opponent I measured (g9q-23) used 4 × 1000 ms per decision. A 20 ms version is a different and much weaker player.
+    - A single true-state world cheats on our hidden team.
+    - B is also right that my Step 0 rule is invalid: game length is endogenous, so killing on a retrospective length cutoff proves nothing.
+  - The cheap version of the hypothesis is B3: sharper versions of existing opponents, at half a day and no extra forward passes. That test should go first.
+
+## A4: lookahead2 against the predicted opponent — WITHDRAW
+- **Response to critiques:**
+  - **The bound (B): correct.** My bound covered the reported score of a *fixed* action. The valid statement is weaker. Since a_λ maximises Q_λ, Q₀(a_λ) ≥ Q₀(a₀) − 2λD with D = maxₐ|Σₖ wₖ Mₖ[a](q_k − y_k)|. That holds only inside the model's matrices, and it gives no guarantee against a real opponent.
+  - **Root-only blending cannot fix the KO races (C).** `M_k` already pre-minimises the opponent's forced switches. And when *our* mon faints or pivots, the leaf is scored as a dead active (C2). A root blend cannot repair KO trades while those leaves are wrong.
+  - **The test is underpowered.** 1,000 fixed slot pairs give SE ≈ 1.6 points, against a credible effect of +0.2 to +0.4. It cannot be decided at a cost we can afford.
+  - **B5 is the better-posed version of the same idea.** It solves the constraint y ≥ 0.5p *inside* the saddle point, not by interpolating afterwards, and builds the prior from the *opponent's* own view. That answers B's "post-hoc" objection and C's privileged-information objection. I defer to B5, ordered after C2.
+
+## A5: gen4 — move the gen4 bot onto the v2 net plus lookahead2 — REVISE
+- **Response to critiques:**
+  - **"Parity at worst" (B): accepted, it had no basis.** There is no measured conversion from gen9 head-to-head gains to gen4 FP gains. v2g4-15 (55.2) is measured against the 300M ancestor, not against FP.
+  - **The non-inferiority adoption rule (C): accepted.** It could adopt a bot up to 3 points weaker across architectures. Adoption now requires superiority.
+  - **The T4 cooldown (B, C): accepted.** The cooldown runs on the A40 (≈ 1 h per C) or inline.
+  - **The sequential slot stage: replaced** with fixed-n runs, as the campaign rule requires.
+  - **The gen9 hard-coding in `v3leaf` (B: `fresh_opp`; C: `:15,52,139`):** acknowledged. It goes into the port cost, which is only spent if Stage 1 passes.
+- **Revised proposal:**
+  - **lever:** search / deployment stack
+  - **generations:** gen4
+  - **mechanism:**
+    - The gen4 headline (fp4-04, 59.19) is time-based. That makes it incomparable with the fixed-200k yardstick, and it has never been compared with a v2 gen4 net on the same team pairs.
+    - Stage 1 re-baselines both candidates on identical pairs. This is useful even if the port never happens, because the thesis needs a gen4 number at 200k.
+    - Stage 2 ports lookahead2 to gen4, only if the raw net is competitive.
+  - **evidence:**
+    - v2g4-10: raw R1b-F@300M at 55.6 [51.5, 59.7] over 400 games.
+    - v2g4-15: @552.7M beats @300M at 55.2 [53.2, 57.2].
+    - fp4-04 contains +4.7 points of fitted leaf evaluation, which makes it a harder bar than gen9's stock search (C's caveat).
+  - **predicted effect:**
+    - Raw R1b-F-cd minus the incumbent, paired at 200k: −1.5 points [−5, +2].
+    - LA2-gen4 minus the incumbent: −0.5 [−4, +3].
+    - The main deliverable is the re-baseline.
+  - **cost:**
+    - ≈ 1 A40 GPU-h for the cooldown.
+    - ½ engineering day to extend the fixed-iteration FP launcher to gen4 and verify its iteration counters.
+    - ≈ 4 slot-hours for Stage 1.
+    - 2–3 engineering days for the port, plus δ* calibration and a 300-battle leaf-parity check, only if the port goes ahead.
+    - No gen9 impact.
+  - **kill test:**
+    - **Stage 1:** the incumbent (fp4-04 configuration) and raw R1b-F-cd (latest checkpoint, T 0.5) each play 1,000 games vs gen4 FP @200k on the same team pairs and seed. The pre-registered statistic is the paired Δ = raw − incumbent.
+      - Build LA2-gen4 iff Δ ≥ −2.0 (point estimate). LA2's measured gain is +1.3 [−2.7, 5.3] (ns-20), so it can't be counted on to close a larger gap.
+      - Otherwise stop the gen4 net route and record the re-baselined incumbent as the gen4 headline.
+  - **scale-up if GO:**
+    - Leaf parity on 300 battles must reach 100%; then re-derive δ*.
+    - LA2-gen4 vs its own raw net, 1,000 fixed slot pairs, GO iff lower 95% > 50.
+    - Then LA2-gen4 vs the incumbent on fresh, identical FP @200k pairs. Adopt as the gen4 bot only if the paired lower 95% bound is > 0.
+  - **failure modes / confounds:**
+    - The incumbent's own budget is time-based; that is part of the bot. Only FP's budget is fixed, and its counters must be checked.
+    - Gen4 Hidden Power types and screen/weather durations in the leaf encoder.
+    - R1b-F keeps training, so the checkpoint is fixed at launch.
+  - **formal check:** none
+
+## adopted: B1 (improved) — Give the policy its own Tera type before it chooses whether to Tera
+- **lever:** data / inputs (bug fix)
+- **generations:** gen9
+- **mechanism:**
+  - **The bug is verified and documented in the code.** `fastenv/js/encoder_v2.js:28-29`: "own `tera` / `tera_p` stay 0 until the mon terastallizes: the reference reads poke-env's mon.tera_type, which poke-env never fills from the request's teraType". The Python reference gates the same way at `encoder.py:213`.
+  - **Consequence I add (an inference from `damage.py:12-13`):** `active_tera_vs`, our active's damage "as if it had terastallized", is zero whenever the type is unknown. So for the move+Tera actions (22–25), which are exactly when the type is unknown, the net has never had Tera-STAB or Tera-defence damage information. This has been true for every gen9 run since Spec v2.
+  - **Fix, Python:** fill own slots 0–5 from `request["side"]["pokemon"][i]["teraType"]`, matched by `ident`, as `search.request_tera` already does.
+  - **Fix, JS:** the same from the SideTracker's request.
+  - **Leaves:** `v3leaf` copies root "tera candidates" (`v3leaf.py:7`), so lookahead2's leaves inherit the fix.
+  - **What stays unchanged:** "has Terastallized" stays a separate flag. Aux labels and frozen pool opponents' encoders stay at v2.1 through a per-side flag. The candidate arm's *own* later snapshots use the new encoding.
+- **evidence:** the code comments above. B's Volcarona sets: the same four moves with Tera Ground or Tera Water call for different decisions. Our side terastallizes in 90.3% of self-play games (dg-02), so the decision is frequent.
+- **predicted effect:**
+  - Raw gen9 vs FP @200k: +1.0 points [−0.5, +3]. That is below B's +1.5, because species and moves often imply the type already.
+  - Under lookahead2: +0.3 to +1.5, since the engine's search already receives the type.
+- **cost:**
+  - 1 engineering day, including the 300-battle parity check.
+  - The candidate fork is ≈ 6–7 A40 GPU-h, with the control shared with A1 (12–15 GPU-h if run alone).
+  - ≈ 1 Dojo VM hour. No slot hours. No risk to G9q.
+- **kill test:**
+  - **Step 0 (B's, kept):** a request-to-tensor check on both sides of 100 fresh duplicate pairs.
+    - STOP if the deployed encoder already supplies the correct type.
+    - Changing only the *opponent's* unrevealed Tera must leave our observation byte-identical. Changing *our* Tera type must change only own `tera` / `tera_p` and `active_tera_vs`.
+  - **Step 1:** fork G9q@2030M, 25M + 5M cooldown for both the candidate and the shared control. Log approximate KL against the control for the first 2M steps. Play in-process `spd_h2h`, T 0.5, 4,000 fresh duplicate pairs. GO iff the pair-mean lower 95% bound is > 50.0%. Otherwise park.
+  - An inference-only swap on an unmodified net is not used for the decision: those inputs are unfamiliar to it.
+- **scale-up if GO:**
+  - Repeat from a second seed.
+  - Compare candidate and control on the same 1,000+ fresh FP @200k pairs and report the paired difference.
+  - Re-derive δ* and run lookahead2 on the corrected net (fixed n vs the stock LA2).
+  - Fold into the next main lineage alongside A1 if it also passes, and C1's item-removal fix.
+- **failure modes / confounds:**
+  - Own `tera` / `tera_p` have only ever been nonzero after terastallizing. The warm-started net may first read the type as "already terastallized" before it learns the difference, which is the reason for the KL monitor and the 25M steps.
+  - If the opponent's aux Tera target changes by accident, that is a second intervention. Step 0 guards against it.
+  - Illusion and ident mismatches can mis-assign the type.
+- **formal check:** none
+
+MEMBER A FINAL TOP PICK: B1 (adopted, improved) — the code itself documents the bug (own Tera type and Tera-damage features always zero exactly when the Tera decision is made), the fix is about one engineering day with no shape change, and a single A40 fork plus a 4,000-pair in-process test decides it with no slot hours.

@@ -22,6 +22,14 @@ This file records the facts needed for that declaration. Refresh the numbers wit
 - **Literature work:** the literature review (`docs/paper/lit/`) and the campaign research report
   (`.orchestra/research/REPORT.md`) were compiled by agents with web search; every citation must be re-checked by the
   student before use (agents can misattribute).
+- **Research council (from 2026-11-24) [M, `docs/council/sessions/`]:** at the student's request, three models from
+  different labs (Claude Opus 5.5, GPT-6.2 Astra, Gemini 4 Carbon) ran read-only and anonymised (A/B/C) through blind
+  proposals, cross-critique and rebuttal, on a facts-only brief with cited result ids. The orchestrator then wrote a
+  ranked portfolio of pre-registerable kill tests (`PORTFOLIO.md`), and the student signs off before anything runs.
+  Session 1 (2026-11-24): 16 proposals → 7 ranked items + follow-ups. Tokens: 14.26M gross / 2.21M fresh (cap 30M gross,
+  set by the student; `BUDGET.tsv`). The council's top finding was a documented encoder gap: own Tera types are
+  invisible to the net before Terastallizing; the orchestrator re-checked it in the code. Its proposals are
+  hypotheses, not results.
 - **Commit attribution:** by the student's choice, commits carry only the student's name (no co-author trailers), so
   git history alone does not show AI authorship; this file and the transcripts are the record.
 
