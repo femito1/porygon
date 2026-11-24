@@ -28,7 +28,9 @@
 //   setOwnTeraVisible(true) (or PORYGON_V22A=1 in the environment at load; one setting per process = per env) fills
 //   our own `tera` / `tera_p` (slots 0-5, gen 9) from our request's teraType, matched by ident (the team key), from
 //   turn 1; `terastallized` stays 0 until -terastallize; nothing else changes (shapes, aux, mask). Off = v2.1 exactly.
-//   Consumers route per policy: a v2.1 policy gets porygon.v2.spec.v21_view of a v2.2a row.
+//   With the flag on, fields(9) also lists tera_v21 / tera_p_v21 = the row's exact v2.1 tera / tera_p (own slots by the
+//   v2.1 rule, mon.teraType; opponent slots as tera / tera_p): consumers give v2.1 policies those (FastCollector._opp_obs,
+//   netv2's spd_h2h_tera), byte-identical to a flag-off encoding by construction.
 // Reference behaviours reproduced as is (reported to the spec owner, not "fixed" here):
 //  * (v2.1) own `tera` / `tera_p` stay 0 until the mon terastallizes: the reference reads poke-env's mon.tera_type,
 //    which poke-env never fills from the request's teraType (the spec text says ours are known in gen9);
@@ -181,7 +183,10 @@ const FIELDS = {4: S.fields[4], 9: S.fields[9]};
 const AUX = {4: S.auxFields[4], 9: S.auxFields[9]};
 const WG = {4: {}, 9: {}};  // gen -> name -> width per row (action_mask / aux_opp_class differ by gen)
 for (const g of [4, 9]) for (const [k, , sh] of [...FIELDS[g], ...AUX[g]]) WG[g][k] = prod(sh);
-function fields(gen) { return FIELDS[gen >= 9 ? 9 : 4].map(([k, d, sh]) => [k, d, sh.slice()]); }
+const V21_FIELDS = [['tera_v21', 'i16', [12]], ['tera_p_v21', 'f32', [12, N_TYPES]]];  // spec v2.2a rows only (see the header)
+for (const g of [4, 9]) for (const [k, , sh] of V21_FIELDS) WG[g][k] = prod(sh);
+function v21Fields(gen) { return gen >= 9 ? V21_FIELDS.map(([k, d, sh]) => [k, d, sh.slice()]) : []; }
+function fields(gen) { return FIELDS[gen >= 9 ? 9 : 4].map(([k, d, sh]) => [k, d, sh.slice()]).concat(OWN_TERA ? v21Fields(gen) : []); }
 function auxFields(gen) { return AUX[gen >= 9 ? 9 : 4].map(([k, d, sh]) => [k, d, sh.slice()]); }
 
 const elapsed = (start, turn) => Math.min(Math.max(turn - start, 0), 8) / 8;
@@ -438,6 +443,18 @@ function encodeFields(t, outs, row) {
   E1.actionMask(t, MASK, 0);
   const ma = outs.action_mask, mo = R.action_mask;
   for (let a = 0; a < nA && a < W.action_mask; a++) ma[mo + a] = MASK[a];
+  if (outs.tera_v21 && t.gen >= 9) {  // the exact v2.1 tera / tera_p of this row (spec v2.2a rows; see the header)
+    const tv = outs.tera_v21, pv = outs.tera_p_v21, o1 = row * W.tera_v21, o2 = row * W.tera_p_v21;
+    for (let k = 0; k < W.tera_v21; k++) tv[o1 + k] = outs.tera[R.tera + k];
+    for (let k = 0; k < W.tera_p_v21; k++) pv[o2 + k] = outs.tera_p[R.tera_p + k];
+    let j = 0;
+    for (const m of t.team.values()) {  // own slots: v2.1's rule (encodeOwn without the request)
+      if (j >= 6) break;
+      tv[o1 + j] = 0; pv.fill(0, o2 + N_TYPES * j, o2 + N_TYPES * (j + 1));
+      if (m.teraType !== null) { const ty = typeIdOf(m.teraType); tv[o1 + j] = ty; pv[o2 + N_TYPES * j + ty] = 1; }
+      j++;
+    }
+  }
 }
 
 /** v2.2a: our mons' tera types by ident from the tracker's last request (= reference encoder.request_tera) */
@@ -516,6 +533,6 @@ function allocate(fieldList, rows) {
   return o;
 }
 
-module.exports = {SPEC_VERSION: S.version, fields, auxFields, encodeFields, encodeAux, allocate, setOwnTeraVisible, ownTeraVisible,
+module.exports = {SPEC_VERSION: S.version, fields, auxFields, encodeFields, encodeAux, allocate, setOwnTeraVisible, ownTeraVisible, v21Fields,
   nActions: E1.nActions, actionMask: E1.actionMask, actionToChoice: E1.actionToChoice, validChoices: E1.validChoices,
   stateValue: E1.stateValue, posterior};

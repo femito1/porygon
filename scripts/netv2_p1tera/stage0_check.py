@@ -7,7 +7,8 @@ message would: ws/fastenv scripts/fastenv/parity_v1.handle, copied below):
   parity_aux   aux_targets(battle, opp_battle, obs)          == JS aux           (both flags)
   py_off_old   encode(battle) == today's encoder (OLD_PY = HEAD's encoder.py) byte for byte, aux too
   py_aux_flag  aux_targets on the flag-on obs == on the flag-off obs, byte for byte
-  py_v21_view  porygon.v2.spec.v21_view(flag on) == flag off, byte for byte (what v2.1 pool / frozen nets get)
+  (info) py_v21_view  porygon.v2.spec.v21_view(flag on) vs flag off (the trainer's KL-anchor / KL-monitor view; v2.1
+               pool / frozen nets get the JS rows' exact tera_v21 / tera_p_v21 columns, checked by the JS side)
   py_pre_tera  mon_num terastallized == 0 for every own mon that has not terastallized (flag on)
 plus the JS-only checks of the same run (stage0_record.js stream), the leak test (stage0_record.js leak) and the
 Volcarona fixture (Tera Water vs Tera Ground: own tera / tera_p and active_tera_vs of Tera Blast vs the Heatran lead).
@@ -85,7 +86,7 @@ class Stats:
         self.battles = self.decisions = 0
         self.bad = Counter()  # check -> decisions failing it
         self.fields = Counter()  # check/field -> decisions
-        self.pre_slots = self.pre_filled = self.on_ne_off = 0
+        self.pre_slots = self.pre_filled = self.on_ne_off = self.v21_info = 0
         self.examples = []
 
     def fail(self, check, msg, limit=30):
@@ -160,7 +161,8 @@ def check_side(rec: dict, s: int, st: Stats, old):
         same(st, "py_off_old", off, o_old, label)
         same(st, "py_off_old_aux", aux, aux_old, label)
         same(st, "py_aux_flag", aux_on, aux, label)
-        same(st, "py_v21_view", v21_view(on), off, label)
+        if any(v21_view(on)[kk].tobytes() != off[kk].tobytes() for kk in ("tera", "tera_p")):
+            st.v21_info += 1
         if any(on[kk].tobytes() != off[kk].tobytes() for kk in on):
             st.on_ne_off += 1
         for j, mon in enumerate(list(me.team.values())[:6]):
@@ -250,11 +252,11 @@ def main():
                 check_side(rec, s, st, old)
     leak = json.load(open(a.leak))["leak"]
     vok, vlines = volcarona_check(json.load(open(a.volcarona)))
-    js_keys = ("off_vs_old_obs", "off_vs_old_aux", "on_vs_off_other", "aux_on_vs_off", "v21_view_vs_off", "tera_pre_nonzero")
+    js_keys = ("off_vs_old_obs", "off_vs_old_aux", "on_vs_off_other", "aux_on_vs_off", "v21_cols_vs_off", "tera_pre_nonzero")
     checks = {
         "stream battles >= min": st.battles >= a.min_battles and js is not None and js["battles"] == st.battles,
         **{f"py {c}": st.bad[c] == 0 for c in ("alignment", "parity_off", "parity_on", "parity_aux", "py_off_old",
-                                               "py_off_old_aux", "py_aux_flag", "py_v21_view", "py_pre_tera")},
+                                               "py_off_old_aux", "py_aux_flag", "py_pre_tera")},
         **{f"js {c}": js is not None and js[c] == 0 for c in js_keys},
         "flag on fills own pre-Tera tera (gen 9: every pre-Tera own slot)": st.pre_slots > 0 and st.pre_filled == st.pre_slots,
         "leak: no observer stream / observation difference": leak["stream_diverged"] == 0 and leak["obs_mismatch"] == 0
@@ -264,11 +266,14 @@ def main():
     }
     summary = {"battles": st.battles, "decisions": st.decisions, "py_failures": dict(st.bad), "py_fields": dict(st.fields),
                "own_pre_tera_slots": st.pre_slots, "own_pre_tera_filled": st.pre_filled, "decisions_on_ne_off": st.on_ne_off,
+               "info_py_v21_view_ne_off": st.v21_info,
                "js": js, "leak": leak, "volcarona": vlines, "checks": checks, "examples": st.examples,
                "pass": all(checks.values())}
     json.dump(summary, open(a.out, "w"), indent=1)
     print(f"stage 0: {st.battles} battles, {st.decisions} decisions (Python replay); JS {js and js['decisions']} decisions")
     print(f"  own pre-Tera slots {st.pre_slots}, filled with flag on {st.pre_filled}; decisions where on != off: {st.on_ne_off}")
+    print(f"  info: decisions where v21_view(flag on) != flag off (Python {st.v21_info}, JS {js and js.get('v21_view_vs_off_info')}): "
+          "the trainer's KL-anchor / KL-monitor view only; pool / frozen v2.1 nets get the exact columns")
     print(f"  leak: {leak['compared_battles']} battles compared, {leak['decisions_compared']} observer decisions, "
           f"{leak['mons_changed']} victim mons re-typed; stream diverged {leak['stream_diverged']}, obs mismatch "
           f"{leak['obs_mismatch']}, victim's own obs differs in {leak['victim_obs_differs']}")

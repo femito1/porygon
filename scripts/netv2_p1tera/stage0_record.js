@@ -4,12 +4,15 @@
 //   node stage0_record.js stream N FORMAT SEED OLD_JS_DIR   stdout: one JSON line per battle for stage0_check.py (both
 //        sides' message streams; at every decision the new encoder's flag-off observation + aux (sparse) and its flag-on
 //        tera / tera_p) + a JS line per battle with the JS-only checks: flag off == OLD_JS_DIR's encoder (today's code)
-//        byte for byte (obs + aux); flag on == flag off except tera / tera_p; aux unchanged by the flag; v21_view(flag on)
-//        == flag off byte for byte; terastallized == 0 for every own mon that has not terastallized
+//        byte for byte (obs + aux); flag on == flag off except tera / tera_p; aux unchanged by the flag; the flag-on row's
+//        tera_v21 / tera_p_v21 (what v2.1 policies get) == flag off's tera / tera_p byte for byte; terastallized == 0 for
+//        every own mon that has not terastallized; (info) v21_view(flag on) vs flag off
 //   node stage0_record.js leak N FORMAT SEED                stdout: one JSON summary: each battle played twice, the
 //        second time with the unrevealed tera types of one side's team (the "victim"; mons that never terastallize
 //        in the first pass; not Ogerpon / Terapagos) reassigned; the other side's message stream and flag-on
-//        observations must be byte-identical at every decision (and the victim's own observations differ)
+//        observations must be byte-identical at every decision (and the victim's own observations differ). Illusion
+//        users (Zoroark*) are never re-typed: a -terastallize line names the disguise, so their tera may be revealed
+//        under another name
 //   node stage0_record.js volcarona FORMAT SEED             stdout: one JSON line: our lead Volcarona (Fiery Dance /
 //        Giga Drain / Quiver Dance / Tera Blast, Flame Body, Heavy-Duty Boots: the library set) Tera Water vs Tera
 //        Ground against an Iron Moth lead (Fire/Poison: Ground x4 > Water x2) and a Skarmory lead (Steel/Flying:
@@ -138,11 +141,11 @@ function stream(n, format, seed, oldDir) {
   const gen = parseInt(format[3], 10);
   const F = E2.fields(gen), A = E2.auxFields(gen);
   const tot = {battles: 0, decisions: 0, crashes: 0, off_vs_old_obs: 0, off_vs_old_aux: 0, on_vs_off_other: 0,
-    aux_on_vs_off: 0, v21_view_vs_off: 0, tera_pre_nonzero: 0, own_pre_tera_slots: 0, own_pre_tera_filled: 0,
-    decisions_on_ne_off: 0, examples: []};
+    aux_on_vs_off: 0, v21_cols_vs_off: 0, v21_view_vs_off_info: 0, tera_pre_nonzero: 0, own_pre_tera_slots: 0,
+    own_pre_tera_filled: 0, decisions_on_ne_off: 0, examples: [], info: []};
   const ex = msg => { if (tot.examples.length < 20) tot.examples.push(msg); };
   for (let id = 0; id < n; id++) {
-    const bufs = [0, 1].map(() => ({on: E2.allocate(F, 1), off: E2.allocate(F, 1), old: E2.allocate(F, 1),
+    const bufs = [0, 1].map(() => ({on: E2.allocate([...F, ...E2.v21Fields(gen)], 1), off: E2.allocate(F, 1), old: E2.allocate(F, 1),
       aon: E2.allocate(A, 1), aoff: E2.allocate(A, 1), aold: E2.allocate(A, 1)}));
     const r = playBattle(format, id, seed, {decide: (s, S, O, e, d) => {
       const B = bufs[s], t = S.t, ot = O.crash ? null : O.t;
@@ -152,7 +155,8 @@ function stream(n, format, seed, oldDir) {
       const tag = `battle ${id} p${s + 1} ev ${e} turn ${t.turn}`;
       let x = diffFields(B.off, B.old); if (x.length) { tot.off_vs_old_obs++; ex(`${tag}: flag off != today's encoder in ${x}`); }
       x = diffFields(B.aoff, B.aold); if (x.length) { tot.off_vs_old_aux++; ex(`${tag}: flag-off aux != today's in ${x}`); }
-      x = diffFields(B.on, B.off, new Set(['tera', 'tera_p'])); if (x.length) { tot.on_vs_off_other++; ex(`${tag}: flag on changes ${x}`); }
+      x = diffFields(B.on, B.off, new Set(['tera', 'tera_p', 'tera_v21', 'tera_p_v21'])); if (x.length) { tot.on_vs_off_other++; ex(`${tag}: flag on changes ${x}`); }
+      if (!eqArr(B.on.tera_v21, B.off.tera) || !eqArr(B.on.tera_p_v21, B.off.tera_p)) { tot.v21_cols_vs_off++; ex(`${tag}: tera_v21 / tera_p_v21 != flag off's tera / tera_p`); }
       x = diffFields(B.aon, B.aoff); if (x.length) { tot.aux_on_vs_off++; ex(`${tag}: flag on changes aux ${x}`); }
       // v21_view(on) (own slots 0-5 zeroed where terastallized == 0) == off
       const tv = Int16Array.from(B.on.tera), pv = Float32Array.from(B.on.tera_p);
@@ -165,7 +169,7 @@ function stream(n, format, seed, oldDir) {
           if (gen >= 9 && B.on.tera[i] !== 0) tot.own_pre_tera_filled++;
         }
       }
-      if (!eqArr(tv, B.off.tera) || !eqArr(pv, B.off.tera_p)) { tot.v21_view_vs_off++; ex(`${tag}: v21_view(flag on) != flag off`); }
+      if (!eqArr(tv, B.off.tera) || !eqArr(pv, B.off.tera_p)) { tot.v21_view_vs_off_info++; if (tot.info.length < 10) tot.info.push(`${tag}: v21_view(flag on) != flag off (the exact columns are what v2.1 policies get)`); }
       if (!eqArr(B.on.tera, B.off.tera) || !eqArr(B.on.tera_p, B.off.tera_p)) tot.decisions_on_ne_off++;
       d.off = sp(B.off); d.aux = sp(B.aoff); d.on = {tera: sparseTyped(B.on.tera), tera_p: sparseTyped(B.on.tera_p)};
       tot.decisions++;
@@ -209,7 +213,7 @@ function leak(n, format, seed) {
     const mutate = teams => {
       for (const [j, set] of teams[v].entries()) {
         const name = set.name || set.species;
-        if (tera.has(name) || /^(Ogerpon|Terapagos)/.test(set.species)) continue;
+        if (tera.has(name) || /^(Ogerpon|Terapagos|Zoroark)/.test(set.species) || set.ability === 'Illusion') continue;
         const k = STD_TYPES.indexOf(set.teraType);
         set.teraType = STD_TYPES[(k + 1 + ((id + j) % 16) + STD_TYPES.length) % STD_TYPES.length];
         changed++;

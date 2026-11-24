@@ -83,11 +83,14 @@ def test_fastenv_v22a_rows_and_v21_keys():
             if own:
                 rows = np.flatnonzero(b.needs_action)
                 ob = col._opp_obs([b], [rows], [(0, k) for k in range(len(rows))])
-                v = v21_view({k: first[own][k][rows] for k in ("tera", "tera_p", "mon_num")})
-                assert np.array_equal(ob["tera_v21"], v["tera"]) and np.array_equal(ob["tera_p_v21"], v["tera_p"])
+                first["ob"] = (rows, ob)
         finally:
             env.close()
     off, on = first[False], first[True]
     assert (on["tera"][:, :6] > 0).all() and (off["tera"][:, :6] == 0).all()  # turn 1: no one has terastallized
-    v = v21_view(on)
-    assert all(np.array_equal(v[k], off[k]) for k in off)
+    assert "tera_v21" not in off and set(on) == set(off) | {"tera_v21", "tera_p_v21"}
+    assert all(np.array_equal(on[k], off[k]) for k in off if k not in ("tera", "tera_p"))
+    assert np.array_equal(on["tera_v21"], off["tera"]) and np.array_equal(on["tera_p_v21"], off["tera_p"])
+    rows, ob = first["ob"]
+    assert np.array_equal(ob["tera_v21"], off["tera"][rows]) and np.array_equal(ob["tera_p_v21"], off["tera_p"][rows])
+    assert np.array_equal(ob["tera"], on["tera"][rows])  # the v2.2a view stays in tera / tera_p

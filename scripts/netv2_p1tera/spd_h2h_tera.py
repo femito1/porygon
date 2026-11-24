@@ -1,8 +1,9 @@
 """netv2 2026-11-24 (council P1, spec v2.2a): wsp's scripts/wsp/spd_h2h.py at ee76994 (the copy vendored in
 $C/vendor/wsp-ee76994, md5 67956802) + PER-SIDE ENCODER ROUTING, nothing else: if either net is a spec v2.2a policy
 (checkpoint key own_tera_visible, porygon.v2.model) the Node workers encode v2.2a rows (PORYGON_V22A=1 for
-fastenv/js/encoder_v2.js: our own tera types from the request, both sides) and a v2.1 net's rows go through
-porygon.v2.spec.v21_view first (its exact v2.1 inputs); with two v2.1 nets PORYGON_V22A is unset (= ee76994 exactly).
+fastenv/js/encoder_v2.js: our own tera types from the request, both sides, plus the rows' exact v2.1 tera / tera_p in
+obs/tera_v21 / obs/tera_p_v21) and a v2.1 net gets those in place of tera / tera_p (its exact v2.1 inputs, byte for
+byte); with two v2.1 nets PORYGON_V22A is unset (= ee76994 exactly).
 The shard meta records own_tera_visible per side and env_v22a. Needs --v2-src / PYTHONPATH with porygon.v2.spec.v21_view
 and SPD_FASTENV_JS with the v2.2a-aware encoder_v2.js (netv2 ws/netv2 tree).
 
@@ -121,14 +122,13 @@ def make_actor(spec: str, device: str, n_actions: int):
     import torch
     if kind == "v2":
         from porygon.v2.model import batch_to_tensors, load, model_keys
-        from porygon.v2.spec import v21_view
         net = load(path, device)
         keys = model_keys(net.gen)
         own = bool(getattr(net, "own_tera_visible", False))
 
         def act_v2(obs, mask):
-            if ENV_V22A[0] and not own:  # per-side routing: a v2.1 net sees its v2.1 inputs
-                obs = v21_view(obs)
+            if ENV_V22A[0] and not own:  # per-side routing: a v2.1 net gets its exact v2.1 inputs
+                obs = {**obs, "tera": obs["tera_v21"], "tera_p": obs["tera_p_v21"]}
             with torch.no_grad():
                 logits = net(batch_to_tensors({k: obs[k] for k in keys}, device), aux=False)["logits"]
                 return sample(logits, mask, temp)

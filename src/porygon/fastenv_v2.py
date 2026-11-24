@@ -42,7 +42,7 @@ from typing import Callable
 import numpy as np
 
 from porygon.fastenv import Batch, FastEnv
-from porygon.v2.spec import N_OPP_CLASSES, fields, v21_view
+from porygon.v2.spec import N_OPP_CLASSES, fields
 from porygon.v2.workers import ACT, DONE, NEXT_V, OBS, OPP_C, OPP_T, REW, Packer  # noqa: F401  (layout)
 
 
@@ -221,15 +221,25 @@ class FastCollector:
     def _opp_obs(self, batches: list, all_rows: list, items: list) -> dict[str, np.ndarray]:
         """One snapshot opponent's decision batch for opp_fn: its (batch index, row index) items packed in order,
         observation fields only, drop_seed 0 (no id dropout). In a spec v2.2a env (FastEnv(own_tera=True)) the batch
-        also carries the v2.1 view's `tera_v21` / `tera_p_v21` (pre-Tera zeros restored, porygon.v2.spec.v21_view):
-        opp_fn hands them to a v2.1 policy (a net without own_tera_visible: frozen / BC nets, the parent's pool)."""
+        also carries `tera_v21` / `tera_p_v21`: the rows' exact v2.1 tera / tera_p (the JS encoder's obs/tera_v21
+        columns: our pre-Tera zeros restored by v2.1's own rule); opp_fn hands them to a v2.1 policy (a net without
+        own_tera_visible: frozen / BC nets, the parent's pool)."""
         raw = self._pack_runs((batches[bi], all_rows[bi][k]) for bi, k in items)
         ob = {k: raw[:, off:off + nb].copy().view(dtype).reshape(len(items), *shape)
               for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.opp_packer.layout}
         ob["drop_seed"] = np.zeros(len(items), np.int64)
-        if getattr(self.env, "own_tera", False) and "tera" in ob:
-            v = v21_view(ob)
-            ob["tera_v21"], ob["tera_p_v21"] = v["tera"], v["tera_p"]
+        if "obs/tera_v21" in batches[0].cols:
+            runs, cur, rows = [], None, []  # one fancy index per run of items from the same batch (as _pack_runs)
+            for bi, j in items:
+                if bi != cur and rows:
+                    runs.append((cur, rows))
+                    rows = []
+                cur = bi
+                rows.append(all_rows[bi][j])
+            if rows:
+                runs.append((cur, rows))
+            for k in ("tera_v21", "tera_p_v21"):
+                ob[k] = np.concatenate([batches[bi].cols[f"obs/{k}"][np.asarray(r, np.int64)] for bi, r in runs])
         return ob
 
     def _close(self, key: int, tr: list, next_value: float, done: bool) -> None:
