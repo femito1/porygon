@@ -18,8 +18,8 @@ Be the strongest Pokémon Showdown random-battle bot in **gen9** (primary) and *
 |---|---|---|
 | gen9 benchmark bot: lookahead2 (one-turn net-valued lookahead, margin gate δ 0.0025) on G9q-cd@2030M | 61.60 [58.80, 64.40] (fixed 200k) | ns-32, ns-31 |
 | gen9 raw net G9q-cd@2030M (T 0.5, no search) | 60.8 [57.9, 63.7] (fixed 200k) | g9q-32 |
-| gen4: poke-engine MCTS + fitted leaf eval + v1 PPO prior | 59.2 ± 2.2 (time-based) | fp4-04 |
-| gen4 raw v2 net R1b-F@300M | 55.6 ± 4.1 (400 g) | v2g4-10 |
+| gen4: poke-engine MCTS + fitted leaf eval + v1 PPO prior | 59.50 [56.69, 62.31] (fixed 200k; 59.2 ± 2.2 time-based) | fp4-12, fp4-04 |
+| gen4 raw v2 net R1b-F-cd@640M, same Foul Play pairs | 59.85 [56.90, 62.80] (fixed 200k); paired Δ +0.35 [−3.57, +4.27] | v2g4-16, v2g4-17 |
 
 **Trajectory of the gen9 raw net (G9q, cooled snapshots):**
 - In-process h2h, each ≈ 550–700M steps later beats the previous: cd@805 vs cd@605 52.46 (g9q-21); cd@1350 vs cd@805

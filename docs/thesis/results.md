@@ -24,6 +24,8 @@ porygon-ws run). Our search spends 4 core-seconds per move, Foul Play 2.
 
 | generation | bot | vs Foul Play (95%, games) | vs our pure gen9 search | id |
 |---|---|---|---|---|
+| gen4 | **search + fitted leaf eval + v1@500M prior (the gen4 bot) at FIXED 200k (11-24)** | **59.50 [56.69, 62.31]** (1000) [M] | — | fp4-12 |
+| gen4 | **raw v2 network R1b-F-cd@640M (T 0.5, no search) at FIXED 200k, same team pairs** | **59.85 [56.90, 62.80]** (1000) [M]; paired Δ vs the gen4 bot +0.35 [−3.57, +4.27] | — | v2g4-16 / v2g4-17 |
 | gen4 | search + fitted leaf eval (eval_r1), v1 prior 0.25, 4 × 1 s | **59.19 [56.95, 61.43]** (1599) [D] | — | fp4-04 |
 | gen4 | same, compute matched: ours 2 × 1 s / Foul Play 4 × 1 s | 57.84 [55.67, 60.02] / 58.36 [56.14, 60.59] [D] | — | fp4-05/06 |
 | gen4 | search, stock eval (baseline) | 54.50 [52.96, 56.04] (3198) [D] | — | fp4-02 |
@@ -45,7 +47,7 @@ Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7%
 
 ## Results by theme
 
-### Benchmarks against Foul Play (all generations) (71 rows)
+### Benchmarks against Foul Play (all generations) (73 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -74,6 +76,8 @@ Context, not ours: MissingNo.Zero's raw net beats Foul Play 61.6% (gen4) / 66.7%
 | g9q-24 | 2026-11-16 | raw G9q-cd@805M vs Foul Play gen9 (1000 g, seed 8800222) | G9q-cd@805M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness | 1000 / 500 | 57.8 [55.0, 60.6] [M] | conf800/PREREG.txt (c6a38724) | CONFIRMED (= cd@605 within noise) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf800/RESULTS.txt` |
 | g9q-30 | 2026-11-19 | raw G9q-cd@1350M vs Foul Play gen9 (F1350, seed 8135222) | G9q-cd@1355.04M T 0.5 vs Foul Play gen9 | Foul Play gen9 (8f541f8, ms 1000, 1 core), netv2 fp9 harness; 2 of 20 FP instances stopped accepting after 4–5 games | 906 / 453 | 59.1 [56.2, 62.0] [M] | g9q-cd1350/PREREG.txt (342e63f8) | CONFIRMED | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf1350/RESULTS.txt` |
 | g9q-32 | 2026-11-23 | raw G9q-cd@2030M vs Foul Play gen9 at FIXED 200k iterations (F2030, seed 8203222) | G9q-cd@2035.04M T 0.5 vs Foul Play gen9 @200k | fp9 harness + wsp fixed-iteration launcher, ITERS_OK | 1000 / 500 | **60.8 [57.9, 63.7]** [M] | g9q-cd2030/PREREG.txt (7a68bf3e) | CONFIRMED | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/conf2030/RESULTS.txt` |
+| fp4-12 | 2026-11-24 | Council P3 (i): the incumbent gen4 bot vs Foul Play gen4 at FIXED 200k | search + fitted eval + v1@500M prior (fp4-04 config) vs Foul Play gen4 @200k | wsp gen4 fixed-iteration launcher (ITERS_OK) + gloria vs_foulplay | 1000 / 500 | **59.50 [56.69, 62.31]** [M] | P3-GEN4-PREREG.md (a8e0d1ff) | measurement (gen4 headline at the fixed yardstick) | `/vol/bitbucket/fr1226/porygon-ws-wsp/council/p3-gen4/VERDICT.txt` |
+| v2g4-16 | 2026-11-24 | Council P3 (ii): raw R1b-F-cd@640M vs Foul Play gen4 at FIXED 200k (same pairs) | raw R1b-F-cd@640.04M T 0.5 vs Foul Play gen4 @200k | wsp gen4 fixed-iteration launcher (ITERS_OK) + netv2 vs_foulplay | 1000 / 500 | **59.85 [56.90, 62.80]** [M] | P3-GEN4-PREREG.md (a8e0d1ff) | measurement; short 51.5% vs long 62.8% | `/vol/bitbucket/fr1226/porygon-ws-wsp/council/p3-gen4/VERDICT.txt` |
 | ns-18 | 2026-11-17 | LA2-FP: lookahead2(cd@805, d 0.005) vs Foul Play gen9 | lookahead2 on G9q-cd@805M vs Foul Play gen9 (8f541f8) | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 58.2 [55.29, 61.11] [M] | LA2-FP-PREREG.md (1173284f) | Q1 headline | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 | ns-19 | 2026-11-17 | LA2-FP arm 2: raw cd@805 vs Foul Play gen9 (same pairs) | raw G9q-cd@805M T 0.5 vs Foul Play gen9 | fastenv Stage 3 slot harness (11 engine procs/side, 3 concurrent) vs Foul Play | 1000 / 500 | 56.9 [53.94, 59.86] [M] | LA2-FP-PREREG.md (1173284f) | positive | `/vol/bitbucket/fr1226/porygon-ws-fastenv/runs/la2-fp/VERDICT.txt` |
 
@@ -216,7 +220,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | 515851 | 2026-11-08 | prior_weight=0.0 eval_config=gen9_stock_x2.json oracle=None | 400 / 200 | 51.2 [46.3, 56.1] [M] | info |
 | 515852 | 2026-11-08 | prior_weight=0.0 eval_config=eval_gen9_r1.json oracle=None | 365 / 182 | 56.3 [51.3, 61.3] [M] | info |
 
-### v2 network, gen4 (R1b / R1b-F) (11 rows)
+### v2 network, gen4 (R1b / R1b-F) (12 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -232,6 +236,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | v2g4-13 | 2026-11-16 | R1b-F hold #1: guard trip @390.2M vs R1b-F@300M | R1b-F trip @390.2M vs R1b-F @300M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 2000 / 1000 | 49.9 [47.9, 51.9] [M] | g4r1bf/HOLD-PREREG.txt (af0441c6) | CONTINUE (not clearly worse; not better) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold1/VERDICT.txt` |
 | v2g4-14 | 2026-11-17 | R1b-F hold #2: guard trip @437.7M vs R1b-F@300M | R1b-F trip @437.73M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator, duplicate pairs | 2000 / 1000 | 53.0 [51.0, 55.0] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE (better than @300M; hold #1 @390M was 49.9) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold2/VERDICT.txt` |
 | v2g4-15 | 2026-11-20 | R1b-F hold #3: guard trip @552.7M vs R1b-F@300M | R1b-F trip @552.68M vs R1b-F @300.03M (T 0.5) | in-process fastenv simulator (spd_h2h), duplicate pairs | 2000 / 1000 | 55.2 [53.2, 57.2] [M] | HOLD-PREREG.txt (af0441c6) | CONTINUE | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g4r1bf-hold3/VERDICT.txt` |
+| v2g4-17 | 2026-11-24 | Council P3 (decides): raw R1b-F-cd − the gen4 bot, paired over the same Foul Play @200k team pairs | v2g4-16 − fp4-12 | paired difference | 500 pairs | +0.35 [−3.57, +4.27] points [M] | P3-GEN4-PREREG.md (a8e0d1ff) | **BUILD-LA2-GEN4** (rule Δ ≥ −2.0) | `/vol/bitbucket/fr1226/porygon-ws-wsp/council/p3-gen4/VERDICT.txt` |
 
 ### v2 network, gen9 (G9s, G9p, G9q milestones) (30 rows)
 
