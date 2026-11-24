@@ -9,6 +9,9 @@
 #                                                 + fresh successors 1200001 (r1) / 1200002 (g9) on a30 / a16 / a40;
 #                                                 R1b-F: 829660 and its running successor 1136569)
 # ARGSDIFF_R1_MODE / ARGSDIFF_G9_MODE: override the MODE files (a sweep over every mode a branch knows).
+# ARGSDIFF_TOUCH (v22): extra state markers, paths relative to the fake NV2 (e.g. runs/g9p4/G9P4_STARTED: without it
+# MODE g9p4 HOLDs and exits 3, so both versions print nothing for the g9 jobs). ARGSDIFF_KEEP=DIR (v22): keep the full
+# old / new outputs as DIR/old.txt / DIR/new.txt (for a field-wise check, e.g. scripts/netv2_caps/caps-check.sh).
 # The tree has the 24c633f, 4f18108 and (v10) ff32b71 wrappers; ARGSDIFF_NO_AS=1 drops 4f18108 (the cluster since 11-10).
 set -u
 OLD=$(readlink -f "$1"); NEW=$(readlink -f "$2"); WHAT=${3:-current}
@@ -34,6 +37,7 @@ tree() {  # tree JOB: a fresh fake tree for one job
   fi
   if [ -n "${ARGSDIFF_R1_MODE:-}" ]; then echo "$ARGSDIFF_R1_MODE" > "$N/runs/r1/MODE"; fi
   if [ -n "${ARGSDIFF_G9_MODE:-}" ]; then echo "$ARGSDIFF_G9_MODE" > "$N/runs/g9/MODE"; fi
+  for x in ${ARGSDIFF_TOUCH:-}; do mkdir -p "$(dirname "$N/$x")"; touch "$N/$x"; done
   L=$R/local-$1; if fresh "$1"; then L=$R/tmp/ws-netv2-$1; fi  # a fresh job's LOCAL (from TMPDIR + SLURM_JOB_ID)
   mkdir -p "$L/run"; touch "$L/run/train.log"
   case $1 in
@@ -84,4 +88,5 @@ run() {  # run ENVFILE
 run "$OLD" > "$R.old"; run "$NEW" > "$R.new"
 if [ "$WHAT" = swapped ]; then echo "== $NEW (swapped)"; cat "$R.new"; echo "== $OLD (swapped)"; cat "$R.old"; fi
 if diff "$R.old" "$R.new" > "$R.diff"; then echo "identical ($WHAT MODE files): $(wc -l < "$R.new") job/GPU cases"; cat "$R.new"; else echo "DIFFERENT ($WHAT MODE files):"; cat "$R.diff"; fi
+if [ -n "${ARGSDIFF_KEEP:-}" ]; then mkdir -p "$ARGSDIFF_KEEP" && cp "$R.old" "$ARGSDIFF_KEEP/old.txt" && cp "$R.new" "$ARGSDIFF_KEEP/new.txt"; fi
 rm -rf "$R" "$R.old" "$R.new" "$R.diff" "$R.one" "$R.wdq"*

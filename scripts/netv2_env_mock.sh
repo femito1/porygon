@@ -1131,9 +1131,14 @@ p4tree; FP=$N/runs/g9qbf/fork-point-00830040000.pt; fpok; echo g9qbf > "$N/runs/
 ex="${base2/--no-bf16 /}"; ex="${ex//$W\/run\/G9q2/$W/run/G9qbf}"; ex="${ex%--resume *}--resume $FP"; yes_ 62h '[ "$o" = "$ex" ]'
 chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
+# v22 (2026-11-24): the step caps G9q 5e9 (r1 MODE g9q), G9-P4 2e9 (g9 MODE g9p4), R1b-F 2e9 (g4r1bf); an env before
+# v22 (MOCK_SKIP_V22=1, or V21 / V20): 3e9 / the global 1e9 / the global 1e9. Cases 63, 64a2 and 65 expect these.
+CAP_G9Q=5000000000 CAP_P4=2000000000 CAP_R1BF=2000000000
+if [ -n "${MOCK_SKIP_V22:-}${MOCK_SKIP_V21:-}${MOCK_SKIP_V20:-}" ]; then CAP_G9Q=3000000000 CAP_P4=1000000000 CAP_R1BF=1000000000; fi
 if [ -z "${MOCK_SKIP_V20:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
 # 63 (v20, 2026-11-17; G9q hit the global TOTAL 1e9): TOTAL=3e9 in the r1 MODE g9q branch only (first source and a
 # restart in place); the g9 run (MODE g9q2, the bridge MODE g9qbf, MODE g9p4) and g4r1bf keep the global 1e9.
+# (v22: r1 MODE g9q 5e9, MODE g9p4 2e9 = $CAP_G9Q / $CAP_P4; MODE g9q2 keeps 1e9; case 65.)
 totsrc() {  # totsrc RUN JOB NAME: wdsrc's source, printing RC|TOTAL|TRAIN_ARGS
   local run=$1 job=$2 name=$3; shift 3
   mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log" "$ROOTM/wd-$job/.toucher-G9q" "$ROOTM/wd-$job/.toucher-G9q2" "$ROOTM/wd-$job/.toucher-G9qbf" "$ROOTM/wd-$job/.toucher-G9P4" "$ROOTM/wd-$job/.toucher-R1bF"
@@ -1143,11 +1148,11 @@ totsrc() {  # totsrc RUN JOB NAME: wdsrc's source, printing RC|TOTAL|TRAIN_ARGS
     source "$ENVF"; echo "TOTAL=$TOTAL|TRAIN_ARGS=$TRAIN_ARGS" ) > "$ROOTM.wdout" 2>&1
   echo "RC=$?|$(grep '^TOTAL=' "$ROOTM.wdout" || true)"
 }
-wdtree; o=$(totsrc r1 1300300 ws-netv2-r1); check 63a "^RC=0\|TOTAL=3000000000\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300300/run/G9q .*--resume " "$o"
+wdtree; o=$(totsrc r1 1300300 ws-netv2-r1); check 63a "^RC=0\|TOTAL=$CAP_G9Q\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300300/run/G9q .*--resume " "$o"
 echo g9q-final > "$ROOTM/wd-1300300/run/G9q/final_model.pt"; o=$(totsrc r1 1300300 ws-netv2-r1)
-check 63b "^RC=0\|TOTAL=3000000000\|TRAIN_ARGS=.*--resume $ROOTM/wd-1300300/run/G9q/final_model.pt$" "$o"
+check 63b "^RC=0\|TOTAL=$CAP_G9Q\|TRAIN_ARGS=.*--resume $ROOTM/wd-1300300/run/G9q/final_model.pt$" "$o"
 q2tree; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300310 ws-netv2-g9); check 63c "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*G9q2" "$o"
-p4tree; W=$ROOTM/wd-1300200; p4bridge; o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1300200 ws-netv2-g9); check 63d "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--run-dir $W/run/G9P4 " "$o"
+p4tree; W=$ROOTM/wd-1300200; p4bridge; o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1300200 ws-netv2-g9); check 63d "^RC=0\|TOTAL=$CAP_P4\|TRAIN_ARGS=.*--run-dir $W/run/G9P4 " "$o"
 chmod -R u+w "$N/runs/pretrain"; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"; rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
 if [ -z "${MOCK_SKIP_V21:-}" ] && [ -z "${MOCK_SKIP_V20:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
@@ -1181,7 +1186,7 @@ EO="--snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --snapshot-every
 # 64a: job 1173283 (G9-P4's last job) with MODE g9e = MODE g9p4 exactly (a restart in place); no G9E state, no restart flag
 g9etree; P4J=$ROOTM/wd-1173283; mkdir -p "$P4J/run/G9P4/pool"; touch "$P4J/.nv2-watchdog"; echo p4f > "$P4J/run/G9P4/final_model.pt"
 o4=$(echo g9p4 > "$N/runs/g9/MODE"; esrc 1173283); o=$(echo g9e > "$N/runs/g9/MODE"; esrc 1173283)
-yes_ 64a '[ "$o" = "$o4" ] && [ -n "$o" ]'; check 64a2 "^RC=0\|TOTAL=1000000000\|.*RESTART=no\|TRAIN_ARGS=.*--run-dir $P4J/run/G9P4 .*--resume $P4J/run/G9P4/final_model.pt$" "$o"
+yes_ 64a '[ "$o" = "$o4" ] && [ -n "$o" ]'; check 64a2 "^RC=0\|TOTAL=$CAP_P4\|.*RESTART=no\|TRAIN_ARGS=.*--run-dir $P4J/run/G9P4 .*--resume $P4J/run/G9P4/final_model.pt$" "$o"
 yes_ 64a3 '[ ! -e "$N/runs/g9e/G9E_STARTED" ] && [ ! -e "$N/runs/g9e/stub.calls" ] && [ ! -e "$N/runs/g9p4-parked" ] && [ ! -e "$N/runs/g9/HOLD" ]'
 echo "collapse: entropy" > "$P4J/run/G9P4/GUARD_TRIPPED"; echo "1 x" > "$N/runs/g9p4/FU.started"; o=$(esrc 1173283)
 yes_ 64a4 '[ -f "$N/runs/g9/HOLD" ] && ls "$P4J"/run/G9P4/GUARD_TRIPPED.second-* > /dev/null 2>&1'; rm -f "$N/runs/g9/HOLD" "$N/runs/g9p4/FU.started"
@@ -1236,6 +1241,68 @@ rm -f "$W/.g9e-launches"; for i in 1 2 3 4; do esrc 1175374 > /dev/null; done; r
 check 64m2 "^RC=0\|.*RESTART=no\|" "$o"; yes_ 64m3 'grep -q "crash loop" "$N/runs/g9e/FAILED"'
 chmod -R u+w "$N/runs/pretrain" "$N/runs/g9q-cd1350" "$N/runs/g9e" "$N/scripts/netv2_g9e" 2> /dev/null; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked" "$N/runs/g9e" "$N/runs/g9q-cd1350" "$N/scripts/netv2_g9e"
 rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD" "$N/runs/g9/restart" "$N/runs/g9/INLINE_CMD"; echo g9q2 > "$N/runs/g9/MODE"; unset NV2_G9E_INIT_MD5 NV2_G9E_PARK_MD5 NV2_G9E_READ_MD5
+fi
+if [ -z "${MOCK_SKIP_V22:-}" ] && [ -z "${MOCK_SKIP_V21:-}" ] && [ -z "${MOCK_SKIP_V20:-}" ] && [ -z "${MOCK_SKIP_V19:-}" ] && [ -z "${MOCK_SKIP_V18:-}" ] && [ -z "${MOCK_SKIP_V17:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ]; then
+# 65 (v22, 2026-11-24, orchestrator decision: keep the lineages training past their step caps): three TOTALs, each scoped
+# to one branch: r1 MODE g9q (G9q) 5e9, g9 MODE g9p4 (G9-P4) 2e9, run g4r1bf (R1b-F) 2e9, at a restart in place of the
+# running job (1483048 / 1175374 / 1175389: watchdog done, the lineage's own save) and at the fresh successor's first
+# source (1552742 / 1552709 / 1552671: watchdog on, the lineage's newest mirrored save, one successor queued) and its
+# restart in place; every other run / mode keeps the global 1e9, also when one job script process sources the file again
+# under another mode (the top line resets TOTAL); the file's first TOTAL= line (the check-in's global cap) stays 1e9 and
+# its largest literal one (the check-in's G9q cap) is G9q's.
+twosrc() {  # twosrc RUN JOB NAME MODE2: two sources in ONE subshell (a restart in place, MODE -> MODE2 in between) -> RC|TOTALS=T1 T2
+  local run=$1 job=$2 name=$3 m2=$4
+  mkdir -p "$ROOTM/wd-$job/run" "$ROOTM/wd-$job/pool"; touch "$ROOTM/wd-$job/run/train.log"; for x in G9q G9P4 G9q2 G9 R1b R1bF; do touch "$ROOTM/wd-$job/.toucher-$x"; done
+  ( set -euo pipefail; PATH=$WDB:$PATH; NV2=$N; LOCAL=$ROOTM/wd-$job; RUN_NAME=$run; SLURM_JOB_ID=$job; SLURM_JOB_NAME=$name
+    SLURM_JOB_PARTITION=${WD_PART:-a30}; SLURM_CPUS_ON_NODE=${WD_CPUS:-30}; SLURM_MEM_PER_NODE=${WD_MEM:-98304}; NV2_HOLD_ITERS=0; NV2_SWAP_ITERS=0
+    NV2_TMPWATCH_POLL_S=0; NV2_WD_RETRY_S=0; NV2_GPU_MIB=${WD_GPU:-24576}; NV2_PARK_HOLD_ROUNDS=1
+    source "$ENVF"; t1=$TOTAL; echo "$m2" > "$NV2/runs/$run/MODE"; source "$ENVF"; echo "TOTALS=$t1 $TOTAL" ) > "$ROOTM.wdout" 2>&1
+  echo "RC=$?|$(grep '^TOTALS=' "$ROOTM.wdout" || true)"
+}
+# 65a: G9q (r1 MODE g9q): the running A30 job's restart in place, then the fresh successor (first source + restart in place)
+wdtree; RJ=$ROOTM/wd-1483048; mkdir -p "$RJ/run/G9q/pool"; touch "$RJ/.nv2-watchdog"; echo g9q-own > "$RJ/run/G9q/final_model.pt"
+o=$(totsrc r1 1483048 ws-netv2-r1); check 65a "^RC=0\|TOTAL=$CAP_G9Q\|TRAIN_ARGS=--no-bf16 .*--kl-anchor $P3 .*--fastenv-workers 28 .*--run-dir $RJ/run/G9q .*--resume $RJ/run/G9q/final_model.pt$" "$o"
+yes_ 65a2 '[ "$(nsb)" = 0 ] && [ ! -e "$N/runs/r1/JOBSTARTS" ]'
+o=$(totsrc r1 1552742 ws-netv2-r1); check 65a3 "^RC=0\|TOTAL=$CAP_G9Q\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1552742/run/G9q .*--resume $J2/final_model.pt$" "$o"
+yes_ 65a4 '[ "$(nsb)" = 1 ] && grep -q -- "--partition=a30 .*--dependency=afterany:1552742 " "$WDQ.sbatch"'
+echo g9q-1552742 > "$ROOTM/wd-1552742/run/G9q/final_model.pt"; o=$(totsrc r1 1552742 ws-netv2-r1)
+check 65a5 "^RC=0\|TOTAL=$CAP_G9Q\|TRAIN_ARGS=.*--resume $ROOTM/wd-1552742/run/G9q/final_model.pt$" "$o"; yes_ 65a6 '[ "$(nsb)" = 1 ]'
+# 65b: G9-P4 (g9 MODE g9p4, started long ago, not parked): the running A40 job's restart in place, then the fresh successor
+# (the stub queue reset: building p4tree ran a source in job 1300200 that queued a successor, i.e. a g9 job still pending)
+p4tree; echo g9p4 > "$N/runs/g9/MODE"; echo "2026-11-16T21:10:00 $(cat "$N/runs/g9p4/P4.md5") g9 1173274" > "$N/runs/g9p4/G9P4_STARTED"; rm -f "$WDQ"*; echo 1300001 > "$WDQ.next"
+GJ=$ROOTM/wd-1175374; mkdir -p "$GJ/run/G9P4/pool"; touch "$GJ/.nv2-watchdog"; echo p4-own > "$GJ/run/G9P4/final_model.pt"
+o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1175374 ws-netv2-g9)
+check 65b "^RC=0\|TOTAL=$CAP_P4\|TRAIN_ARGS=--no-bf16 .*--kl-anchor $P4 --kl-anchor-coef 0.1 .*--frozen $P4 .*--run-dir $GJ/run/G9P4 --pool-dir $GJ/run/G9P4/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --resume $GJ/run/G9P4/final_model.pt$" "$o"
+MJ=$N/runs/g9/20261123-103220-1175374/G9P4; mkdir -p "$MJ/pool/frozen"; echo p4-mirror > "$MJ/final_model.pt"
+o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1552709 ws-netv2-g9)
+check 65b2 "^RC=0\|TOTAL=$CAP_P4\|TRAIN_ARGS=.*--kl-anchor $P4 .*--run-dir $ROOTM/wd-1552709/run/G9P4 .*--resume $MJ/final_model.pt$" "$o"
+yes_ 65b3 '[ "$(nsb)" = 1 ] && grep -q -- "--partition=a40 .*--dependency=afterany:1552709 " "$WDQ.sbatch" && [ ! -e "$N/runs/g9/HOLD" ]'
+echo p4-1552709 > "$ROOTM/wd-1552709/run/G9P4/final_model.pt"; o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 totsrc g9 1552709 ws-netv2-g9)
+check 65b4 "^RC=0\|TOTAL=$CAP_P4\|TRAIN_ARGS=.*--resume $ROOTM/wd-1552709/run/G9P4/final_model.pt$" "$o"
+# 65c: R1b-F (g4r1bf; the cluster's disarmed follow-up record "0 ..."): the running T4 job's restart in place, the fresh
+# successor, and the ROLLBACK lr (runs/g4r1bf/ROLLBACK.started) with the same cap
+wdtree; echo "0 2026-11-15T20:34:58 orchestrator" > "$N/runs/r1/FU.started"
+BJ=$ROOTM/wd-1175389; mkdir -p "$BJ/run/R1bF/pool"; touch "$BJ/.nv2-watchdog"; echo r1bf-own > "$BJ/run/R1bF/final_model.pt"
+o=$(WD_PART=training WD_CPUS=10 WD_MEM=40960 WD_GPU=15360 totsrc g4r1bf 1175389 ws-netv2-g4)
+check 65c "^RC=0\|TOTAL=$CAP_R1BF\|TRAIN_ARGS=--no-bf16 .*--lr 7e-5 .*--run-dir $BJ/run/R1bF .*--snapshot-cache 40 --stacked-opp --snapshot-cache-cpu 200 --guard-pg-mean 20 --guard-anchor-drop 0.0999 --resume $BJ/run/R1bF/final_model.pt$" "$o"
+o=$(WD_PART=training WD_CPUS=10 WD_MEM=40960 WD_GPU=15360 totsrc g4r1bf 1552671 ws-netv2-g4)
+check 65c2 "^RC=0\|TOTAL=$CAP_R1BF\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1552671/run/R1bF .*--guard-anchor-drop 0.0999 --resume $Q2/final_model.pt$" "$o"
+yes_ 65c3 '[ "$(nsb)" = 1 ] && grep -q -- "--partition=training .*--dependency=afterany:1552671 " "$WDQ.sbatch"'
+touch "$N/runs/g4r1bf/ROLLBACK.started"; o=$(WD_PART=training WD_CPUS=10 WD_MEM=40960 WD_GPU=15360 totsrc g4r1bf 1175389 ws-netv2-g4)
+check 65c4 "^RC=0\|TOTAL=$CAP_R1BF\|TRAIN_ARGS=--no-bf16 .*--lr 3\.5e-5 .*--resume $BJ/run/R1bF/final_model.pt$" "$o"; rm -f "$N/runs/g4r1bf/ROLLBACK.started" "$N/runs/r1/FU.started"
+# 65d: every other run / mode keeps the global 1e9: r1 MODE r1b; g9 MODE g9q2, g9q (the A16 branch), g9 (generic)
+wdtree; echo r1b > "$N/runs/r1/MODE"; o=$(totsrc r1 1300600 ws-netv2-r1); check 65d "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=--no-bf16 .*--n-layers 4 " "$o"; checkno 65d2 "/run/G9q " "$o"
+q2tree; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300610 ws-netv2-g9); check 65d3 "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300610/run/G9q2 " "$o"
+q2tree; echo g9q > "$N/runs/g9/MODE"; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300611 ws-netv2-g9); check 65d4 "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--run-dir $ROOTM/wd-1300611/run/G9q " "$o"
+q2tree; echo g9 > "$N/runs/g9/MODE"; o=$(WD_PART=a16 WD_CPUS=10 WD_MEM=65536 WD_GPU=15356 totsrc g9 1300612 ws-netv2-g9); check 65d5 "^RC=0\|TOTAL=1000000000\|TRAIN_ARGS=.*--kl-anchor $P1 --kl-anchor-coef 0.1 " "$o"
+# 65e: one job script process, two sources (restart in place after a MODE change): the raised cap does not leak
+wdtree; o=$(twosrc r1 1300620 ws-netv2-r1 r1b); check 65e "^RC=0\|TOTALS=$CAP_G9Q 1000000000$" "$o"
+p4tree; echo g9p4 > "$N/runs/g9/MODE"; echo "2026-11-16T21:10:00 $(cat "$N/runs/g9p4/P4.md5") g9 1173274" > "$N/runs/g9p4/G9P4_STARTED"
+o=$(WD_PART=a40 WD_CPUS=10 WD_MEM=65536 WD_GPU=46068 twosrc g9 1300621 ws-netv2-g9 g9); check 65e2 "^RC=0\|TOTALS=$CAP_P4 1000000000$" "$o"
+# 65f: the check-in's readings of the file: its first TOTAL= line (global) and its largest literal TOTAL (G9q's)
+check 65f "^1000000000 $CAP_G9Q$" "$(grep -m1 '^TOTAL=' "$ENVF" | cut -d= -f2) $(grep -E '^[[:space:]]*TOTAL=[0-9]+' "$ENVF" | sed -E 's/^[[:space:]]*TOTAL=([0-9]+).*/\1/' | sort -n | tail -n 1)"
+chmod -R u+w "$N/runs/pretrain" 2> /dev/null; rm -rf "$N/runs/g9qent" "$N/runs/g9qent-parked" "$N/runs/g9q2-parked" "$N/runs/g9qbf" "$N/runs/g9p4" "$N/runs/g9p4-parked"
+rm -f "$P4" "$N/bin/py-src-8892762" "$N/runs/g9/HOLD"; echo g9q2 > "$N/runs/g9/MODE"
 fi
 rm -f "$WDQ"* "$ROOTM.wdout"; rm -rf "$ROOTM"/wd-*
 rm -f "$ROOTM.parkpy"; unset NV2_PARK_PY

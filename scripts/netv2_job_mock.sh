@@ -9,6 +9,7 @@
 #   bash scripts/netv2_job_mock.sh SBATCH_SCRIPT ENVFILE [old]   (old = a spooled pre-fix job script: no chain-flag case)
 # Expectations are the CORRECT behaviour: FAIL lines are gaps. S12-S13 (v10): G9r and the park INLINE_CMD. S14 (v12
 # draft): G9t (MODE g9t, runs/g9t/RECIPE). S16 (v14): the G9r park -> G9t on the A16, the parked-HOLD guard.
+# S20 (v22): the three raised step caps (--total-steps) of the G9-P4 / G9q / R1b-F successors.
 set -u
 SB=$(readlink -f "$1"); ENVF=$(readlink -f "$2"); OLD=${3:-}
 M=${MOCK_ROOT:-/tmp/netv2-job-mock}
@@ -679,6 +680,29 @@ if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ] && [ -z "${MOCK_S
     expect "S19 stubs: one park, the two readings in order; finals published r--; DONE + HOLD; one sbatch" "^park 1175374 read 100 read 250 \| r-- r-- \| DONE HOLD \| 1$" "$(tr '\n' ' ' < "$E9/stub.calls")| $(stat -c %A "$E9"/cd100/final/01460081000.pt | cut -c2-4) $(stat -c %A "$E9"/cd250/final/01610090000.pt | cut -c2-4) | $([ -f "$E9/DONE" ] && echo DONE) $([ -f "$G/HOLD" ] && echo HOLD) | $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0)"
     expect "S19 train.log: the finished HOLD round" "MODE g9e is finished \(FINAL: ROBUST\): the A40 is for main, round 1: HOLD" "$(cat "$G"/*-1175374/train.log 2>/dev/null; cat "$L9/train.log" 2>/dev/null)"
     chmod -R u+w "$M/nv2/runs/g9e" "$M/nv2/scripts/netv2_g9e" "$M/nv2/runs/g9q-cd1350"; rm -rf "$M/nv2/runs/g9e" "$M/nv2/scripts/netv2_g9e" "$M/nv2/runs/g9q-cd1350" "$M/nv2/runs/g9p4-parked" "$M/save-steps-1175374" "$G/HOLD" "$G/restart"
+  fi
+  # S20 (v22, 2026-11-24; skipped with MOCK_SKIP_V22=1): the raised step caps through the real job script. The fresh
+  # successors (watchdog on) of G9-P4 (1552709, A40, MODE g9p4, started long ago), G9q (1552742, A30, r1 MODE g9q) and
+  # R1b-F (1552671, T4 on training) each resume their lineage's newest mirrored save (the running job's mirror) with
+  # --total-steps 2e9 / 5e9 / 2e9 at the first launch AND at the restart in place (the job script re-sources netv2.env),
+  # and queue exactly one successor (afterany).
+  if [ -z "${MOCK_SKIP_V22:-}" ]; then
+    echo "== S20: the fresh successors of G9-P4 (1552709), G9q (1552742) and R1b-F (1552671): --total-steps 2e9 / 5e9 / 2e9"
+    p4tree18; echo "2026-11-16T21:10:00 x g9 1173274" > "$M/nv2/runs/g9p4/G9P4_STARTED"; rm -f "$M/sbatch.log" "$G/HOLD" "$G/restart"
+    lineage "$G/20261123-103220-1175374/G9P4" G9P4-mirror '24 12:30' 00646000000
+    lineage "$M/nv2/runs/r1/20261123-111353-1483048/G9q" G9q-mirror '24 12:30' 02198000000
+    mkdir -p "$M/nv2/runs/g4r1bf"; touch "$M/nv2/runs/g4r1bf/R1BF_STARTED"; lineage "$M/nv2/runs/g4r1bf/20261123-092303-1175389/R1bF" R1bF-mirror '24 12:30' 00633000000
+    echo 46068 > "$M/gpu_mib-1552709"; echo 24576 > "$M/gpu_mib-1552742"; echo 15360 > "$M/gpu_mib-1552671"
+    for x in "g9 1552709 10 a40 ws-netv2-g9 G9P4 2000000000 $G/20261123-103220-1175374" \
+             "r1 1552742 30 a30 ws-netv2-r1 G9q 5000000000 $M/nv2/runs/r1/20261123-111353-1483048" \
+             "g4r1bf 1552671 10 training ws-netv2-g4 R1bF 2000000000 $M/nv2/runs/g4r1bf/20261123-092303-1175389"; do
+      read -r r j cpu part nm lin cap mj <<< "$x"; rm -f "$M/sbatch.log"; : > "$WQ"
+      job "$r" "$j" "$cpu" "$part" "$nm" restart > /dev/null; cj=$(grep "ws-netv2-$j/" "$M/calls.log"); aj=$(grep "^$j " "$M/argv.log")
+      expect "S20 $lin ($j): 2 calls, the mirrored $lin save, then its restart in place, through the 24c633f wrapper" "^2 \| call resume=$mj/$lin/final_model.pt \[$lin-mirror-final\] run_dir=$T/ws-netv2-$j/run/$lin .*${PP24%$} \| call resume=$T/ws-netv2-$j/run/$lin/final_model.pt \[trained-from:$lin-mirror-final\] run_dir=$T/ws-netv2-$j/run/$lin " "$(grep -c . <<< "$cj") | $(sed -n 1p <<< "$cj") | $(sed -n 2p <<< "$cj")"
+      expect "S20 $lin ($j): --total-steps $cap in both trainer argvs" "^2 2$" "$(grep -c -- " --total-steps $cap --max-hours 70.5 " <<< "$aj") $(grep -c . <<< "$aj")"
+      expect "S20 $lin ($j): exactly one sbatch, its successor afterany:$j on $part" "^sbatch --job-name=$nm --partition=$part --gres=gpu:1 --cpus-per-task=$cpu --mem=[0-9]+M --time=72:00:00 --dependency=afterany:$j scripts/slurm_train_v2.sbatch $r 1$" "$(cat "$M/sbatch.log") $(grep -c . "$M/sbatch.log")"
+    done
+    rm -f "$M"/gpu_mib-15527* "$M/nv2/runs/g9p4/G9P4_STARTED"
   fi
 fi
 rm -f "$M"/pending-inline* "$M"/gpu_mib-* "$M"/break-*
