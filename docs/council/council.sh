@@ -66,6 +66,18 @@ if r == 'R3':
         crit.append(f'## From Member {letters[o]}\n\n' + ('\n'.join(mine) if mine else '(no critiques of your ids found; full text follows)\n' + own('R2', o)))
     blocks = [f'## Proposals of Member {letters[o]}\n\n' + own('R1', o) for o in sorted(others, key=lambda o: letters[o])]
     text = text.replace('{{OWN}}', own('R1', m)).replace('{{CRITIQUES}}', '\n\n'.join(crit)).replace('{{OTHERS}}', '\n\n'.join(blocks))
+if r in ('R2', 'R3'):  # appendix: the results.csv rows cited in the material above (cheap number checks, 11-24)
+    import csv
+    wt = pathlib.Path(out).resolve().parent.parent
+    rows = {x['id']: x for x in csv.DictReader(open(wt / 'docs/thesis/data/results.csv', newline=''))}
+    ids = sorted({i for i in re.findall(r"\b([a-z][a-z0-9]{0,6}-[a-z0-9]{1,8}[a-z]?)\b", text) if i in rows})
+    cut = lambda s, n: (s or '').replace('\n', ' ').replace('|', '/')[:n]
+    lines = ['| id | date | question | arm A | arm B | harness | games | estimate [95% CI] | verdict | outcome |', '|' + '---|' * 10]
+    for i in ids:
+        x = rows[i]
+        lines.append(f"| {i} | {x['date']} | {cut(x['question'], 160)} | {cut(x['arm_a'], 60)} | {cut(x['arm_b'], 60)} | {cut(x['harness'], 70)} | {x['games']} | {x['estimate_pct']} [{x['ci_low']}, {x['ci_high']}] | {cut(x['verdict'], 220)} | {x['outcome']} |")
+    text += (f"\n\n---\n## Appendix: the {len(ids)} results.csv rows cited above (copied from docs/thesis/data/results.csv; long fields cut)\n"
+             + '\n'.join(lines) + '\n')
 text = text.replace('{{LETTER}}', L)
 pathlib.Path(out).write_text(text)
 EOF

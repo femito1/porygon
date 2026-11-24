@@ -15,6 +15,8 @@ say so when an idea is good, and say what would make a weak one work.
 - Does it break a hard rule?
 - Does it really generalise, or would it overfit Foul Play?
 
+**Token budget (binding):** every tool call re-sends your whole context, so this round must be lean. The `results.csv` rows cited in the material below are appended at the end of this prompt: check numbers there first. Open other sources only for a specific check (grep a keyword, `sed -n` a line range, one function of the code), never a whole large file (`results.md` ≈ 100 KB, `results.csv` ≈ 96 KB, the literature report ≈ 40 KB). Aim for ≤ 25 tool calls.
+
 **Output: ONLY this markdown; ≤ ~300 words per proposal.**
 
 ```

@@ -7,6 +7,8 @@ you now think it beats yours. Credit its id.
 
 Sources as before (read-only): `docs/council/BRIEF.md`, `docs/thesis/*`, `src/porygon/`, the web.
 
+**Token budget (binding):** every tool call re-sends your whole context, so this round must be lean. The `results.csv` rows cited in the material below are appended at the end of this prompt: check numbers there first. Open other sources only for a specific check (grep a keyword, `sed -n` a line range, one function of the code), never a whole large file (`results.md` ≈ 100 KB, `results.csv` ≈ 96 KB, the literature report ≈ 40 KB). Aim for ≤ 25 tool calls.
+
 **Output: ONLY this markdown.**
 
 ```
