@@ -31,3 +31,6 @@ Your round-1 proposals:
 ---
 Critiques of your proposals:
 {{CRITIQUES}}
+---
+For the optional adoption only (do not critique them again), the other members' round-1 proposals:
+{{OTHERS}}

@@ -64,7 +64,8 @@ if r == 'R3':
         parts = re.split(r'(?m)^(?=### critique of )', own('R2', o))
         mine = [p for p in parts if re.match(rf'### critique of {L}\d', p)]
         crit.append(f'## From Member {letters[o]}\n\n' + ('\n'.join(mine) if mine else '(no critiques of your ids found; full text follows)\n' + own('R2', o)))
-    text = text.replace('{{OWN}}', own('R1', m)).replace('{{CRITIQUES}}', '\n\n'.join(crit))
+    blocks = [f'## Proposals of Member {letters[o]}\n\n' + own('R1', o) for o in sorted(others, key=lambda o: letters[o])]
+    text = text.replace('{{OWN}}', own('R1', m)).replace('{{CRITIQUES}}', '\n\n'.join(crit)).replace('{{OTHERS}}', '\n\n'.join(blocks))
 text = text.replace('{{LETTER}}', L)
 pathlib.Path(out).write_text(text)
 EOF
@@ -104,14 +105,20 @@ for l in open(sys.argv[1]):
         u=e.get('usage',{}); i+=u.get('input_tokens',0) or 0; o+=u.get('output_tokens',0) or 0; c+=u.get('cached_input_tokens',0) or 0
 print(i,o,i-c+o)" "$raw.jsonl" 2>/dev/null || echo "0 0 0") ;;
     carbon)
+      # agy's default review mode denies every shell command in print mode and the turn then ends with NO output (R1
+      # 11-24: allow-rules do not override it). always-proceed inside --sandbox: commands run, reads are confined to the
+      # worktree (+ /tmp), writes inside the worktree are detected and reverted below, network is allowed (web research).
       ( cd "$WT" && timeout "$TO" agy -p "$ask" --model "Gemini 4 Carbon" --sandbox --effort high --output-format json \
-          --print-timeout "${TO}s" ) > "$raw.json" 2> "$raw.err" || rc=$?
+          --settings '{"toolPermission":"always-proceed"}' --print-timeout "${TO}s" ) > "$raw.json" 2> "$raw.err" || rc=$?
+      python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('status')=='SUCCESS' and not d.get('denied_actions') else 1)" "$raw.json" 2>/dev/null || rc=${rc/#0/97}
       python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('response',''))" "$raw.json" > "$out" 2>/dev/null
       # agy: input_tokens excludes cache_read_tokens; output_tokens excludes thinking_tokens (total_tokens = input + output)
       read -r inp outp fresh < <(python3 -c "import json,sys;u=json.load(open(sys.argv[1])).get('usage',{});g=lambda k:u.get(k,0) or 0;print(g('input_tokens')+g('cache_read_tokens'), g('output_tokens')+g('thinking_tokens'), g('input_tokens')+g('output_tokens')+g('thinking_tokens'))" "$raw.json" 2>/dev/null || echo "0 0 0") ;;
   esac
   tot=$((inp + outp))
-  [ "$rc" = 0 ] && [ -s "$out" ] || st="FAILED(rc=$rc)"
+  # a real round answer is thousands of words: < 500 bytes = failed (R1 11-24: an empty "\n" answer passed -s)
+  local minb=500; [ "$r" = TEST ] && minb=1
+  [ "$rc" = 0 ] && [ "$(wc -c < "$out" 2>/dev/null || echo 0)" -ge "$minb" ] || st="FAILED(rc=$rc)"
   if [ -n "$(git -C "$WT" status --porcelain)" ]; then  # .council/ is excluded, so any line = a member edit
     st="$st,EDITED-reset"; git -C "$WT" status --porcelain > "$raw.edits"; git -C "$WT" checkout -- . > /dev/null 2>&1; git -C "$WT" clean -fdq > /dev/null 2>&1
   fi
