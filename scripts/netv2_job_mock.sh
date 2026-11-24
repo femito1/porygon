@@ -704,6 +704,34 @@ if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ] && [ -z "${MOCK_S
     done
     rm -f "$M"/gpu_mib-15527* "$M/nv2/runs/g9p4/G9P4_STARTED"
   fi
+  # S21 (v23, 2026-11-24; council/p1-tera/PREREG.txt; skipped with MOCK_SKIP_V23=1): council P1 end to end through the real
+  # job script in the running A40 job 1175374 after the switch (MODE p1tera, restart flag armed, G9-P4 just saved): E from
+  # the parent to S0 + 30M -> E's cooldown from its branch -> C from the parent -> C's cooldown -> ARMS_DONE -> G9-P4 again
+  # in the same allocation (MODE g9p4, its own save, the flag re-armed once), then the job ends; no sbatch (watchdog done).
+  if [ -z "${MOCK_SKIP_V23:-}" ] && [ -z "${MOCK_SKIP_V22:-}" ]; then
+    echo "== S21: council P1 in job 1175374 (MODE p1tera): E, E-cd, C, C-cd, then G9-P4 again (stub saves)"
+    p4tree18; echo "2026-11-16T21:10:00 x g9 1173274" > "$M/nv2/runs/g9p4/G9P4_STARTED"; echo p1tera > "$G/MODE"; rm -f "$M/sbatch.log" "$G/HOLD"; echo 46068 > "$M/gpu_mib-1175374"
+    CP=$M/nv2/council/p1-tera; mkdir -p "$CP/parent" "$CP/pool/frozen"; PAR=$CP/parent/ckpt_02210021139.pt; echo parent > "$PAR"; chmod a-w "$PAR"
+    echo prereg > "$CP/PREREG.txt"; chmod a-w "$CP/PREREG.txt"; for x in 02205018000 02210018000; do echo "g9q-$x" > "$CP/pool/$x.pt"; done; echo P3 > "$CP/pool/frozen/P3-g9-s2.pt"
+    printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/tree-2e03cc6/src${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-tree-2e03cc6"; chmod +x "$M/nv2/bin/py-tree-2e03cc6"
+    L21=$T/ws-netv2-1175374; mkdir -p "$L21/run/G9P4/pool"; echo p4-own > "$L21/run/G9P4/final_model.pt"; echo "2026-11-24 15:00:00 saved final_model.pt at 655,000,000 steps" > "$L21/run/G9P4/train.log"; touch "$L21/.nv2-watchdog"
+    printf '2,240,061,139\n2,245,101,139\n2,240,051,139\n2,245,091,139\n660,000,000\n661,000,000\n' > "$M/save-steps-1175374"
+    MOCK_EXTRA_ENV="NV2_P1T_PARENT_MD5=$(md5sum < "$PAR" | cut -c1-8) NV2_P1T_PRE_MD5=$(md5sum < "$CP/PREREG.txt" | cut -c1-8) NV2_P1T_POOL_MD5=$(cd "$CP/pool" && find . -name '*.pt' -printf '%P %s\n' | LC_ALL=C sort | md5sum | cut -c1-8)" job g9 1175374 10 a40 ws-netv2-g9 restart > /dev/null
+    c21=$(grep "ws-netv2-1175374/" "$M/calls.log"); sed 's/^/    /' <<< "$c21" | cut -c1-200; a21=$(grep '^1175374 ' "$M/argv.log")
+    expect "S21 6 trainer calls, the job ends normally (exit 0)" "^6 exit 0$" "$(cnt ws-netv2-1175374 "$M/calls.log") $(job_rc 1175374)"
+    expect "S21 call 1: E from the parent, the tree wrapper, November sets, its own pool dir" "^call resume=$PAR \[parent\] run_dir=$L21/run/P1E pool_dir=$L21/p1tera/P1E/pool pool=2 frozen=1 .*anchor=$P1 ps=$NOV pp=$M/nv2/tree-2e03cc6/src:$M/nv2/src$" "$(sed -n 1p <<< "$c21")"
+    expect "S21 call 2: E-cd from E's branch point" "^call resume=$CP/E/branch-02240061139.pt \[trained-from:parent\] run_dir=$L21/run/P1Ecd pool_dir=$L21/p1tera/P1Ecd/pool " "$(sed -n 2p <<< "$c21")"
+    expect "S21 call 3: C from the parent" "^call resume=$PAR \[parent\] run_dir=$L21/run/P1C pool_dir=$L21/p1tera/P1C/pool " "$(sed -n 3p <<< "$c21")"
+    expect "S21 call 4: C-cd from C's branch point" "^call resume=$CP/C/branch-02240051139.pt \[trained-from:parent\] run_dir=$L21/run/P1Ccd " "$(sed -n 4p <<< "$c21")"
+    expect "S21 calls 5-6: G9-P4 from its own save, then its own new save (the re-armed flag), the 24c633f wrapper" "^call resume=$L21/run/G9P4/final_model.pt \[p4-own\] run_dir=$L21/run/G9P4 .*${PP24%$} \| call resume=$L21/run/G9P4/final_model.pt \[trained-from:p4-own\] run_dir=$L21/run/G9P4 " "$(sed -n 5p <<< "$c21") | $(sed -n 6p <<< "$c21")"
+    expect "S21 argv 1: --total-steps S0 + 30M, the flag, the KL monitor, --seed 9241101" "^1175374 -u -m porygon.v2.train .* --total-steps 2240021139 --max-hours 70.5 --no-bf16 .*--frozen-best --collector fastenv --fastenv-workers 8 .*--pool-dir $L21/p1tera/P1E/pool --snapshot-cache 512 --stacked-opp --snapshot-cache-cpu 200 --own-tera-visible --kl-monitor $PAR --kl-monitor-until 2212021139 --seed 9241101 --resume $PAR$" "$(sed -n 1p <<< "$a21")"
+    expect "S21 argv 2 / 4: the cooldowns (5M x0.1 floor 0.35 --seed 9241102), the flag only for E" " --total-steps 2245061139 .* --own-tera-visible --cooldown-start 2240061139 --final-lr-frac 0.1 --guard-entropy-min 0.35 --seed 9241102 --resume $CP/E/branch-02240061139.pt \| .* --total-steps 2245051139 .*--snapshot-cache-cpu 200 --cooldown-start 2240051139 --final-lr-frac 0.1 --guard-entropy-min 0.35 --seed 9241102 --resume $CP/C/branch-02240051139.pt$" "$(sed -n 2p <<< "$a21") | $(sed -n 4p <<< "$a21")"
+    expect "S21 argv 3: C = E's argv without the flag" "--total-steps 2240021139 .*--snapshot-cache-cpu 200 --kl-monitor $PAR --kl-monitor-until 2212021139 --seed 9241101 --resume $PAR$" "$(sed -n 3p <<< "$a21")"
+    if grep -q -- "own-tera-visible" <<< "$(sed -n 3p <<< "$a21"; sed -n 4p <<< "$a21"; sed -n 5p <<< "$a21")"; then bad "S21 the flag outside arm E"; else ok "S21 the flag only in arm E"; fi
+    expect "S21 argv 5: G9-P4's own recipe, --total-steps 2e9" " --total-steps 2000000000 .*--kl-anchor $P4 .*--resume $L21/run/G9P4/final_model.pt$" "$(sed -n 5p <<< "$a21")"
+    expect "S21 finals r--, ARMS_DONE, MODE g9p4, the park pointer, no FAILED, no sbatch" "^r-- r-- \| 2 \| g9p4 \| park \| nofail \| 0$" "$(stat -c %A "$CP"/E/final/02245101139.pt | cut -c2-4) $(stat -c %A "$CP"/C/final/02245091139.pt | cut -c2-4) | $(wc -l < "$CP/ARMS_DONE") | $(cat "$G/MODE") | $(grep -q "^newest G9P4 state: $L21/run/G9P4/final_model.pt" "$CP/G9P4-PARK.txt" && echo park) | $([ -e "$CP/FAILED" ] && echo FAILED || echo nofail) | $(grep -c . "$M/sbatch.log" 2>/dev/null || echo 0)"
+    chmod -R u+w "$M/nv2/council"; rm -rf "$M/nv2/council" "$M/nv2/bin/py-tree-2e03cc6" "$M/save-steps-1175374" "$M/gpu_mib-1175374" "$G/restart"
+  fi
 fi
 rm -f "$M"/pending-inline* "$M"/gpu_mib-* "$M"/break-*
 echo "== S3: the swap back (MODE files as before 12:40): fresh r1 and g9 jobs"
