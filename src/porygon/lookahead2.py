@@ -1,4 +1,5 @@
-"""One-turn lookahead whose leaves are scored by a v2 network (gen9), gated on the same raw network (Bet 1, 11-15).
+"""One-turn lookahead whose leaves are scored by a v2 network (gen9; gen4 from LA2-gen4, 11-24), gated on the same raw
+network (Bet 1, 11-15).
 
 At every decision with >= 2 legal actions:
   1. the raw v2 net on the live battle (`porygon.netsearch.net_forward`): T-1 probabilities p and P(win); a_net is
@@ -29,8 +30,10 @@ length-prefixed pickles over pipes); the leaves of all worlds are scored in one 
 `leaf_device`); the game is solved in the player's process. No time budget: the same position and worlds give the same
 decision on any machine, only slower under contention.
 
-Needs PORYGON_GEN=9 (gen9 engine build first on PYTHONPATH) and netv2's porygon.v2 importable (NETV2_SRC, appended to
-porygon.__path__ as scripts/fastenv/netsearch_h2h.py does; the workers do the same from the inherited environment).
+Needs PORYGON_GEN = the net's generation with that generation's engine build on the path (gen9: gloria's .engine-gen9
+first on PYTHONPATH; gen4: gloria's .venv poke_engine, the gen4 build) and netv2's porygon.v2 importable (NETV2_SRC,
+appended to porygon.__path__ as scripts/fastenv/netsearch_h2h.py does; the workers do the same from the inherited
+environment). gen4 has no terastallization: its legal set and leaves come from the same code (porygon.v3leaf).
 """
 
 import asyncio
@@ -433,7 +436,8 @@ def _player_classes():
                      **kwargs: Any):
             super().__init__(None, *args, prior_weight=0.0, samples=worlds, workers=workers, eval_config="stock",
                              seed=seed, **kwargs)
-            assert int(net.gen) == S.GEN_NUM == 9, f"lookahead2 is gen9 (net gen{net.gen}, PORYGON_GEN={S.GEN_NUM})"
+            assert int(net.gen) == S.GEN_NUM in (4, 9), (f"lookahead2 runs gen4 or gen9 with PORYGON_GEN = the net's gen "
+                                                        f"(net gen{net.gen}, PORYGON_GEN={S.GEN_NUM})")
             self.net = net.eval()
             self.leaf_net = (leaf_net or net).eval()
             self.margin, self.temperature, self.deterministic = float(margin), float(temperature), deterministic

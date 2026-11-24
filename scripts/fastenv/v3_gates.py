@@ -12,6 +12,9 @@
     PORYGON_GEN=9 PYTHONPATH=$G/.engine-gen9:$C/src NETV2_SRC=<frozen netv2 src> \
       $PY scripts/fastenv/v3_gates.py p1 --records "$SL" --source 6771931 --net NET --out OUT
     ... v3_gates.py p2 --roots OUT/roots.pkl --net NET --out OUT
+p1 in gen4 (LA2-gen4's leaf parity, the same method): PORYGON_GEN=4 PYTHONPATH=$C/src (gloria's .venv gen4 engine)
+  ... v3_gates.py p1 --format gen4randombattle --records REC --net GEN4NET --out OUT --records-max 300 --pairs 100000
+  --no-roots; records may list every decision of their side in `all_decisions` (exit_la2.py gen --all-decisions).
 """
 import argparse
 import gzip
@@ -31,9 +34,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 
-def prep():
+def prep(fmt: str = "gen9randombattle"):
     import netsearch_study as ST
-    NS, S, R = ST.setup("gen9randombattle")
+    NS, S, R = ST.setup(fmt)
     from porygon import v3leaf as L
     return ST, NS, S, R, L
 
@@ -120,16 +123,16 @@ def revealed_between(o0: dict, o1: dict) -> bool:
 
 
 def pair_targets(rec: dict, per_record: int, seed: int) -> list[tuple[int, int]]:
-    seq = sorted(d["idx"] for d in rec["decisions"] if d.get("n_legal", 0) >= 1)
+    seq = sorted(d["idx"] for d in (rec.get("all_decisions") or rec["decisions"]) if d.get("n_legal", 0) >= 1)
     cands = list(range(len(seq) - 1))
     h = int(hashlib.sha1(f"{seed}:{rec['id']}:{rec.get('side')}".encode()).hexdigest()[:12], 16)
     ks = random.Random(h).sample(cands, min(per_record, len(cands)))
     return [(seq[k], seq[k + 1]) for k in sorted(ks)]
 
 
-async def replay_pairs(rec, R, NS, pairs):
+async def replay_pairs(rec, R, NS, pairs, gen: int = 9):
     """Yield (t_idx, t1_idx, battle at t+1, first seen) after calling `at_t(battle, first)` hooks via a dict."""
-    rep = R.StreamReplayer(rec["player"], 9, f"battle-{rec.get('battle') or rec['id']}")
+    rep = R.StreamReplayer(rec["player"], gen, f"battle-{rec.get('battle') or rec['id']}")
     weather = NS.WeatherSeen()
     want = {t for p in pairs for t in p}
     for msg in R.normalize_stream(rec["stream"]):
@@ -143,10 +146,15 @@ async def replay_pairs(rec, R, NS, pairs):
 
 async def p1(a) -> int:
     import asyncio  # noqa: F401
-    ST, NS, S, R, L = prep()
+    ST, NS, S, R, L = prep(a.format)
+    gen = int(a.format[3:a.format.index("random")])
     net = load_net(a.net, "cpu")
+    assert int(net.gen) == gen, f"net gen{net.gen} vs {a.format}"
     sel = d_selectors(L)
     recs = ST.records(a.records.split(), a.source, a.seed)
+    if a.records_max:
+        recs = recs[:a.records_max]  # LA2-gen4: a fixed number of battles (one record each), every pair of them
+    n_with_pairs = 0
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     rows_f = open(out / "p1-rows.jsonl", "w")
@@ -165,8 +173,9 @@ async def p1(a) -> int:
         firsts = {p[0] for p in pairs}
         seconds = {p[1]: p[0] for p in pairs}
         at_t = {}
+        n_before = n_pairs
         try:
-            async for idx, battle, first in replay_pairs(rec, R, NS, pairs):
+            async for idx, battle, first in replay_pairs(rec, R, NS, pairs, gen):
                 if idx in seconds and seconds[idx] in at_t and n_pairs < a.pairs:
                     root_t, convs_t, obs_t, turn_t = at_t[seconds[idx]]
                     root1 = L.LeafRoot(battle, first)
@@ -210,6 +219,7 @@ async def p1(a) -> int:
         except Exception as e:  # a record that fails to replay or convert counts against the void rule
             n_fail += 1
             print(f"record {rec['id']}: {type(e).__name__}: {e}", file=sys.stderr)
+        n_with_pairs += n_pairs > n_before
         if n_pairs and n_pairs % 50 == 0:
             print(f"{n_pairs} pairs, {time.time() - t0:.0f} s", file=sys.stderr)
     rows_f.close()
@@ -219,7 +229,8 @@ async def p1(a) -> int:
     agreeA = tA[0] / max(tA[1], 1)
     mA, mB = float(np.mean(dA)) if dA else math.nan, float(np.mean(dB)) if dB else math.nan
     res = {
-        "pairs": n_pairs, "target_pairs": a.pairs, "failed_records": n_fail, "dets": a.dets,
+        "pairs": n_pairs, "target_pairs": a.pairs, "failed_records": n_fail, "dets": a.dets, "format": a.format,
+        "records": len(recs), "records_with_pairs": n_with_pairs, "records_max": a.records_max,
         "A": {"agree": agreeA, "elements": tA[1], "mean_abs_dp": mA, **q(dA),
               "bad": dict(sorted(badA.items(), key=lambda kv: -kv[1]))},
         "B": {"agree": tB[0] / max(tB[1], 1), "elements": tB[1], "mean_abs_dp": mB, **q(dB),
@@ -232,10 +243,11 @@ async def p1(a) -> int:
         "seconds": time.time() - t0,
     }
     res["pass"] = bool(agreeA >= 0.99 and mA <= 0.01 and mB <= 0.03)
-    res["void"] = n_pairs < 0.9 * a.pairs
+    res["void"] = (n_fail > 0.1 * a.records_max or n_pairs == 0) if a.records_max else n_pairs < 0.9 * a.pairs
     (out / "p1.json").write_text(json.dumps(res, indent=1))
-    with open(out / "roots.pkl", "wb") as fh:
-        pickle.dump(roots, fh)
+    if not a.no_roots:
+        with open(out / "roots.pkl", "wb") as fh:
+            pickle.dump(roots, fh)
     print(json.dumps({k: res[k] for k in ("pairs", "pass", "void")} | {
         "A": {k: res["A"][k] for k in ("agree", "mean_abs_dp")}, "B": {k: res["B"][k] for k in ("agree", "mean_abs_dp")}}))
     return 0
@@ -502,6 +514,9 @@ def main() -> int:
     a1.add_argument("--pairs", type=int, default=300)
     a1.add_argument("--per-record", type=int, default=3)
     a1.add_argument("--dets", type=int, default=2)
+    a1.add_argument("--format", default="gen9randombattle")
+    a1.add_argument("--records-max", type=int, default=None, help="use only the first N records (battles)")
+    a1.add_argument("--no-roots", action="store_true", help="do not write roots.pkl (P2's input)")
     a2 = sub.add_parser("p2")
     a2.add_argument("--roots", required=True)
     a2.add_argument("--net", required=True)

@@ -130,7 +130,8 @@ fi
     echo "netv2 src: $NV_LIVE/src/porygon (commit $(cat "$CODE/netv2src/COMMIT" 2>/dev/null || echo unknown)), copy sha256 $(cd "$CODE/netv2src" && find porygon -name '*.py' | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-16)"
     echo "showdown: $PS"; sed 's/^/  | /' "$PS/SOURCE.txt"
     echo "  code sha256 now: $(cd "$PS" && find dist config data sim lib server -type f ! -path config/chat-plugins/seasons.json | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-16)"
-    echo "engine: $(ls "$G"/.engine-gen9/poke_engine/*.so 2>/dev/null | head -1) sha256 $(sha256sum "$G"/.engine-gen9/poke_engine/*.so 2>/dev/null | head -1 | cut -c1-16)"
+    if [ "$GEN" = 9 ]; then ENG_DIR=$G/.engine-gen9/poke_engine; else ENG_DIR=$("$PY" -c 'import os, poke_engine; print(os.path.dirname(poke_engine.__file__))' 2>/dev/null); fi
+    echo "engine: $(ls "$ENG_DIR"/*.so 2>/dev/null | head -1) sha256 $(sha256sum "$ENG_DIR"/*.so 2>/dev/null | head -1 | cut -c1-16)"
     echo "python: $PY ($("$PY" -c 'import sys, torch; print(sys.version.split()[0], "torch", torch.__version__)' 2>&1))"
     if [ "$FP_MODE" = 1 ]; then
       echo "foulplay: $FP_DIR commit $(git -C "$FP_DIR" rev-parse HEAD 2>/dev/null || echo unknown) (dirty: $(git -C "$FP_DIR" status --porcelain 2>/dev/null | wc -l) files); venv $FP_VENV ($("$FP_VENV/bin/python" --version 2>&1)); PYTHONPATH=$FP_PYTHONPATH"
@@ -154,7 +155,8 @@ cat "$OUT/manifest.txt"
 if [ "$DRY" != 1 ]; then
   log "pre-reading the Python environment"
   SITE=$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-  timeout 1800 find "$SITE"/{torch,poke_env,websockets,numpy} "$G/.engine-gen9" -type f \( -name '*.py' -o -name '*.so*' \) \
+  ENG_READ=$G/.engine-gen9; [ "$GEN" = 9 ] || ENG_READ=$SITE/poke_engine
+  timeout 1800 find "$SITE"/{torch,poke_env,websockets,numpy} "$ENG_READ" -type f \( -name '*.py' -o -name '*.so*' \) \
     -print0 2>/dev/null | xargs -0 -P4 -n64 cat > /dev/null 2>&1 || true
   if [ "$FP_MODE" = 1 ]; then
     [ -x "$FP_VENV/bin/python" ] || { log "no Foul Play venv $FP_VENV"; exit 1; }
