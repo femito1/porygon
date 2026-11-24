@@ -86,12 +86,13 @@ def build_env(args, seed: int | None = None) -> FastWorkers:
         args.pool_battles / total if total else 0.0)
     pool = int(round(args.fastenv_battles * share))
     seed = seed if seed is not None else int.from_bytes(os.urandom(3), "little")  # restarts must not replay teams
+    own_tera = bool(getattr(args, "own_tera_visible", False))  # spec v2.2a rows (the learner's; v2.1 policies: v21_view)
     env = FastEnv(args.format, n, args.fastenv_battles, seed=seed, encoder="v2", shaping=tuple(args.shaping),
-                  dyn_bots="heuristic,max_power" if pool else "")
+                  dyn_bots="heuristic,max_power" if pool else "", own_tera=own_tera)
     env.restart_dead = True  # a crashed worker is replaced (its battles start over) instead of ending training
     print(f"fastenv: {n} workers x {args.fastenv_battles} battles ({pool} pool battles per worker: frozen net with p "
-          f"{getattr(args, 'p_frozen', 0.0)}, baseline bot with p {args.p_baseline}, else a snapshot), seed {seed}",
-          flush=True)
+          f"{getattr(args, 'p_frozen', 0.0)}, baseline bot with p {args.p_baseline}, else a snapshot), seed {seed}"
+          + (", spec v2.2a rows (own tera visible; v2.1 pool nets get v21_view)" if own_tera else ""), flush=True)
     return FastWorkers(env, pool_per_worker=pool)
 
 
@@ -219,11 +220,26 @@ class FastCollector:
 
     def _opp_obs(self, batches: list, all_rows: list, items: list) -> dict[str, np.ndarray]:
         """One snapshot opponent's decision batch for opp_fn: its (batch index, row index) items packed in order,
-        observation fields only, drop_seed 0 (no id dropout)."""
+        observation fields only, drop_seed 0 (no id dropout). In a spec v2.2a env (FastEnv(own_tera=True)) the batch
+        also carries `tera_v21` / `tera_p_v21`: the rows' exact v2.1 tera / tera_p (the JS encoder's obs/tera_v21
+        columns: our pre-Tera zeros restored by v2.1's own rule); opp_fn hands them to a v2.1 policy (a net without
+        own_tera_visible: frozen / BC nets, the parent's pool)."""
         raw = self._pack_runs((batches[bi], all_rows[bi][k]) for bi, k in items)
         ob = {k: raw[:, off:off + nb].copy().view(dtype).reshape(len(items), *shape)
               for k, (off, nb, shape, dtype) in self.packer.layout.items() if k in self.opp_packer.layout}
         ob["drop_seed"] = np.zeros(len(items), np.int64)
+        if "obs/tera_v21" in batches[0].cols:
+            runs, cur, rows = [], None, []  # one fancy index per run of items from the same batch (as _pack_runs)
+            for bi, j in items:
+                if bi != cur and rows:
+                    runs.append((cur, rows))
+                    rows = []
+                cur = bi
+                rows.append(all_rows[bi][j])
+            if rows:
+                runs.append((cur, rows))
+            for k in ("tera_v21", "tera_p_v21"):
+                ob[k] = np.concatenate([batches[bi].cols[f"obs/{k}"][np.asarray(r, np.int64)] for bi, r in runs])
         return ob
 
     def _close(self, key: int, tr: list, next_value: float, done: bool) -> None:

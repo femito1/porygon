@@ -1,0 +1,39 @@
+R1b-F-cd: the cooldown of R1b-F's latest checkpoint for council test P3 (gen4 re-baseline at Foul Play's fixed 200k
+iterations; docs/council/sessions/2026-11-24/PORTFOLIO.md P3) — PRE-REGISTRATION, FINAL (netv2, 2026-11-24 ~13:50 UTC;
+main's item 1 of 11-24, design signed off by main; written before the branch; read-only copy runs/g4r1bf-cd/PREREG.txt).
+netv2 only makes the net; wsp plays and reads P3 (its own PREREG and VERDICT under /vol/bitbucket/fr1226/porygon-ws-wsp/
+council/p3-gen4/). No result of this branch is read here: there is no decision rule in this file.
+
+BRANCH POINT: R1b-F's latest 5M checkpoint at launch = ckpt_00635038608.pt (635,038,608 steps; written 11-24 13:21Z in
+  job 1175389's live dir /tmp/ws-netv2-1175389/run/R1bF/checkpoints/, mirrored to runs/g4r1bf/20261123-092303-1175389/
+  R1bF/checkpoints/; md5 450fd8a6 in both), copied at 13:47Z to runs/g4r1bf-cd/branch-point-00635038608.pt (r--, md5
+  450fd8a6). The driver refuses to run unless that file is read-only with md5 450fd8a6.
+
+RECIPE (the standard cooldown recipe = G9q-cd@805 / @1350 / @2030's, scripts/netv2_g9q/cd2030-driver.sh): ONE INLINE_CMD of
+  R1b-F's own T4 job 1175389 (dove04, training partition; R1b-F's trainer is stopped meanwhile, ~4 h at ~370 sps):
+  R1b-F's live trainer argv as recorded at the branch (runs/g4r1bf-cd/trainer-argv.{bin,txt}) + the branch's own run /
+  pool dirs + --resume <branch point> --cooldown-start 635038608 --total-steps 640038608 --final-lr-frac 0.1 (cosine
+  7e-5 -> 7e-6) --guard-entropy-min 0.35; limit 8 h (timeout -s INT). The branch's pool = a hard-linked copy of R1b-F's
+  local pool with the snapshots newer than S moved aside (the same files as cd2030's copy; hard links cost no tmpfs);
+  its run dir $LOCAL/cd/R1bF-cd is outside the job's mirrored run dir (no 5.5 GB pool copy to NFS).
+  Final net: runs/g4r1bf-cd/final/<steps, 11 digits>.pt (r--; md5 in runs/g4r1bf-cd/STATUS "final at ... (md5 ...)"),
+  refused (FAILED) if the branch ended before S + 5,000,000 steps.
+  Hand-off to wsp: council/p3-gen4/R1BF_CD_READY (r--) = one line "<final path> <md5, first 8 hex> <steps>". Any refusal
+  or a missing / short final writes runs/g4r1bf-cd/FAILED and council/p3-gen4/FAILED (one line why); wsp's chain stops.
+  Refusals (nothing queued, R1b-F untouched): no read-only PREREG with the pinned md5; the branch point missing, writable
+  or not 450fd8a6; < 10 h left in the job; any of INLINE_CMD / INLINE_CMD.running / HOLD / WAIT_FOR / CHAIN_STOPPED /
+  PARKED / ROLLBACK in runs/g4r1bf; not exactly one trainer or its parent is not the job script; the recorded argv has an
+  lr schedule / cooldown flag, is not gen4randombattle, lacks --guard-anchor-drop 0.0999 or R1b-F's run dir, or its
+  --total-steps is not 1,000,000,000. CD_STOP (runs/g4r1bf-cd/CD_STOP) before the SIGINT stops the driver.
+
+R1b-F CONTINUES by the restart in place (same allocation; the job script re-sources netv2.env, v22 b04b483a): the
+  relaunch check (runs/g4r1bf-cd/relaunch/, FAILED there on a fail, for the agent; the cooled net stays valid) =
+  the relaunched argv equals the recorded one up to the two --resume values and EXACTLY one other change, --total-steps
+  1,000,000,000 -> 2,000,000,000 (v22's R1b-F cap, the orchestrator's 11-24 decision: "takes effect at each lineage's
+  next source"); the last --resume = $LOCAL/run/R1bF/final_model.pt; the first upd continues the step counter (+0 to
+  +200k steps after the saved count). Chosen over arming in the successor 1552671 after 11-26 09:13Z: the job has ~43 h
+  left (the cooldown needs ~4 h), the restart in place under v22 is the mocked path (job mock S20), and waiting would
+  add a hand-over and ~44 h to wsp's chain.
+
+Driver: scripts/netv2_g4r1bf/cd-driver.sh (= cd2030-driver.sh with the changes named above; a setsid 1-CPU step in job
+1175389, run from a node-local copy). Laptop mock: scripts/netv2_g4r1bf/mock-cd.sh.

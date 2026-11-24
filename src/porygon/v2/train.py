@@ -88,7 +88,7 @@ from porygon.env import local_server
 from porygon.v2.model import (
     COL, DEFAULT_CFG, Net, batch_to_tensors, load, model_keys, net_from_checkpoint, save,
 )
-from porygon.v2.spec import VOCAB_SIZES, n_actions
+from porygon.v2.spec import TERA_OFFSET, VOCAB_SIZES, n_actions, v21_view
 from porygon.v2.train_eval import EvalJob, copy_checkpoint, launch, stop_process, tail
 from porygon.v2.workers import (
     ACT, DONE, LOGP, NEXT_V, OBS, OPP_C, OPP_T, REW, SEED, VAL, BattleWorkers, Collector, Packer, WorkerSpec, gen_of,
@@ -364,6 +364,35 @@ def anchor_logp(anchor: Net, tensors: dict, keys: list[str], dmg_all: dict | Non
     return torch.cat(parts)
 
 
+def policy_view(learner: Net, other: Net, tensors: dict, keys: list[str], dmg_all: dict | None):
+    """(observations, damage features) for a frozen policy `other` on the learner's rollout: the v2.1 view
+    (porygon.v2.spec.v21_view, its own damage features) when the learner is a spec v2.2a policy and `other` is not;
+    else the rollout itself and the learner's damage features."""
+    if getattr(learner, "own_tera_visible", False) and not getattr(other, "own_tera_visible", False):
+        view = v21_view(tensors)
+        return view, rollout_damage(other, view, keys)
+    return tensors, dmg_all
+
+
+def monitor_kl(net: Net, monitor: Net, tensors: dict, keys: list[str], dmg_all: dict | None, device
+               ) -> dict[str, float]:
+    """--kl-monitor: KL(learner || monitor) over the legal actions of every rollout row at the update's starting
+    weights (both eval mode, every id visible, no grad; the monitor on its own view, `policy_view`): the mean, the
+    mean over rows with a legal tera action, and that row share."""
+    view, mdmg = policy_view(net, monitor, tensors, keys, dmg_all)
+    lp_m = anchor_logp(monitor, view, keys, mdmg, device)
+    was = net.training
+    net.eval()
+    lp_l = anchor_logp(net, tensors, keys, dmg_all, device)
+    net.train(was)
+    mask = tensors["action_mask"] > 0
+    kl = torch.where(mask, lp_l.exp() * (lp_l - lp_m), torch.zeros_like(lp_l)).sum(-1)
+    tera = mask[:, TERA_OFFSET:TERA_OFFSET + 4].any(-1) if mask.shape[1] > TERA_OFFSET else torch.zeros_like(mask[:, 0])
+    return {"diag/kl_monitor": kl.mean().item(),
+            "diag/kl_monitor_tera": kl[tera].mean().item() if bool(tera.any()) else float("nan"),
+            "diag/kl_monitor_tera_rows": tera.float().mean().item()}
+
+
 # ---------------------------------------------------------------- distillation (--distill)
 
 class DistillSet:
@@ -465,7 +494,8 @@ HEADS_ONLY = ("value_head.", "aux_")  # what trains during --critic-warmup-steps
 
 def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio: bool, anchor: Net | None = None,
                anchor_coef: float = 0.0, heads_only: bool = False,
-               distill: DistillSet | None = None, ent_coef: float | None = None) -> dict[str, float]:
+               distill: DistillSet | None = None, ent_coef: float | None = None,
+               monitor: Net | None = None) -> dict[str, float]:
     keys = model_keys(net.gen) + ["drop_seed"]
     tensors = {k: torch.from_numpy(np.ascontiguousarray(v)).to(device) for k, v in data.items()}
     n = len(data["action"])
@@ -490,8 +520,10 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
         m.add("diag/behaviour_ratio_sd", rho.std().item())
         m.add("diag/behaviour_off_clip", ((rho - 1).abs() > args.clip_range).float().mean().item())
     m.add("perf/damage_s", time.time() - t0)
-    if anchor is not None:
-        tensors["logp_anchor"] = anchor_logp(anchor, tensors, keys, dmg_all, device)
+    mon = monitor_kl(net, monitor, tensors, keys, dmg_all, device) if monitor is not None else {}
+    if anchor is not None:  # a v2.1 anchor of a spec v2.2a learner sees the v2.1 view (policy_view)
+        aview, admg = policy_view(net, anchor, tensors, keys, dmg_all)
+        tensors["logp_anchor"] = anchor_logp(anchor, aview, keys, admg, device)
     net.train()
     frozen_now = []
     if heads_only:  # critic warm-up: policy and trunk frozen (no grad -> AdamW skips them: no decay, no moments)
@@ -573,6 +605,7 @@ def ppo_update(net: Net, opt, data: dict, args, device, amp: bool, measure_ratio
     for prm in frozen_now:
         prm.requires_grad_(True)
     st = m.means()
+    st.update(mon)  # --kl-monitor (empty without it)
     if anchor is not None:
         st["perf/kl_anchor_coef"] = anchor_coef
     if ent_coef is not None:  # --ent-schedule linear only (the default path logs nothing new)
@@ -653,6 +686,14 @@ def parse_args(argv=None):
     a("--guard-entropy-rel", type=float, default=0.0,
       help="entropy guard at this multiple of the mean entropy of this process's first 5 updates (if no max)")
     a("--kl-anchor", type=Path, help="frozen v2 net: add beta(t) * KL(anchor || pi) to the loss")
+    a("--kl-monitor", type=Path, default=None,
+      help="frozen v2 net (e.g. a fork's parent): log KL(pi || it) over every rollout at the update's starting weights "
+           "(diag/kl_monitor*, and a train.log line) while the step counter is <= --kl-monitor-until; no loss term")
+    a("--kl-monitor-until", type=int, default=None, help="--kl-monitor: last step counter monitored (absolute)")
+    a("--own-tera-visible", action="store_true",
+      help="spec v2.2a for the learner (porygon.v2.spec.OWN_TERA_SPEC; gen 9, --collector fastenv): its observations "
+           "carry its own tera types from the request from turn 1; its checkpoints / snapshots are flagged "
+           "own_tera_visible; v2.1 pool / frozen / anchor nets keep the v2.1 view (v21_view)")
     a("--kl-anchor-coef", type=float, default=0.0, help="beta at step 0 (linear decay to 0)")
     a("--kl-anchor-decay-steps", type=int, default=50_000_000, help="env steps (lineage counter) at which beta = 0")
     a("--critic-warmup-steps", type=int, default=0, help="until this many env steps only value + aux heads train")
@@ -906,6 +947,12 @@ class Trainer:
             self.net = Net(self.gen, **model_cfg(args))
             save(self.net, self.run_dir / "init_model.pt", counters=dict(self.counters))  # step-0 weights (drift analyses)
         assert self.net.gen == self.gen, f"model gen {self.net.gen} vs format {args.format}"
+        if getattr(self.net, "own_tera_visible", False) and not args.own_tera_visible:
+            raise SystemExit(f"{args.resume} is a spec v2.2a policy (own_tera_visible): resume it with --own-tera-visible")
+        if args.own_tera_visible:  # before the actor / EMA copies: every save of this learner carries the flag
+            if self.gen < 9 or args.collector != "fastenv":
+                raise SystemExit("--own-tera-visible needs a gen-9 format and --collector fastenv")
+            self.net.own_tera_visible = True
         self.net.to(self.device).train()
         self.opt = torch.optim.AdamW(self.net.param_groups(args.weight_decay), lr=args.lr, betas=(0.9, 0.999),
                                      eps=1e-5, fused=self.device.type == "cuda")
@@ -935,6 +982,12 @@ class Trainer:
             for prm in self.anchor.parameters():
                 prm.requires_grad_(False)
             assert self.anchor.gen == self.gen, f"anchor gen {self.anchor.gen}"
+        self.kl_monitor = None
+        if args.kl_monitor is not None:
+            self.kl_monitor = load(args.kl_monitor, self.device).eval()
+            for prm in self.kl_monitor.parameters():
+                prm.requires_grad_(False)
+            assert self.kl_monitor.gen == self.gen, f"kl-monitor gen {self.kl_monitor.gen}"
         self.distill = None
         if args.distill:
             self.distill = DistillSet(args.distill, self.gen, args.distill_val_frac, np.random.default_rng(args.seed))
@@ -978,7 +1031,11 @@ class Trainer:
                  f"{args.pool_battles} pool "
                  f"battles on ports {ports}, params={n_params:,}, cfg={self.net.cfg}, device={self.device}, "
                  f"amp={self.amp}, overlap={not args.no_overlap}, resume={args.resume}, "
-                 f"steps={self.counters['steps']:,}, {lr_schedule_desc(args)}")
+                 f"steps={self.counters['steps']:,}, {lr_schedule_desc(args)}"
+                 + (", spec v2.2a (own tera visible)" if args.own_tera_visible else ""))
+        if self.kl_monitor is not None:
+            self.log(f"kl-monitor: KL(pi || {args.kl_monitor}) on every update while steps <= "
+                     f"{args.kl_monitor_until if args.kl_monitor_until is not None else 'always'} (no loss term)")
         if self.distill is not None:
             self.log(f"distill: {self.distill.summary()}; coef {args.distill_coef}, batch {args.distill_batch}, "
                      f"reload every {args.distill_reload_every} updates (0 = never)")
@@ -1088,9 +1145,18 @@ class Trainer:
                     m.__dict__.pop("_cache_key", None)
             pending.clear()
 
+    @staticmethod
+    def _opp_view(net: Net | None, batch: dict) -> dict:
+        """The decision batch as `net` sees it: in a spec v2.2a env (FastCollector._opp_obs adds tera_v21 /
+        tera_p_v21) a v2.1 net (no own_tera_visible) gets the v2.1 view; else the batch itself."""
+        if "tera_v21" in batch and not getattr(net, "own_tera_visible", False):
+            return {**batch, "tera": batch["tera_v21"], "tera_p": batch["tera_p_v21"]}
+        return batch
+
     @torch.no_grad()
     def _opp_logits(self, net: Net, batch: dict) -> torch.Tensor:
         """One pool net's float32 CPU logits on its decision batch (one forward)."""
+        batch = self._opp_view(net, batch)
         t = batch_to_tensors(batch, self.device, keys=model_keys(self.gen) + ["drop_seed"])
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
             return net(t, aux=False)["logits"].float().cpu()
@@ -1144,7 +1210,8 @@ class Trainer:
                         if stack is None:
                             stack = stacks[key] = OppStack(nets[chunk[0]])
                         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
-                            out, refills = stack.logits([nets[i] for i in chunk], [items[i][1] for i in chunk])
+                            out, refills = stack.logits([nets[i] for i in chunk],
+                                                        [self._opp_view(nets[i], items[i][1]) for i in chunk])
                     except Exception as e:  # the speed-up must not stop training: per-net forwards from now on
                         self.__dict__["opp_stack_off"] = True
                         stacks.clear()
@@ -1455,10 +1522,17 @@ class Trainer:
                         if self.anchor is not None else 0.0)
                 use_anchor = self.anchor is not None and (beta > 0 or measure)  # after the decay: monitor only
                 heads_only = c["steps"] < a.critic_warmup_steps
+                mon = self.kl_monitor if self.kl_monitor is not None and (
+                    a.kl_monitor_until is None or c["steps"] <= a.kl_monitor_until) else None
                 st = ppo_update(self.net, self.opt, data, a, self.device, self.amp, measure,
                                 anchor=self.anchor if use_anchor else None, anchor_coef=beta, heads_only=heads_only,
                                 distill=self.distill,
-                                ent_coef=ent_at(a, c["steps"]) if a.ent_schedule == "linear" else None)
+                                ent_coef=ent_at(a, c["steps"]) if a.ent_schedule == "linear" else None,
+                                monitor=mon)
+                if mon is not None:
+                    self.log(f"kl-monitor @ {c['steps']:,}: KL(pi || {a.kl_monitor.name}) {st['diag/kl_monitor']:.4f}, "
+                             f"rows with a legal tera action {st['diag/kl_monitor_tera']:.4f} "
+                             f"({st['diag/kl_monitor_tera_rows']:.1%} of {n:,})")
                 if self.ema is not None:
                     self.ema.update(self.net)
                 c["updates"] += 1

@@ -73,6 +73,26 @@ FIELD_NUM_DIM = len(FIELD_NUM)
 # with terastallization.
 N_OPP_CLASSES = 7 + 2 * KM
 
+# Spec v2.2a (council P1, 2026-11-24): v2.1 + our own `tera` / `tera_p` (slots 0-5) from the owner's request teraType
+# (matched by ident, as porygon.search.request_tera), from turn 1, in gen 9; `terastallized` stays 0 until
+# -terastallize; shapes, aux targets and legal actions unchanged. A per-POLICY flag (checkpoint key
+# `own_tera_visible`, `porygon.v2.model.save`), not a new SPEC_VERSION: v2.1 policies keep their inputs. v2.1 fills
+# our tera / tera_p only from poke-env's tera_type, which poke-env sets at terastallization, so `v21_view` (our slots
+# zeroed where `terastallized` is 0) turns a v2.2a observation back into the v2.1 one.
+OWN_TERA_SPEC = "2.2a"
+
+
+def v21_view(obs: dict) -> dict:
+    """The v2.1 view of a v2.2a observation or batch (numpy arrays or torch tensors with any leading dims): a shallow
+    copy whose `tera` / `tera_p` have our slots 0-5 zeroed where `mon_num` terastallized is 0. Inputs unchanged."""
+    pre = obs["mon_num"][..., :6, MON_NUM.index("terastallized")] == 0
+    tera, tera_p = obs["tera"], obs["tera_p"]
+    tera = tera.clone() if hasattr(tera, "clone") else tera.copy()
+    tera_p = tera_p.clone() if hasattr(tera_p, "clone") else tera_p.copy()
+    tera[..., :6][pre] = 0
+    tera_p[..., :6, :][pre] = 0
+    return {**obs, "tera": tera, "tera_p": tera_p}
+
 
 def fields(gen: int) -> dict[str, tuple[tuple[int, ...], type]]:
     """name -> (shape, numpy dtype) of every observation field."""
