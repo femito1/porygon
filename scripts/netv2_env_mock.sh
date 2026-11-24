@@ -1316,6 +1316,7 @@ p1ttree() {  # p4tree + G9-P4 started long ago (its own save in job 1175374) + M
   CP=$N/council/p1-tera; chmod -R u+w "$CP" 2> /dev/null; rm -rf "$CP"; mkdir -p "$CP/parent" "$CP/pool/frozen"
   PAR=$CP/parent/ckpt_02210021139.pt; echo parent > "$PAR"; chmod a-w "$PAR"; echo prereg > "$CP/PREREG.txt"; chmod a-w "$CP/PREREG.txt"
   for x in 02205018000 02207518000 02210018000; do echo "g9q-$x" > "$CP/pool/$x.pt"; done; echo P3 > "$CP/pool/frozen/P3-g9-s2.pt"; echo best > "$CP/pool/frozen/best-02052532799.pt"
+  chmod a-w "$CP/pool/frozen" "$CP/pool"  # read-only dirs, as on the cluster (cp -rp keeps the modes)
   export NV2_P1T_PARENT_MD5=$(md5sum < "$PAR" | cut -c1-8) NV2_P1T_PRE_MD5=$(md5sum < "$CP/PREREG.txt" | cut -c1-8)
   export NV2_P1T_POOL_MD5=$(cd "$CP/pool" && find . -name '*.pt' -printf '%P %s\n' | LC_ALL=C sort | md5sum | cut -c1-8)
   printf '#!/bin/bash\nexec python3 "$@"\n' > "$N/bin/py-tree-2e03cc6"; chmod +x "$N/bin/py-tree-2e03cc6"

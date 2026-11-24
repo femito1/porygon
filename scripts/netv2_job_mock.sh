@@ -712,7 +712,7 @@ if [ -z "${MOCK_SKIP_G9T:-}" ] && [ -z "${MOCK_SKIP_G9Q2:-}" ] && [ -z "${MOCK_S
     echo "== S21: council P1 in job 1175374 (MODE p1tera): E, E-cd, C, C-cd, then G9-P4 again (stub saves)"
     p4tree18; echo "2026-11-16T21:10:00 x g9 1173274" > "$M/nv2/runs/g9p4/G9P4_STARTED"; echo p1tera > "$G/MODE"; rm -f "$M/sbatch.log" "$G/HOLD"; echo 46068 > "$M/gpu_mib-1175374"
     CP=$M/nv2/council/p1-tera; mkdir -p "$CP/parent" "$CP/pool/frozen"; PAR=$CP/parent/ckpt_02210021139.pt; echo parent > "$PAR"; chmod a-w "$PAR"
-    echo prereg > "$CP/PREREG.txt"; chmod a-w "$CP/PREREG.txt"; for x in 02205018000 02210018000; do echo "g9q-$x" > "$CP/pool/$x.pt"; done; echo P3 > "$CP/pool/frozen/P3-g9-s2.pt"
+    echo prereg > "$CP/PREREG.txt"; chmod a-w "$CP/PREREG.txt"; for x in 02205018000 02210018000; do echo "g9q-$x" > "$CP/pool/$x.pt"; done; echo P3 > "$CP/pool/frozen/P3-g9-s2.pt"; chmod a-w "$CP/pool/frozen" "$CP/pool"
     printf '#!/bin/bash\nexport PYTHONPATH=%s/nv2/tree-2e03cc6/src${PYTHONPATH:+:$PYTHONPATH}\nexec "$MOCK/bin/python" "$@"\n' "$M" > "$M/nv2/bin/py-tree-2e03cc6"; chmod +x "$M/nv2/bin/py-tree-2e03cc6"
     L21=$T/ws-netv2-1175374; mkdir -p "$L21/run/G9P4/pool"; echo p4-own > "$L21/run/G9P4/final_model.pt"; echo "2026-11-24 15:00:00 saved final_model.pt at 655,000,000 steps" > "$L21/run/G9P4/train.log"; touch "$L21/.nv2-watchdog"
     printf '2,240,061,139\n2,245,101,139\n2,240,051,139\n2,245,091,139\n660,000,000\n661,000,000\n' > "$M/save-steps-1175374"
