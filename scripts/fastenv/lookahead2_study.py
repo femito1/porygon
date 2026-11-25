@@ -61,7 +61,7 @@ async def bench(a) -> int:
     net = ST.load_net(a.net, "cpu")
     leaf = ST.load_net(a.net, a.leaf_device) if a.leaf_device != "cpu" else net
     pool = LA.LookaheadPool(a.workers)
-    gen = 9
+    gen = int(a.format[3:a.format.index("random")])  # gen9randombattle -> 9, gen4randombattle -> 4
     if a.rows:
         rows = [json.loads(x) for x in open(a.rows) if x.strip()]
         want: dict[tuple, set] = {}

@@ -12,7 +12,13 @@ posterior with nothing revealed).
 Counters the conversion cannot carry exactly (sleep / toxic counts, protect count, timed screens and weather) are
 the root's value plus the engine's change since the root, so a state equal to the root reproduces the root.
 
-Gen9 only (the gates' scope); needs PORYGON_GEN=9, gloria's .engine-gen9 and netv2's porygon.v2 on the path.
+gen9 and gen4 (LA2-gen4, 11-24): PORYGON_GEN must match the engine build on the path (gen9: gloria's .engine-gen9;
+gen4: gloria's .venv poke_engine, the gen4 build), and netv2's porygon.v2 must be importable. What is generation-
+dependent: the data of `is_status_move` (PORYGON_GEN's gen), the slot of an opponent mon that comes in (`fresh_opp`,
+the battle's gen: its gen's random-battle library, so gen4's typed Hidden Powers among its candidates) and the
+durations a new side condition's age is read from (`SCREEN_LEN_BY_GEN`). Everything else is shared; gen4 has no
+terastallization (the engine's `terastallized` is always False there), terrain or Aurora Veil. gen9 is unchanged
+(byte-identical leaves: `scripts/fastenv/la2_gen4.py ident`).
 
     root = LeafRoot(battle, first_seen)          # once per decision
     enc = LeafEncoder(root, conv)                # once per determinization (search.convert)
@@ -41,6 +47,12 @@ VOLATILE_EFFECT = {e.name.replace("_", ""): k for k, e in enumerate(E.EFFECTS) i
 SKIP_COLS = [k for k, e in enumerate(E.EFFECTS) if e in S.SKIP_EFFECTS]
 SCREEN_ATTR = ["reflect", "light_screen", "aurora_veil", "safeguard", "mist", "tailwind", "lucky_chant"]
 SCREEN_LEN = [5, 5, 5, 5, 5, 3, 5]  # search.SCREEN_TURNS, in the encoder's SCREENS order
+# A side condition set during the lookahead turn: its age is (the engine's initial duration - turns left). The engine
+# (poke-engine genx, every gen build) sets SIDE_CONDITION_DURATION 5 and TAILWIND_DURATION 4 (no Light Clay). gen4
+# uses those; gen9 keeps the gates' SCREEN_LEN (tailwind 3, so a new tailwind reads age 0 instead of 1/8 there;
+# kept for byte-identical gen9 leaves).
+SCREEN_LEN_BY_GEN = {9: SCREEN_LEN, 4: [5, 5, 5, 5, 5, 4, 5]}
+GEN = S.GEN_NUM  # PORYGON_GEN: the engine build's generation
 HAZARD_ATTR = [("stealth_rock", 1), ("spikes", 3), ("toxic_spikes", 2), ("sticky_web", 1)]
 BOOST_ATTR = ["attack_boost", "defense_boost", "special_attack_boost", "special_defense_boost", "speed_boost",
               "accuracy_boost", "evasion_boost"]
@@ -49,8 +61,8 @@ assert len(BOOST_ATTR) == len(BOOSTS) and len(SCREEN_ATTR) == 7
 
 
 @cache
-def is_status_move(move_id: str) -> bool:
-    entry = E.gendata(9).moves.get(move_id)
+def is_status_move(move_id: str, gen: int = GEN) -> bool:
+    entry = E.gendata(gen).moves.get(move_id)
     return bool(entry) and entry.get("category") == "Status"
 
 
@@ -134,15 +146,18 @@ class LeafRoot:
 
 
 @cache
-def fresh_opp(species: str, level: int) -> dict[str, np.ndarray]:
-    """The real encoder's slot for an opponent mon that just came in with nothing revealed (one-slot arrays)."""
-    mon = Pokemon(gen=9, species=species)
+def fresh_opp(species: str, level: int, gen: int = 9) -> dict[str, np.ndarray]:
+    """The real encoder's slot for an opponent mon that just came in with nothing revealed (one-slot arrays), in
+    the battle's generation `gen` (its random-battle library and data: gen4's candidates include typed Hidden
+    Powers)."""
+    mon = Pokemon(gen=gen, species=species)
     mon._level = level
     mon._current_hp, mon._max_hp = 100, 100
 
     class _B:  # what _encode_opp reads from the battle
-        gen, trapped = 9, False
-    out = E.empty(9)
+        trapped = False
+    _B.gen = gen
+    out = E.empty(gen)
     E._encode_opp(out, 6, mon, _B())
     return {k: v[6].copy() for k, v in out.items() if v.ndim >= 1 and v.shape[0] == 12}
 
@@ -178,6 +193,7 @@ class LeafEncoder:
             self.keep.append([k for k in range(len(E.EFFECTS)) if row[EFFECT0 + k] > 0
                               and E.EFFECTS[k].name.replace("_", "") not in vol])
         self.unseen = [(m.id, m.level) for m in o2[root.n_opp:]]
+        self.screen_len = SCREEN_LEN_BY_GEN.get(root.gen, SCREEN_LEN)
 
     def encode(self, state: pe.State, turns: int = 0) -> dict[str, np.ndarray]:
         """The leaf's observation; `turns`: full turns since the root (the turn counter and per-turn flags)."""
@@ -194,7 +210,7 @@ class LeafEncoder:
         for k in range(root.n_opp, 6):
             m = opp[k]
             if k == a2 or m.hp < m.maxhp or m.status.lower() != "none":
-                tpl = fresh_opp(*self.unseen[k - root.n_opp])
+                tpl = fresh_opp(*self.unseen[k - root.n_opp], root.gen)
                 for name, v in tpl.items():
                     obs[name][free] = v
                 slots.append(free)
@@ -344,7 +360,7 @@ class LeafEncoder:
         # screens and hazards
         for si, side in ((0, s1), (1, s2)):
             sc, row = side.side_conditions, obs["side_num"][si]
-            for k, (attr, ln) in enumerate(zip(SCREEN_ATTR, SCREEN_LEN)):
+            for k, (attr, ln) in enumerate(zip(SCREEN_ATTR, self.screen_len)):
                 rem = getattr(sc, attr)
                 row[k] = float(rem > 0)
                 row[7 + k] = self._age(rem > 0, self.r_screens[si][k] > 0, row[7 + k], self.r_screens[si][k],

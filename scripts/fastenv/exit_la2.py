@@ -6,7 +6,8 @@ into G9q-cd@805M. Subcommands, run in order by scripts/fastenv/exit_pilot.sbatch
            game one decision per side, uniform over the side's decisions with >= 2 legal actions (sha1(seed, game,
            side)); one F2-style record per chosen (game, side) with the self-play forward's T-1 probabilities there.
            Ties, turn-cap games and crashes are dropped. gzip'd JSONL parts (rec-a<attempt>-w<w>-NNNN.jsonl.gz, each
-           committed by its .json marker). Re-running continues (finished parts count).
+           committed by its .json marker). Re-running continues (finished parts count). --all-decisions (LA2-gen4's
+           leaf parity) also lists every decision of the side in `all_decisions` ({idx, n_legal, turn, didx}).
   label    replay each record (netsearch_study.replay_targets, data's StreamReplayer), the net's p on the replayed
            battle (parity vs the self-play p: max |dp| <= --parity-tol, same legal set; else dropped), the v2 obs,
            one lookahead2 call (K worlds, the module defaults of LookaheadPlayer) and pi_LA (the exact distribution
@@ -132,16 +133,16 @@ def verdict_line(t1: dict, t2: dict) -> str:
 
 # ---------------------------------------------------------------- gen
 
-def reader(w, fifo, tq, out, attempt, counter, errq, seed, fmt) -> None:
+def reader(w, fifo, tq, out, attempt, counter, errq, seed, fmt, all_decisions=False) -> None:
     try:
-        _reader(w, fifo, tq, out, attempt, counter, seed, fmt)
+        _reader(w, fifo, tq, out, attempt, counter, seed, fmt, all_decisions)
     except BaseException as e:  # noqa: BLE001  (reported to the main process, which fails the run)
         import traceback
         errq.put(f"reader {w}: {type(e).__name__}: {e}\n{traceback.format_exc()[-2000:]}")
         raise
 
 
-def _reader(w, fifo, tq, out, attempt, counter, seed, fmt) -> None:
+def _reader(w, fifo, tq, out, attempt, counter, seed, fmt, all_decisions=False) -> None:
     lines: queue.Queue = queue.Queue(maxsize=4096)
 
     def pump():
@@ -195,6 +196,9 @@ def _reader(w, fifo, tq, out, attempt, counter, seed, fmt) -> None:
                                             "didx": d["idx"], "legal": d["legal"], "probs": d["probs"]}],
                              "z": 1 if g["winner"] == f"p{side + 1}" else -1, "game": g["game"],
                              "game_id": game_hash(g["game"]), "turns": g["turns"], "n_candidates": len(cands)})
+                if all_decisions:
+                    recs[-1]["all_decisions"] = [{"idx": x["e"], "n_legal": x["n_legal"], "turn": x["turn"],
+                                                  "didx": x["idx"]} for x in decs if x["side"] == side]
             stats["games"] += 1
             stats["records"] += len(recs)
             games_in_buf[0] += 1
@@ -251,7 +255,7 @@ def cmd_gen(a) -> int:
     tqs = [ctx.Queue() for _ in range(a.workers)]
     errq = ctx.Queue()
     procs = [ctx.Process(target=reader, args=(w, fifos[w], tqs[w], str(out), attempt, counters[w], errq, a.seed,
-                                              a.format), daemon=True) for w in range(a.workers)]
+                                              a.format, a.all_decisions), daemon=True) for w in range(a.workers)]
     for p in procs:
         p.start()
     sys.path.insert(0, str(HERE))
@@ -644,6 +648,7 @@ def main() -> int:
     g.add_argument("--device", default="cuda")
     g.add_argument("--fifo-dir", default=os.environ.get("TMPDIR", "/tmp"))
     g.add_argument("--max-hours", type=float, default=6.0)
+    g.add_argument("--all-decisions", action="store_true", help="records also list every decision of their side")
     lb = sub.add_parser("label")
     lb.add_argument("--records", required=True, help="glob of record parts")
     lb.add_argument("--net", required=True)
