@@ -2,41 +2,63 @@
  "source_dirs": [
   "/home/nand/.claude/projects/-home-nand-Documents-personal-projects-ShowdownAgent"
  ],
- "transcript_files": 131,
- "main_session_files": 10,
- "subagent_files": 121,
- "sessions": 10,
- "subagents": 118,
+ "transcript_files": 143,
+ "main_session_files": 11,
+ "subagent_files": 132,
+ "sessions": 13,
+ "subagents": 135,
  "first": "2026-10-19T10:59:53.958Z",
- "last": "2026-11-17T12:33:14.338Z",
+ "last": "2026-11-25T12:04:16.655Z",
+ "increments": [
+  {
+   "first": "2026-10-19T10:59:53.958Z",
+   "last": "2026-11-17T12:33:14.338Z",
+   "scan": "full"
+  },
+  {
+   "after": "2026-11-17T12:33:14.338Z",
+   "last": "2026-11-25T12:04:16.655Z",
+   "scan": "incremental",
+   "transcript_first_on_disk": "2026-10-25T17:00:13.882Z",
+   "new_sessions": 3,
+   "new_subagents": 17
+  }
+ ],
  "totals": {
-  "input_tokens": 1379819,
-  "cache_creation_input_tokens": 268605420,
-  "cache_read_input_tokens": 4158689249,
-  "output_tokens": 18164005,
-  "requests": 15773
+  "input_tokens": 1545767,
+  "cache_creation_input_tokens": 307209923,
+  "cache_read_input_tokens": 4791364745,
+  "output_tokens": 20956384,
+  "requests": 18162
  },
  "by_model": {
-  "claude-opus-5-5": {
-   "input_tokens": 167546,
-   "cache_creation_input_tokens": 68446333,
-   "cache_read_input_tokens": 425121942,
-   "output_tokens": 1219196,
-   "requests": 1730
-  },
   "databricks-claude-opus-5-5": {
-   "input_tokens": 1211484,
-   "cache_creation_input_tokens": 199066688,
-   "cache_read_input_tokens": 3727675153,
-   "output_tokens": 16929061,
-   "requests": 14010
+   "input_tokens": 1302736,
+   "cache_creation_input_tokens": 227318757,
+   "cache_read_input_tokens": 4038277037,
+   "output_tokens": 18314937,
+   "requests": 15333
   },
   "<synthetic>": {
    "input_tokens": 0,
    "cache_creation_input_tokens": 0,
    "cache_read_input_tokens": 0,
    "output_tokens": 0,
-   "requests": 19
+   "requests": 24
+  },
+  "system.ai.claude-opus-5-5": {
+   "input_tokens": 74696,
+   "cache_creation_input_tokens": 10352434,
+   "cache_read_input_tokens": 322073612,
+   "output_tokens": 1406503,
+   "requests": 1061
+  },
+  "claude-opus-5-5": {
+   "input_tokens": 167546,
+   "cache_creation_input_tokens": 68446333,
+   "cache_read_input_tokens": 425121942,
+   "output_tokens": 1219196,
+   "requests": 1730
   },
   "databricks-claude-opus-4-8": {
    "input_tokens": 789,
@@ -55,32 +77,32 @@
    "requests": 1864
   },
   "2026-11": {
-   "input_tokens": 1199310,
-   "cache_creation_input_tokens": 193679901,
-   "cache_read_input_tokens": 3688214819,
-   "output_tokens": 16807186,
-   "requests": 13909
+   "input_tokens": 1365258,
+   "cache_creation_input_tokens": 232284404,
+   "cache_read_input_tokens": 4320890315,
+   "output_tokens": 19599565,
+   "requests": 16298
   }
  },
  "tool_calls": {
-  "Bash": 12900,
-  "SendMessage": 554,
-  "Write": 435,
-  "Monitor": 360,
-  "Edit": 303,
-  "TaskStop": 289,
-  "Read": 274,
-  "mcp__websearch__web_fetch": 205,
+  "Bash": 14993,
+  "SendMessage": 565,
+  "Write": 528,
+  "Monitor": 397,
+  "Edit": 369,
+  "TaskStop": 322,
+  "Read": 309,
+  "mcp__websearch__web_fetch": 207,
   "mcp__websearch__web_search": 137,
-  "Agent": 99,
+  "Agent": 114,
   "WebFetch": 31,
-  "CronCreate": 20,
+  "CronCreate": 28,
   "mcp__tavily__tavily_search": 17,
-  "CronDelete": 14,
+  "CronList": 16,
+  "CronDelete": 16,
+  "AskUserQuestion": 15,
   "StructuredOutput": 14,
-  "AskUserQuestion": 12,
-  "ListAgents": 12,
-  "CronList": 8,
+  "ListAgents": 13,
   "mcp__tavily__tavily_extract": 4,
   "Skill": 4,
   "WebSearch": 3,
@@ -91,5 +113,5 @@
   "mcp__tavily__tavily_map": 1,
   "mcp__websearch__search_status": 1
  },
- "tool_calls_total": 15704
+ "tool_calls_total": 18111
 }

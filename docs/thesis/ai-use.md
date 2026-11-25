@@ -2,13 +2,13 @@
 
 Imperial requires students to use generative AI only where their programme allows it and to acknowledge how they used
 it. Agree the permitted use with the supervisor before the project period (May 2027) and declare it in the thesis.
-This file records the facts needed for that declaration. Refresh the numbers with
-`python3 scripts/thesis/ai_usage.py > docs/thesis/data/ai_usage.json`.
+This file records the facts needed for that declaration. Refresh the numbers incrementally (old transcripts are deleted after 30 days, so a fresh full scan undercounts):
+`python3 scripts/thesis/ai_usage.py --base docs/thesis/data/ai_usage.json > /tmp/u.json && mv /tmp/u.json docs/thesis/data/ai_usage.json`.
 
 ## How the work was done
 - **Before AI assistance [M, git]:** 4 commits on 2025-03-02/03 (`25462f2` "first version of project" … training-loop
   prototype; +22,514 / −72 lines). No commits between 2025-03-03 and 2026-10-19.
-- **With Claude Code (2026-10-19 onward) [M, git, 11-17]:** 385 commits, +88,110 / −26,403 lines. The system as it now
+- **With Claude Code (2026-10-19 onward) [M, git, 11-17]:** 385 commits, +88,110 / −26,403 lines; by 11-25, 458 commits, +113,217 / −27,062 lines (`git rev-list --count --since=2026-10-19 HEAD`; `git log --since=2026-10-19 --numstat`). The system as it now
   stands (Porygon: v1/v2 networks, PPO trainer, fastenv, search + fitted evaluation, lookahead2, deepen, human-data
   pipeline, benchmarks, sequential-test tooling) was written in this period by Claude Code agents directed by the
   student.
@@ -33,24 +33,26 @@ This file records the facts needed for that declaration. Refresh the numbers wit
 - **Commit attribution:** by the student's choice, commits carry only the student's name (no co-author trailers), so
   git history alone does not show AI authorship; this file and the transcripts are the record.
 
-## Usage volume [M, local transcripts, `data/ai_usage.json`, snapshot 2026-11-17 12:33Z]
+## Usage volume [M, local transcripts, `data/ai_usage.json`; full scan to 2026-11-17 12:33Z + incremental scan to 2026-11-25 12:04Z]
 | quantity | value |
 |---|---|
-| transcript window | 2026-10-19 10:59Z → 2026-11-17 12:33Z |
-| main sessions | 10 |
-| subagents (stream / helper agents) | 118 (121 subagent transcript files) |
-| model requests | 15,773 (Claude Opus 5.5 ≈ 99.8%; 14 requests Opus 4.8) |
-| tool calls | 15,704 (Bash 12,900; SendMessage 554; Write 435; Monitor 360; Edit 303; Read 274; web fetch 205; …) |
-| output tokens | 18.2 M |
-| input tokens (uncached) | 1.38 M |
-| cache-write input tokens | 269 M |
-| cache-read input tokens | 4.16 B |
-| by month (requests / output tokens) | 2026-10: 1,864 / 1.36 M; 2026-11 (to the 17th): 13,909 / 16.8 M |
+| transcript window | 2026-10-19 10:59Z → 2026-11-25 12:04Z |
+| main sessions | 13 (10 to 11-17, +3 started after it) |
+| subagents (stream / helper agents) | 135 (118 to 11-17, +17) |
+| model requests | 18,162 (Claude Opus 5.5 ≈ 99.8%; 14 requests Opus 4.8; 24 `<synthetic>` client-side records) |
+| tool calls | 18,111 (Bash 14,993; SendMessage 565; Write 528; Monitor 397; Edit 369; TaskStop 322; Read 309; web fetch 207; …) |
+| output tokens | 21.0 M |
+| input tokens (uncached) | 1.55 M |
+| cache-write input tokens | 307 M |
+| cache-read input tokens | 4.79 B |
+| by month (requests / output tokens) | 2026-10: 1,864 / 1.36 M; 2026-11 (to the 25th): 16,298 / 19.6 M |
+| not included | the research council's members (headless runs in their own worktree; logged in `docs/council/**/BUDGET.tsv`) |
 
 Caveats:
-- **Coverage gap risk:** Claude Code deletes transcripts older than its `cleanupPeriodDays` setting (30 days by
-  default). The earliest kept transcript is from 2026-10-19, the first day of AI-assisted commits, so the window
-  looks complete. Older transcripts will disappear unless the setting is raised, so refresh the numbers before then.
+- **Coverage:** Claude Code deletes transcripts older than its `cleanupPeriodDays` setting (30 days by default). On
+  11-25 the oldest transcript left on disk was from 10-25, so 10-19 → 10-25 survives only in the 11-17 full scan, which
+  the incremental refresh keeps as its base (`increments` in the JSON lists each window). Refresh at least every
+  30 days, always with `--base`. A session that spans a snapshot boundary is counted once, in the earlier window.
 - Token counts are from the API usage fields, de-duplicated per message id. They exclude other projects, e.g. the
   separate gpu-exploration project that set up cluster access.
 - The model id prefix `databricks-` is the serving route, not a different model.
