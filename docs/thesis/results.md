@@ -273,7 +273,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | g9q-29 | 2026-11-19 | G9q still improving: cd@1350 vs cd@805 (R1350) | G9q-cd @1355.04M vs G9q-cd @805.03M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3400 / 1700 | 52.05 [50.45, 53.62] [M] (naive 52.44, repeated CI [50.43, 54.45]) | g9q-cd1350/PREREG.txt (342e63f8) | IMPROVING (SUCCESS at look 17) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd1350/READING.txt` |
 | g9q-31 | 2026-11-23 | G9q still improving: cd@2030 vs cd@1350 (R2030) | G9q-cd @2035.04M vs G9q-cd @1355.04M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3600 / 1800 | 51.99 [50.40, 53.56] [M] (naive 52.22, repeated CI [50.25, 54.19]) | g9q-cd2030/PREREG.txt (7a68bf3e) | IMPROVING (SUCCESS at look 18) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q-cd2030/READING.txt` |
 
-### v2 PPO recipe arms (one change each) (13 rows)
+### v2 PPO recipe arms (one change each) (14 rows)
 
 | id | date | question | A vs B | harness | games / pairs | A's win % [95%] | prereg (md5) | verdict | src |
 |---|---|---|---|---|---|---|---|---|---|
@@ -290,6 +290,7 @@ Per-run constituents (13 gloria runs; each [M] from its `analysis.txt` unless ma
 | g9q-19 | 2026-11-16 | seed variance: G9q2 vs G9q @50M | G9q2 @50M vs G9q @50M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 1600 / 800 | 50.7 [48.5, 52.9] [M] | g9q2/PREREG.txt (5d218a36) | both FUTILITY: seed variance < ~2 points | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9q2/cmp/OVERALL.txt` |
 | g9q-20 | 2026-11-16 | bf16 autocast speed (A40, G9q recipe) | bf16 vs fp32 | trainer sps microbench (24 updates each) |  | 101.8 [M] | g9qbf/PREREG.txt (a77115fe) | SKIP (needs >= 1.15x): stay fp32 | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9qbf/SKIP.txt` |
 | g9q-22 | 2026-11-16 | entropy schedule 0.01 -> 0.001 (G9qent), cooled vs cooled | G9qent-cd @880M vs G9q-cd @885M | in-process fastenv simulator (spd_h2h / netv2_cmp_step), duplicate pairs | 3000 / 1500 | 50.64 [48.92, 52.48] [M] | g9qent/PREREG.txt (ecc8fe39) | NO GAIN (both FUTILITY) | `/vol/bitbucket/fr1226/porygon-ws-netv2/runs/g9qent/VERDICT.txt` |
+| g9q-33 | 2026-11-25 | Council P1: own pre-Tera visibility (spec v2.2a) — fork E (v2.2a learner) vs fork C (v2.1), 30M + 5M cd each from G9q@2210M | E-cd vs C-cd (T 0.5) | in-process fastenv (spd_h2h_tera, per-side encoder routing), duplicate pairs | 8000 / 4000 | 50.65 [49.65, 51.65] [M] | P1-TERA-PREREG.md (088a5650) | **PARK** (not shown at 30M; not a kill) | `/vol/bitbucket/fr1226/porygon-ws-netv2/council/p1-tera/VERDICT.txt` |
 
 ### Human behaviour cloning and the data-quality lever (P1-P4, U7) (19 rows)
 

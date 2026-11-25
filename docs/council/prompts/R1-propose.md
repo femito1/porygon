@@ -10,6 +10,9 @@ Radical redesigns are welcome. So are small sharp fixes.
 need: `docs/thesis/results.md` and `methods.md` at least; the code in `src/porygon/` if your idea depends on it. Web
 research is allowed and encouraged (papers, other bots, game-AI methods); cite URLs.
 
+**Previous sessions:** read BRIEF's "Council history". Build on items that passed. Retire or redesign items that
+failed, citing their verdict rows. Re-propose a withdrawn item only with an answer to the reason it was withdrawn.
+
 **Rules:**
 - Respect the BRIEF's hard rules.
 - Do not re-propose something in its "tried and did not help" list unless you name the specific reason the earlier test

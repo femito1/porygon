@@ -1,6 +1,6 @@
 # Council brief — Porygon (shared, identical for every member)
 
-Facts only, as of 2026-11-24. Every number cites a row id in `docs/thesis/data/results.csv` / `docs/thesis/results.md`
+Facts only, as of 2026-11-25. Every number cites a row id in `docs/thesis/data/results.csv` / `docs/thesis/results.md`
 (same ids). Read the sources yourself; this brief is a map, not an argument.
 
 ## The goal
@@ -59,6 +59,8 @@ Be the strongest Pokémon Showdown random-battle bot in **gen9** (primary) and *
   - ExIt-LA2, fine-tuning toward lookahead2's played policy: HARMFUL, 48.17 vs control (ns-27, ns-28).
   - ExIt with a soft completed-Q target on the same data (council P2, 11-24): no harm, no gain: 50.20 vs control (ns-33),
     50.09 vs parent (ns-34) ⇒ the ExIt-LA2 line is closed in both forms.
+- **Inputs:** own pre-Tera visibility as a 30M-step fork (council P1): 50.65 [49.65, 51.65] vs the v2.1 control (g9q-33),
+  PARK. A longer fork is not covered by this test.
 - **Recipe arms, one change each, cooled vs cooled:**
   - lr annealing G9r (g9q-04/05); GAE λ 0.5 G9t (g9q-09/10); entropy schedule G9qent (g9q-22);
   - bf16 (g9q-20); EMA weights (v2g9-18); actor-stream overlap (v2g9-21).
@@ -75,17 +77,38 @@ Be the strongest Pokémon Showdown random-battle bot in **gen9** (primary) and *
 - **Lesson:** net-vs-net gains transfer only partly to Foul Play. Lookahead2's gain over its raw net vs Foul Play is
   +1.3 [−2.7, +5.3] (ns-20), and absent in short games (la2-len1).
 
+## Council history (previous sessions; details in `docs/council/sessions/*/PORTFOLIO.md` and `LEDGER.md`)
+- **Session 1 (2026-11-24):** 16 proposals → portfolio P1–P7 + follow-ups F1–F5.
+  - **P1, own pre-Tera visibility (spec v2.2a): PARK** (g9q-33: fork E vs fork C, 30M + 5M cd each, 50.65 [49.65,
+    51.65], 4,000 pairs). The encoders leave our own Tera type blank until we Terastallize (`fastenv/js/encoder_v2.js:28-29`);
+    60% of gen9 sets are Tera-ambiguous. Not shown at 30M: a longer fork, or bundling into a spec-fidelity branch, are open.
+  - **P2, ExIt with a soft completed-Q target: NO-GO** (ns-33, ns-34).
+  - **P3, gen4 re-baseline at fixed 200k: BUILD-LA2-GEN4** (fp4-12, v2g4-16, v2g4-17). Its follow-up, LA2-gen4 vs the raw
+    gen4 net, is PENDING.
+  - **Not yet tested:**
+    - P4, privileged-team baseline: offline gate first.
+    - P5, battle-evidence posterior (speed order, "unlocked"): offline step 0 first.
+    - P6, opponent-view reply prior: offline comparison first.
+    - P7, reveal-aware leaves: parked.
+    - F1 removed-item state, F2 `aux_tera` supervision, F3 `weather_elapsed`, F4 damage-feature fidelity (substitute,
+      Orichalcum Pulse / Hadron Engine, Tera Shell, Ice Face, grassy-terrain Earthquake; `damage.py:76-87`), F5
+      stratified world sampling.
+  - **Withdrawn, with reasons in the portfolio:** colder deployment temperature; search sparring partners in the league;
+    root reply-mixture; colder pool opponents; MC action-difference residual; bilateral forced switches (our
+    forced-switch leaves are in distribution, `lookahead2.py:13`); Rust IS-MCTS + CUDA-graph leaf server; damage-feature
+    NNUE.
+
 ## Resources (measured unless marked)
 - **Imperial Slurm, per-user caps:** multigpu 48 CPUs / 3 GPUs; tempgpu 64 CPUs / 4 GPUs.
-  - A30 (30 CPUs): G9q, the main gen9 run, ≈ 2.2B steps on 11-24.
+  - A30 (30 CPUs): G9q, the main gen9 run, ≈ 2.35B steps on 11-25.
   - A40 (10 CPUs): G9-P4 keep-alive (≈ 1.55k sps); **free for a new experiment**.
-  - T4 (10 CPUs): R1b-F, gen4 v2, ≈ 400 sps, ≈ 630M steps.
+  - T4 (10 CPUs): R1b-F, gen4 v2, ≈ 400 sps, ≈ 658M steps.
   - Data host: A16, 8 CPUs; replay crawler; in-process net-vs-net h2h ≈ 5k games/CPU-h, a 3,400-game test in ≈ 15 min.
   - One benchmark slot (24 CPUs + T4) for anything with search or Foul Play: 1000 raw-net games ≈ 2 h; 1000 lookahead2
     games ≈ 6 h.
   - The shared disk was 99% full: keep artifacts small.
 - **GPU Dojo VM:** 1 T4, 4 vCPU, ≈ 88 free GPU-h, counted while running; good for in-process h2h (≈ 25k games/h).
-- **Laptop:** sleeps, ≈ 5 GB free disk; no heavy compute.
+- **Laptop:** sleeps, ≈ 4 GB free disk; no heavy compute.
 - **Humans:** one person, who delegates; their Showdown account (bot-flagged ladder accounts) needs them present.
 - **Time:** the thesis runs to Sept 2027; the campaign continues.
 
